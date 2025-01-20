@@ -1,0 +1,100 @@
+<html>
+<head><meta charset="utf-8"><title>`wasi:io/poll` level- vs. edge-triggering · wasi · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/index.html">wasi</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html">`wasi:io/poll` level- vs. edge-triggering</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="405382890"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405382890" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405382890">(Dec 01 2023 at 15:11)</a>:</h4>
+<p>So it turns out the wild success I reported earlier porting <code>mio</code> and <code>tokio</code> to WASI Preview 2 wasn't so wildly successful after all.  Simple examples work, but things break when they get more complicated.  After an evening of debugging, I learned a few things:</p>
+<ul>
+<li><code>mio</code> really wants everything to be edge-triggered.  Native unix functions like <code>epoll</code> and <code>kqueue</code> can be configured for either edge- or level-triggering, and of course <code>mio</code> uses the edge option.  It also supports the more traditional POSIX <code>poll</code> function, which <em>only</em> supports level-triggering, but <code>mio</code> apparently converts that to edge-triggering with some fancy juggling that I don't completely understand yet.</li>
+<li><code>mio</code> already supports WASI Preview 1's <code>poll_oneoff</code>, but it apparently assumes it is edge-triggered.  I don't think that's true, though, is it?  This is a source of great confusion for me, because I was modeling the Preview 2 support on the <code>poll_oneoff</code> support.</li>
+<li>WASI Preview 2's <code>wasi:io/poll#poll</code> function is definitely level-triggered, so it needs the same treatment that POSIX <code>poll</code> gets.  Without it, <code>mio</code> will keep polling for both write- and read-ability and <code>wasi:io/poll#poll</code> will keep returning immediately because "yes, the handle is still ready for writing like I just told you 1000 times already".</li>
+</ul>
+<p>I'm going to keep cranking on this, but I could use some help answering this question: Is it correct to say that both Preview 1's <code>poll_oneoff</code> and Preview 2's <code>wasi:io/poll#poll</code> are level-triggered, i.e. if you ask either of them whether a socket is ready for writing, it will keep saying "yes" no matter how many times you ask it unless you actually do enough writing to trigger backpressure?</p>
+
+
+
+<a name="405383362"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405383362" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405383362">(Dec 01 2023 at 15:13)</a>:</h4>
+<blockquote>
+<p>Is it correct to say that both Preview 1's poll_oneoff and Preview 2's wasi:io/poll#poll are level-triggered</p>
+</blockquote>
+<p>Yes</p>
+
+
+
+<a name="405383564"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405383564" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405383564">(Dec 01 2023 at 15:14)</a>:</h4>
+<p>Ok, so <code>mio</code>'s existing WASI support is buggy and I should just ignore it, sounds like.</p>
+
+
+
+<a name="405383723"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405383723" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405383723">(Dec 01 2023 at 15:15)</a>:</h4>
+<p>Trying to think more on this, but yeah if mio expects edge triggered and preview1 "just" calls poll then sounds like you'll need to ignore it</p>
+
+
+
+<a name="405383755"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405383755" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405383755">(Dec 01 2023 at 15:15)</a>:</h4>
+<p>I'm not sure how widely used the preview1 integration was to flesh out bugs like this</p>
+
+
+
+<a name="405383977"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405383977" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405383977">(Dec 01 2023 at 15:16)</a>:</h4>
+<p>I'd have to dig more into exactly what mio wants here to help more though, I would not have expected that level-triggered would break things</p>
+
+
+
+<a name="405387644"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405387644" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405387644">(Dec 01 2023 at 15:35)</a>:</h4>
+<p>Alex, Lann, and I did a quick call to dig into this.  It looks like <code>mio</code>'s support for both <code>poll_oneoff</code> and POSIX poll are broken in subtle ways, which is what was causing my confusion.  I'm going to try to fix the POSIX bits and totally replace the WASI bits.</p>
+
+
+
+<a name="405394205"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405394205" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405394205">(Dec 01 2023 at 16:12)</a>:</h4>
+<p>Correction: looks like <code>mio</code>'s POSIX <code>poll</code> support is <em>not</em> broken after all.  I just didn't understand how it worked in the context of how it's used.  Looks like it will be a good pattern to follow for WASI Preview 2 support.</p>
+
+
+
+<a name="405395039"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405395039" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405395039">(Dec 01 2023 at 16:16)</a>:</h4>
+<p>Oh? How was the interest between read/write split given what we were looking at?</p>
+
+
+
+<a name="405395823"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405395823" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405395823">(Dec 01 2023 at 16:22)</a>:</h4>
+<p>initially, the <code>mio</code> code registers both read and write interest.  Then, when one of those triggers (say write readiness, for example), the selector internally deregisters write interest while keeping read interest enabled.  Then it unblocks tokio to do its write, if applicable, which will cause the <code>IoSourceState</code> interceptor to re-register both interests, which will cause the next poll to wake immediately, at which point the selector will deregister write interest again, which gives tokio a chance to write again, but this time it doesn't need to, so we go back and poll again, this time with only read interest, and we stay there blocked until there's something to read.</p>
+
+
+
+<a name="405396044"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405396044" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405396044">(Dec 01 2023 at 16:23)</a>:</h4>
+<p>so technically there's still a very minor inefficiency where we poll one extra time redundantly, but only once per useful I/O operation; there's no unbounded busy waiting</p>
+
+
+
+<a name="405397646"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405397646" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405397646">(Dec 01 2023 at 16:33)</a>:</h4>
+<p>ah ok I can sort of see that</p>
+
+
+
+<a name="405439771"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi%3Aio/poll%60%20level-%20vs.%20edge-triggering/near/405439771" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi.3Aio.2Fpoll.60.20level-.20vs.2E.20edge-triggering.html#405439771">(Dec 01 2023 at 21:20)</a>:</h4>
+<p>I've updated my <code>mio</code> fork with a rewrite of the WASI selector per the above discussion, and things are working nicely now.  I've also added a somewhat more complicated test using <code>tokio-postgres</code> to the test suite.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

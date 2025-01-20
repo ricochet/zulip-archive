@@ -1,0 +1,56 @@
+[
+    {
+        "content": "<p>I am building an embedded SQL database and experimenting with cranelift to generate efficient query operators. One of the main issues with jitted query executors is that they quickly become rather complex. You often want to inline calls made in loops, meaning that you have to emit code for many primitives and data structures. The task quickly becomes daunting if you add to that specialization for all data types. Now, I was wondering if it would be possible to write some library in rust, and store that in the program static assets. When it comes time to build the query, I could assemble fragments from that library, inlining where necessary. Now I have a couple of questions:</p>\n<ul>\n<li>\n<p>Could something like that be hacked together with rustc_codegen_cranelift<br>\nLet's say I can statically generate a set of functions. Could I simply declare/define them in a module at program startup and use them within the query I build at runtime?</p>\n</li>\n<li>\n<p>Is there any way those functions could be inlined? Does Cranelift even support that?<br>\nIf inlining functions are not an option, would there be a way to compile and store the basic blocks of the function bodies and stitch them together at runtime?</p>\n</li>\n<li>\n<p>does this approach even make any sense?</p>\n</li>\n</ul>\n<p>Sorry if any of those questions seem obvious, I'm not very experienced working with JITs :)</p>",
+        "id": 486065558,
+        "sender_full_name": "marin",
+        "timestamp": 1733310175
+    },
+    {
+        "content": "<p>one more question:</p>\n<ul>\n<li>Would it be possible to attach debug information to those fragments to pass compiled queries through a debugger?</li>\n</ul>",
+        "id": 486067110,
+        "sender_full_name": "marin",
+        "timestamp": 1733310674
+    },
+    {
+        "content": "<p>database queries are definitely outside of my expertise, but I'll try to take a crack at answering your questions</p>\n<blockquote>\n<p>Could something like that be hacked together with rustc_codegen_cranelift</p>\n</blockquote>\n<p>Is your input language Rust? If not, then I don't think it makes sense to use <code>rustc_codegen_cranelift</code>. you would want to write your own input-language-to-CLIF frontend instead.</p>\n<blockquote>\n<p>Is there any way those functions could be inlined? Does Cranelift even support that?</p>\n</blockquote>\n<p>Cranelift does not have an inlining pass today. It is something we want to add as an option eventually, but probably not something we would run automatically. In the meantime, it is expected that the CLIF producer (eg wasmtime's wasm-to-clif frontend or <code>rustc_codegen_cranelift</code>) has already done inlining where it was beneficial or desired.</p>\n<blockquote>\n<p>does this approach even make any sense?</p>\n</blockquote>\n<p>without knowing more, I suspect that you probably want to write your own query-language-to-clif frontend. other than that, I think it does make sense.</p>\n<p>I remember seeing a paper not too too long ago that benchmarked a bunch of different JIT compilers/frameworks in the context of JITing database queries. It may make sense for you to track that paper down and read it for more context and inspiration. If I can dredge it up, I'll link it here.</p>\n<blockquote>\n<p>Would it be possible to attach debug information to those fragments to pass compiled queries through a debugger?</p>\n</blockquote>\n<p>yes, primarily through <a href=\"https://docs.rs/cranelift-frontend/latest/cranelift_frontend/struct.FunctionBuilder.html#method.set_val_label\"><code>cranelift_frontend::FunctionBuilder::set_val_label</code></a>. although you may find gaps around certain corners of DWARF or incompleteness. certainly we don't do the best job of preserving debug info across all our optimizations; would certainly appreciate issues filed for any specific cases you run into so we can track, diagnose, and fix them. for the best debugging fidelity, disable optimizations.</p>",
+        "id": 486154301,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1733336708
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253990\">fitzgen (he/him)</span> <a href=\"#narrow/channel/217117-cranelift/topic/emmiting.20clif.20from.20rust.3F/near/486154301\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>Could something like that be hacked together with rustc_codegen_cranelift</p>\n</blockquote>\n<p>Is your input language Rust? If not, then I don't think it makes sense to use <code>rustc_codegen_cranelift</code>. you would want to write your own input-language-to-CLIF frontend instead.</p>\n</blockquote>\n<p>if I understood the proposal above correctly, the idea was to write a runtime library of sorts in Rust, and then take its functions and inline them directly into Cranelift-compiled JIT'd query code. Is that right, <span class=\"user-mention\" data-user-id=\"784653\">@marin</span> ?</p>\n<p>That seems plausible to me -- the technical bit that makes it work is that <code>rustc_codegen_cranelift</code> is ABI-compatible with LLVM Rust (the default/main toolchain), so if you access internal data structures, etc., everything <em>should</em> work just as if you had called a separately compiled function. If it doesn't, we would consider that a bug (either in <code>cg_clif</code> or Cranelift, depending on the issue).</p>\n<p>I also suspect you'd want to build a purpose-built inliner for this, at least at first, rather than try to build general framework in Cranelift: you have more information about intent and performance tradeoffs than a generic inliner's heuristics would, so you could know that, for example, you always want to inline simple field accessor functions in your runtime, and that they don't call back into the query code. The \"code transcription\" part of an inliner is the relatively simple part; the heuristics and the plumbing to operate over connected components of the callgraph is much harder, and that's the part you wouldn't need if you do \"manual inlining\" at runtime-library calls.</p>",
+        "id": 486155553,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733337159
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span>  yes that's correct! I wasn't even expecting to be able to work with rust datatype, but rather, just being able to write the operator in rust leverage monomorphisation to generate a specialized implementation for all my database types and reduce the maintenance burden. At runtime, I would assemble those building blocks into pipelines</p>\n<p><span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> are you thinking about this paper?  <a href=\"https://www.vldb.org/pvldb/vol11/p2209-kersten.pdf\">https://www.vldb.org/pvldb/vol11/p2209-kersten.pdf</a></p>",
+        "id": 486157005,
+        "sender_full_name": "marin",
+        "timestamp": 1733337741
+    },
+    {
+        "content": "<p>don't think it was that paper; the paper I'm thinking of included cranelift in its benchmark evaluation. I remember having some nitpicks about the way they used or presented cranelift but otherwise thinking it was good. it compared building the \"same\" query JIT with multiple approaches/frameworks, iirc</p>",
+        "id": 486157710,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1733338024
+    },
+    {
+        "content": "<p>ah, yeah, that paper is right on the tip of my neurons too, unfortunately not recalling the author or title... I'll dig a bit</p>",
+        "id": 486157801,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733338078
+    },
+    {
+        "content": "<p>As a first step, I will probably stick to compiling expressions in where clauses and maybe an aggregation operator. But even then, take the <code>group by</code> aggregation clause, for example. You could implement that as a hashmap, with a specialization for every possible key type. Being able to leverage the Rust ecosystem would be really neat.</p>",
+        "id": 486157885,
+        "sender_full_name": "marin",
+        "timestamp": 1733338097
+    },
+    {
+        "content": "<p>I'll run a search on google scholars, if it mentions cranelift it should pop up :)</p>",
+        "id": 486157944,
+        "sender_full_name": "marin",
+        "timestamp": 1733338127
+    }
+]

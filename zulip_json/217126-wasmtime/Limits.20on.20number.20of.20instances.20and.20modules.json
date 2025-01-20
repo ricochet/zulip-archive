@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>Hello,<br>\nI am evaluating Wasmtime and its limits. Using Rust embedding, I have done the following:</p>\n<p>Loading a tiny module, and creating and retaining as many instances as possible, the program crashes at instance 21843, 21844, or 21845, apparently using only 3GB of memory. The number doesn't change with reboots, or changing the system memory (e.g. from 8GB to 16GB).<br>\nWhat could cause this? Is there a way to increase this number?</p>\n<p>Similarly, I tried loading and retaining a module as many times as possible, and the program crashes at exactly 30,000 modules.<br>\nWhat could cause this? Is there a way to increase this number?</p>",
+        "id": 218228159,
+        "sender_full_name": "Matias Funder",
+        "timestamp": 1606680576
+    },
+    {
+        "content": "<p>Each instance reserves 6 GiB of address space by default on 64-bit systems. My guess would be you're running into address space exhaustion with that many concurrent <br>\ninstances.  You can control how much address space is reserved with various settings on <code>Config</code>.  See the docs here: <a href=\"https://docs.rs/wasmtime/0.21.0/wasmtime/struct.Config.html#static-vs-dynamic-memory\">https://docs.rs/wasmtime/0.21.0/wasmtime/struct.Config.html#static-vs-dynamic-memory</a></p>",
+        "id": 218232103,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1606686125
+    },
+    {
+        "content": "<p>The crash you're observing, is it a SIGSEGV or a Rust panic, by the way?</p>",
+        "id": 218232138,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1606686200
+    },
+    {
+        "content": "<p>As I would expect us to be gracefully handling a failed <code>mmap</code> call</p>",
+        "id": 218232152,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1606686239
+    },
+    {
+        "content": "<p>A panic considered graceful in this scenario, perhaps</p>",
+        "id": 218232196,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1606686261
+    },
+    {
+        "content": "<p>I'd like to see a test case for the module creation as that limit sounds internal rather than system constrained</p>",
+        "id": 218232284,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1606686397
+    },
+    {
+        "content": "<p>FYI, I'm currently working on some changes to Wasmtime that will allow for a consistent preallocation of resources for a \"pool\" of instances with configurable limits which is meant to help with performance for \"instance-per-service-request\" type use cases</p>",
+        "id": 218232409,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1606686585
+    },
+    {
+        "content": "<p>By default on my macbook laptop I also capped out at around 21k instances, but I created a store with <code>static_memory_maximum_size</code> set to zero and it's in the 3 million range right now and still counting. The 21k capped out with what I believe was an mmap failure for me, although <span class=\"user-mention\" data-user-id=\"365931\">@Matias Funder</span> may be seeing something different. But yeah as <span class=\"user-mention\" data-user-id=\"253989\">@Peter Huene</span> mentioned there's various knobs to tweak when you scale wasm quite a lot, and the default settings of wasmtime may not always be the best for each situation to scale in</p>",
+        "id": 218236969,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1606693825
+    },
+    {
+        "content": "<p>well, I killed it around 6M b/c it was taking a hundred GB or so of ram and my laptop only has 16, the poor thing</p>",
+        "id": 218237028,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1606693938
+    },
+    {
+        "content": "<p>The 21k limit causes: <code>thread 'main' panicked at 'called Result::unwrap() on an Err value: Insufficient resources: Cannot allocate memory (os error 12)</code><br>\nIt appears to allocate &gt;120 TB virtual memory. Real memory use is about 125kB per instance.<br>\nWith 16GB and 125kB per instance, the upper limit should be 128k instances.</p>\n<p>Running with <code>config.static_memory_maximum_size(0)</code>  uses far more real memory, and an amount of virtual memory that is about the same as the real memory. <br>\nUnfortunately it dies already at 11.8k. <br>\nReal memory use is about 1.2 MB per instance.  And ends with: <code>Process finished with exit code 137 (interrupted by signal 9: SIGKILL)</code><br>\nSo I am not getting the same result as <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> </p>\n<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> Were you testing with program that didn't import any memory? That would highlight that the problem is indeed with the memory allocation, and not the instances.</p>\n<p>Setting <code>config.static_memory_guard_size(20_000);</code> and <code>config.dynamic_memory_guard_size(10_000);</code><br>\nmade the program crash at 32k (approx 130 TB virtual  memory).</p>\n<p>Perhaps it would make sense to have an error message \"not enough virtual memory\"?</p>",
+        "id": 218243970,
+        "sender_full_name": "Matias Funder",
+        "timestamp": 1606705170
+    },
+    {
+        "content": "<p>I also tested with a (module) program and it still used 88kB/instance (which is totally fine... the problem is virtual memory, not real memory usage)</p>",
+        "id": 218245147,
+        "sender_full_name": "Matias Funder",
+        "timestamp": 1606707063
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253989\">Peter Huene</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Limits.20on.20number.20of.20instances.20and.20modules/near/218232138\">said</a>:</p>\n<blockquote>\n<p>The crash you're observing, is it a SIGSEGV or a Rust panic, by the way?</p>\n</blockquote>\n<p>The 30k module limit was a mistake on my end. I had generated 30k unique modules so the test would bypass any possible caching, but then increased the test to 50k without correctly generating the new modules.</p>\n<p>Loading (and keeping references) for 30k unique tiny modules used almost no memory (~100-300 Mb), so that's great.</p>",
+        "id": 218249327,
+        "sender_full_name": "Matias Funder",
+        "timestamp": 1606712741
+    },
+    {
+        "content": "<p>Hm interesting! I suspect different OSes have different behavior here. <span class=\"user-mention\" data-user-id=\"365931\">@Matias Funder</span> could you share how you're measuring the overhead of each instance?</p>",
+        "id": 218298109,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1606748654
+    }
+]

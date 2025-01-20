@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>Hi! I'm poking at ComponentizeJS and trying to figure out how to explicitly drop a resource. I have this code targeting WASI preview 2 HTTP working in Rust:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">body</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">body</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">req_body</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">req</span><span class=\"p\">.</span><span class=\"n\">body</span><span class=\"p\">().</span><span class=\"n\">expect</span><span class=\"p\">(</span><span class=\"s\">\"getting body\"</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">stream</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">req_body</span><span class=\"p\">.</span><span class=\"n\">write</span><span class=\"p\">().</span><span class=\"n\">expect</span><span class=\"p\">(</span><span class=\"s\">\"getting body\"</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"n\">stream</span><span class=\"p\">.</span><span class=\"n\">blocking_write_and_flush</span><span class=\"p\">(</span><span class=\"n\">body</span><span class=\"p\">).</span><span class=\"n\">expect</span><span class=\"p\">(</span><span class=\"s\">\"writing content\"</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"nb\">drop</span><span class=\"p\">(</span><span class=\"n\">stream</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"n\">OutgoingBody</span>::<span class=\"n\">finish</span><span class=\"p\">(</span><span class=\"n\">req_body</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">None</span><span class=\"p\">).</span><span class=\"n\">expect</span><span class=\"p\">(</span><span class=\"s\">\"finishing body\"</span><span class=\"p\">);</span>\n<span class=\"w\">    </span><span class=\"p\">}</span>\n</code></pre></div>\n<p>As per the WIT definitions, dropping the writer is necessary before calling OutgoingBody::finish:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">  </span><span class=\"n\">resource</span><span class=\"w\"> </span><span class=\"n\">outgoing</span><span class=\"o\">-</span><span class=\"n\">body</span><span class=\"w\"> </span><span class=\"p\">{</span>\n\n<span class=\"w\">    </span><span class=\"sd\">/// Returns a stream for writing the body contents.</span>\n<span class=\"w\">    </span><span class=\"sd\">///</span>\n<span class=\"w\">    </span><span class=\"sd\">/// The returned `output-stream` is a child resource: it must be dropped</span>\n<span class=\"w\">    </span><span class=\"sd\">/// before the parent `outgoing-body` resource is dropped (or finished),</span>\n<span class=\"w\">    </span><span class=\"sd\">/// otherwise the `outgoing-body` drop or `finish` will trap.</span>\n<span class=\"w\">    </span><span class=\"sd\">///</span>\n<span class=\"w\">    </span><span class=\"sd\">/// Returns success on the first call: the `output-stream` resource for</span>\n<span class=\"w\">    </span><span class=\"sd\">/// this `outgoing-body` may be retrieved at most once. Subsequent calls</span>\n<span class=\"w\">    </span><span class=\"sd\">/// will return error.</span>\n<span class=\"w\">    </span><span class=\"n\">write</span>: <span class=\"nc\">func</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">result</span><span class=\"o\">&lt;</span><span class=\"n\">output</span><span class=\"o\">-</span><span class=\"n\">stream</span><span class=\"o\">&gt;</span><span class=\"p\">;</span>\n</code></pre></div>\n<p>However I can't figure out how to cause the drop to execute in JS:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">body</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">reqBody</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">req</span><span class=\"p\">.</span><span class=\"n\">body</span><span class=\"p\">();</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">stream</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">reqBody</span><span class=\"p\">.</span><span class=\"n\">write</span><span class=\"p\">();</span>\n<span class=\"w\">        </span><span class=\"n\">stream</span><span class=\"p\">.</span><span class=\"n\">blockingWriteAndFlush</span><span class=\"p\">(</span><span class=\"n\">body</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"n\">stream</span><span class=\"p\">.</span><span class=\"nb\">drop</span><span class=\"p\">();</span><span class=\"w\"> </span><span class=\"c1\">// TypeError: stream.drop is not a function</span>\n<span class=\"w\">        </span><span class=\"n\">OutgoingBody</span><span class=\"p\">.</span><span class=\"n\">finish</span><span class=\"p\">(</span><span class=\"n\">reqBody</span><span class=\"p\">);</span>\n<span class=\"w\">    </span><span class=\"p\">}</span>\n</code></pre></div>\n<p>I know that I'm mostly on the right path, since GET methods work but my POSTs with a body are failing. Eliding the drop altogether results in the documented trap when calling OutgoingBody.finish. How can I force this stream to be dropped?</p>",
+        "id": 422510550,
+        "sender_full_name": "Chad Kimes",
+        "timestamp": 1708467337
+    },
+    {
+        "content": "<p>You can use <code>stream[Symbol.for('dispose')]();</code> to do the dispose from JS</p>",
+        "id": 422511656,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1708467910
+    },
+    {
+        "content": "<p>And of course 5 minutes after posting that I find: <a href=\"https://github.com/bytecodealliance/ComponentizeJS/blob/89ac2c5730866ebe47afaf3a8ae231c59761796e/test/cases/resource-borrow-import/source.js#L3\">https://github.com/bytecodealliance/ComponentizeJS/blob/89ac2c5730866ebe47afaf3a8ae231c59761796e/test/cases/resource-borrow-import/source.js#L3</a></p>\n<p>I had tried with <code>Symbol.dispose</code> previously and that didn't work, so apparently the magic was <code>Symbol.for('dispose')</code></p>",
+        "id": 422511665,
+        "sender_full_name": "Chad Kimes",
+        "timestamp": 1708467918
+    },
+    {
+        "content": "<p>When Spidermonkey supports <code>Symbol.dispose</code> we will switch to that</p>",
+        "id": 422511681,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1708467927
+    },
+    {
+        "content": "<p>so then it will be the new <code>using</code> syntax eventually</p>",
+        "id": 422511721,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1708467959
+    },
+    {
+        "content": "<p>we should better document this though certainly</p>",
+        "id": 422511793,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1708467982
+    },
+    {
+        "content": "<p>Right, and I suppose if I had adopted typescript's using then I wouldn't have seen this at all</p>",
+        "id": 422511804,
+        "sender_full_name": "Chad Kimes",
+        "timestamp": 1708467988
+    },
+    {
+        "content": "<p>While you're active - is there a recommended bundler for joining multiple JS files together? I just want to unclutter my main file by putting some helpers somewhere else, but naive concat quickly runs into import collisions</p>",
+        "id": 422512316,
+        "sender_full_name": "Chad Kimes",
+        "timestamp": 1708468320
+    },
+    {
+        "content": "<p>preferably something invokeable from the mjs file</p>",
+        "id": 422512427,
+        "sender_full_name": "Chad Kimes",
+        "timestamp": 1708468373
+    },
+    {
+        "content": "<p>Note it's still <code>Symbol.for('dispose')</code> instead of <code>Symbol.dispose</code>. We could directly define <code>Symbol.dispose = Symbol.for('dispose')</code> to make this easier I suppose, posted <a href=\"https://github.com/bytecodealliance/ComponentizeJS/pull/81\">https://github.com/bytecodealliance/ComponentizeJS/pull/81</a>. For bundling modules, esbuild / swc / rollup are all good.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/ComponentizeJS/pull/81\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/bd85fdcc190e5c34d36d9274ce3d19c00ee7b9dc\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f656331336432306531316364643031643737303336393035626366306531613964393638353330643666333730396663303862636561663437326138333038342f62797465636f6465616c6c69616e63652f436f6d706f6e656e74697a654a532f70756c6c2f3831)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/ComponentizeJS/pull/81\" title=\"feat: define Symbol.dispose for resource disposal by guybedford · Pull Request #81 · bytecodealliance/ComponentizeJS\">feat: define Symbol.dispose for resource disposal by guybedford · Pull Request #81 · bytecodealliance/ComponentizeJS</a></div><div class=\"message_embed_description\">This allows for consistently disposing all resources via resource[Symbol.dispose]().</div></div></div>",
+        "id": 422513981,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1708469171
+    },
+    {
+        "content": "<p>oh nice! that looks great</p>",
+        "id": 422514789,
+        "sender_full_name": "Chad Kimes",
+        "timestamp": 1708469587
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"693272\">Chad Kimes</span> has marked this topic as resolved.</p>",
+        "id": 422516230,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1708470369
+    }
+]

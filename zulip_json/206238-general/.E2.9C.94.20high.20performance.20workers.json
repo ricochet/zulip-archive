@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>Hi,</p>\n<p>I'm building a service which pipelines many gigabytes of data from a couchdb cluster into a elasticsearch cluster. As the data needs to get transformed and the code for the transformation comes directly from my clients, I want to use wasm components here. The transform code can load more data from the cluster via a host function. As loading from the cluster should be batched I collect all requests for some time and do one big request to the cluster.</p>\n<p>At the moment I simulate both clusters as if they have unlimited resources.</p>\n<p>I made a poc which performs ok (about 100mbit throughput on my laptop) with 1000 instances of the same component all running on the same engine with async support enabled. I have a central queue (deadqueue::limited) and each instance runs on its own tokio task.<br>\nIt runs a little bit better if I have more engines and have the 1000 instances split over the engines. But the sweet spot seems to be around 2 engines. (My CPU has 20 Threads).</p>\n<p>I searched all over the documentation but can't find any best efforts on how to design such a system. Especially I don't know if having multiple engines is supported at all? If I understood correctly, all instance on one engine run each on an own stack but on the same cpu. So having multiple engines should help here.</p>\n<p>On one engine it does not really help to have the component function itself async  as component instances are not <code>Clone</code> so I had to clone the linker, component and engine to get a new instance for each runner (which runs in its own tokio task). So async here only helps me with the host function itself, or am I missing something here?</p>",
+        "id": 438358700,
+        "sender_full_name": "René Rössler",
+        "timestamp": 1715605874
+    },
+    {
+        "content": "<p>By \"engines\" are you referring to <code>wasmtime::Engine</code>? There shouldn't be any reason to use multiple engines (assuming they would all have the same <code>wasmtime::Config</code>).</p>",
+        "id": 438359535,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1715606092
+    },
+    {
+        "content": "<p>I think you are looking for the instantiate_pre family of functions. It does everything that can be shared between instances and then returns to you a preinitialized module that can be instantiated as often as you want with minimum overhead, each of these instances is separate and can run on a different CPU core</p>",
+        "id": 438361802,
+        "sender_full_name": "Ramon Klass",
+        "timestamp": 1715606649
+    },
+    {
+        "content": "<p>Yes, multiple <code>wasmtime::engine::Engine</code>. I changed some code and it seems I was wrong with the assumption that having multiple engines perform better. Thanks for the tip with <code>instantiate_pre</code>!</p>\n<p>I still wonder how to call multiple functions on the same instance which should run on one core with multiple stacks as I can not clone an instance and I need a mutable pointer to a store to call a function on an instance.</p>",
+        "id": 438362818,
+        "sender_full_name": "René Rössler",
+        "timestamp": 1715606901
+    },
+    {
+        "content": "<p>You cannot run parallel function calls on a single instance or sharing a single <code>Store</code> today. An <code>InstancePre</code> (returned by <code>instantiate_pre</code>) can be cloned and run with its own <code>Store</code></p>",
+        "id": 438363718,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1715607123
+    },
+    {
+        "content": "<p>yes the only reason for multiple Engines is if you have diverging configs, reuse as much as possible if you want performance :)</p>",
+        "id": 438363826,
+        "sender_full_name": "Ramon Klass",
+        "timestamp": 1715607149
+    },
+    {
+        "content": "<p>each thread can have its own separate version of your function, but they can't share data, so you have to design your code in a map reduce way</p>",
+        "id": 438363967,
+        "sender_full_name": "Ramon Klass",
+        "timestamp": 1715607197
+    },
+    {
+        "content": "<p>Alright, that's good to know. I read a lot about stack switching in the wasmtime documentation and was really confused how I'm able to use it</p>",
+        "id": 438364568,
+        "sender_full_name": "René Rössler",
+        "timestamp": 1715607367
+    },
+    {
+        "content": "<p>Wasmtime's own stack switching (fibers) is an internal detail of its <a href=\"https://docs.rs/wasmtime/20.0.2/wasmtime/struct.Config.html#method.async_support\">async support</a>. There is - separately - a proposal for stack switching in guest wasm code, which is not yet implemented afaik</p>",
+        "id": 438365816,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1715607687
+    },
+    {
+        "content": "<p>As I'm already discussing performance with you. As I don't want my tokio executor to lock up too much I would need too use <code>engine.increment_epoch</code> every maybe 100ns? There's only one example which uses 1 second which seems a bit much for the tokio executor in my experience.</p>",
+        "id": 438365883,
+        "sender_full_name": "René Rössler",
+        "timestamp": 1715607706
+    },
+    {
+        "content": "<p>Depends on the workload. Spin, which expects relatively IO-heavy workloads, currently uses 10ms. I haven't really tried to tune this experimentally</p>",
+        "id": 438366720,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1715607924
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"719555\">René Rössler</span> has marked this topic as resolved.</p>",
+        "id": 438534739,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1715678320
+    }
+]

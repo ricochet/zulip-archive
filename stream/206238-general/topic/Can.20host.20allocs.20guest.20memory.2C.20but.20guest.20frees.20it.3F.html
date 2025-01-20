@@ -1,0 +1,47 @@
+<html>
+<head><meta charset="utf-8"><title>Can host allocs guest memory, but guest frees it? · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Can.20host.20allocs.20guest.20memory.2C.20but.20guest.20frees.20it.3F.html">Can host allocs guest memory, but guest frees it?</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="490483929"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Can%20host%20allocs%20guest%20memory%2C%20but%20guest%20frees%20it%3F/near/490483929" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Xinyu Zeng <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Can.20host.20allocs.20guest.20memory.2C.20but.20guest.20frees.20it.3F.html#490483929">(Dec 23 2024 at 09:31)</a>:</h4>
+<p>I think a typical way for host to pass data into guest is first call an exported <code>alloc</code> to alloc some memory in guest, then copy the data into guest as input. After the host calling some other exported functions to do computations over the input, we can call an exported <code>dealloc</code> to free the input in the guest memory.</p>
+<p>My question is, is it ok that the host does not call the exported <code>dealloc</code>.  Instead, the functions doing those computations take the "ownership" of that input in the guest memory (e.g., unsafely wrap those bytes into Vec) to decide free or not. I tried this approach but it seems the guest memory got messed up and errors occurred.</p>
+<p>The reason behind this demand is that those "computation functions" may or may not zero-copy the input to output (output still lives in the guest memory). So the host blindly freeing the input memory causes bug.</p>
+<p>The above are under the context of wasmtime Rust API.</p>
+
+
+
+<a name="490531360"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Can%20host%20allocs%20guest%20memory%2C%20but%20guest%20frees%20it%3F/near/490531360" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Can.20host.20allocs.20guest.20memory.2C.20but.20guest.20frees.20it.3F.html#490531360">(Dec 23 2024 at 14:48)</a>:</h4>
+<p>The details will depend on the guest language but in general it should be fine to pass responsibility for deallocation to the guest.</p>
+
+
+
+<a name="490545312"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Can%20host%20allocs%20guest%20memory%2C%20but%20guest%20frees%20it%3F/near/490545312" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Can.20host.20allocs.20guest.20memory.2C.20but.20guest.20frees.20it.3F.html#490545312">(Dec 23 2024 at 16:22)</a>:</h4>
+<p>Note that any time the guest executes a <code>memory.grow</code> instruction and grows memory, any pointers the host might have to guest memory might become invalid.  Also, it's quite dangerous to use e.g. <code>Vec::from_raw_parts</code> in the host using a pointer to guest memory; not only can <code>memory.grow</code> invalidate that pointer, but if the <code>Vec</code> is dropped, the host will try to deallocate memory as if it had been allocated by the Rust allocator in the host, which is certainly not the case.</p>
+<p>As others have mentioned elsewhere, it is much better for the host to hold on to the offset into guest memory rather than a pointer.  The host can then turn that offset into a pointer by adding it to the current guest memory base immediately prior to dereferencing it, which avoids the above issues.</p>
+
+
+
+<a name="490549181"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Can%20host%20allocs%20guest%20memory%2C%20but%20guest%20frees%20it%3F/near/490549181" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Xinyu Zeng <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Can.20host.20allocs.20guest.20memory.2C.20but.20guest.20frees.20it.3F.html#490549181">(Dec 23 2024 at 16:47)</a>:</h4>
+<p>Thanks <span class="user-mention" data-user-id="509936">@Joel Dice</span> .  I understand the case. My trick to solve this is first use static strategy to mmap a large enough VM for the instance so the base address does not change. Second, the <code>Vec</code> has a customized allocator which contains an Arc&lt;Instance&gt; and the offset of the data in the guest address space. Upon drop the Vec, it will call an exported func to drop the memory in guest. I feel this is kind of hacky, but it works when I want to use <code>Vec</code> in host to wrap up underlining data zero copied from guest.</p>
+
+
+
+<a name="490550777"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Can%20host%20allocs%20guest%20memory%2C%20but%20guest%20frees%20it%3F/near/490550777" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Xinyu Zeng <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Can.20host.20allocs.20guest.20memory.2C.20but.20guest.20frees.20it.3F.html#490550777">(Dec 23 2024 at 16:58)</a>:</h4>
+<p>My take is that Just use offset and call .data[offset] is definitely safe and correct. But it needs some other data structure (a new struct) to wrap up and cannot interoperate with the ordinary Vec well. (i am actually not using Vec but Arrow Buffer, sth like bytes:Bytes)</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

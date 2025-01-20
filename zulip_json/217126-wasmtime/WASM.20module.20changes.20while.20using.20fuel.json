@@ -1,0 +1,116 @@
+[
+    {
+        "content": "<p>I have added fuel mechanism in my embedder using the following example: <a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/examples/fuel.rs\">https://github.com/bytecodealliance/wasmtime/blob/main/examples/fuel.rs</a><br>\nI have a module which works fine without the fuel changes but fails suspiciously while using fuel. Is there any module side changes I should have before incorporating fuel changes ?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/main/examples/fuel.rs\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/6668ba88712446eca308d3d6fb2966dbec1ed8a4/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f353061383331313863666237383837383765336262373166323139623633613835323333633565373762353066623766646566626539643232323964633537342f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/examples/fuel.rs\" title=\"wasmtime/examples/fuel.rs at main · bytecodealliance/wasmtime\">wasmtime/examples/fuel.rs at main · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A lightweight WebAssembly runtime that is fast, secure, and standards-compliant - bytecodealliance/wasmtime</div></div></div>",
+        "id": 491420239,
+        "sender_full_name": "spino17",
+        "timestamp": 1735663387
+    },
+    {
+        "content": "<p>the module shouldn't have to change at all: fuel operates underneath the semantic level of Wasm execution. Could you say more about \"fails suspiciously\"?</p>",
+        "id": 491422228,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735664676
+    },
+    {
+        "content": "<p>note also that that example uses fuel as a hard limit, whereas if you're building a server-side execution environment where fuel helps to meter usage you probably want to be operating in async mode and use fuel as a yield point instead (and refill the fuel when exhausted)</p>",
+        "id": 491422320,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735664748
+    },
+    {
+        "content": "<p>Much thanks <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> for the reply! after reading through it I set the fuel limit just for debugging to be u64::MAX and everything works fine so I guess I should indeed have a yield point and callback in place to refill. Thanks again <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span></p>",
+        "id": 491423538,
+        "sender_full_name": "spino17",
+        "timestamp": 1735665577
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> is this the API you talking about ?<br>\n<code>fuel_async_yield_interval</code></p>",
+        "id": 491424621,
+        "sender_full_name": "spino17",
+        "timestamp": 1735666320
+    },
+    {
+        "content": "<p>yep</p>",
+        "id": 491425181,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735666757
+    },
+    {
+        "content": "<p>Last thing which I don't understand is where will the callback (refill logic) be placed, it just takes interval, the doc says that it will yield the control to the running thread which I don't quite understand</p>",
+        "id": 491425400,
+        "sender_full_name": "spino17",
+        "timestamp": 1735666904
+    },
+    {
+        "content": "<p>the \"yield\" mechanism is in the context of the Rust async model: the pollable future returned by the <code>call_async</code> method on a <code>Func</code> will yield (pause execution and return a <code>Poll::Pending</code>) when fuel runs out</p>",
+        "id": 491425577,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735666994
+    },
+    {
+        "content": "<p>but I have async functions all the way uptill the async APIs of the server, I don't really have access to running thread where I can refill store and runtime can continue execution of the module function</p>",
+        "id": 491426008,
+        "sender_full_name": "spino17",
+        "timestamp": 1735667297
+    },
+    {
+        "content": "<p>oh, the store will automatically refill, IIRC; total fuel is distinct from the yield interval</p>",
+        "id": 491426177,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735667423
+    },
+    {
+        "content": "<p>this doc says that wasm will trap if fuel goes out: <a href=\"https://docs.rs/wasmtime/latest/wasmtime/struct.Store.html#method.fuel_async_yield_interval\">https://docs.rs/wasmtime/latest/wasmtime/struct.Store.html#method.fuel_async_yield_interval</a></p>",
+        "id": 491426354,
+        "sender_full_name": "spino17",
+        "timestamp": 1735667537
+    },
+    {
+        "content": "<p>That's right; so you don't let fuel run out. Set total fuel to <code>u64::MAX</code>. The yield interval is distinct from total fuel.</p>",
+        "id": 491426378,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735667563
+    },
+    {
+        "content": "<p>So for example if you set total fuel to <code>u64::MAX</code> and yield interval to <code>10_000</code>, your future will yield every 10 thousand ops all the way down to zero at the end of a very long (u64::MAX) execution</p>",
+        "id": 491426446,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735667617
+    },
+    {
+        "content": "<p>ahh! ohh okay, makes sense. But then what's the use case of yield ? if fuel is set to max then I can let the module run and compute the consumed fuel at the end ?</p>",
+        "id": 491426584,
+        "sender_full_name": "spino17",
+        "timestamp": 1735667710
+    },
+    {
+        "content": "<p>ohh is it just for yield control back to the scheduler to avoid stalling the thread for other futures to be executed<br>\n?</p>",
+        "id": 491426708,
+        "sender_full_name": "spino17",
+        "timestamp": 1735667788
+    },
+    {
+        "content": "<p>The purpose of yielding is to allow periodic returns to the async event loop. Usually in an async server you don't want any particular computation to run for too long -- it blocks the worker thread entirely, and latency can spike as other events pile up. So you slice long-running computations into pieces and run the pieces as individual event-loop steps. That happens automatically with a Rust async executor like Tokio if you use the periodic yielding feature of async calls</p>",
+        "id": 491426711,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735667790
+    },
+    {
+        "content": "<p>yep exactly</p>",
+        "id": 491426717,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735667793
+    },
+    {
+        "content": "<p>ohh this is so cool ! I always wondered how one would do that thing with WASM, it's amazing that it's possible with this fuel mechanism! Much thanks <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> for the help, I highly appreciate it :)</p>",
+        "id": 491426817,
+        "sender_full_name": "spino17",
+        "timestamp": 1735667867
+    },
+    {
+        "content": "<p>sure thing!</p>",
+        "id": 491426874,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1735667893
+    }
+]

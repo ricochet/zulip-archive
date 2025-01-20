@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>I've benchmarked a a very simple C++ VM (branch, compare &amp; addition instructions) against a wasmtime's cranelift-generated function that simply adds two numbers and returns the result. The benchmark results are the cranelift function is substantially slower than this very simple VM. I am expecting that cranelift generates a callable machine-code function directly; if that were the case, it would be faster than the VM; but it's not. Am I missing something?<br>\nThe function is called as a predicate to some filtering operation, is there a big cost to calling wasmtime generated functions? Would it be faster to loop inside wasm?</p>",
+        "id": 254769827,
+        "sender_full_name": "Rom Grk",
+        "timestamp": 1632516349
+    },
+    {
+        "content": "<p>Are you benchmarking the overhead of calling a wasm function from Wasmtime's C/C++ API? Or the Rust API?</p>",
+        "id": 254770425,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1632516613
+    },
+    {
+        "content": "<p>If you're looking to benchmark the generated code then I'd recommend a loop yeah, you'll want to stay in the vm. Otherwise you're mostly benchmarking the vm enter/exit stuff which doesn't have much to do with Cranelift and has more to do with Wasmtime's embedding of cranelift (which we of course still want to be fast too)</p>",
+        "id": 254770765,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1632516762
+    },
+    {
+        "content": "<p>From C/C++. Alright so there's no way to go from <code>wasm -&gt; machine-code callable function</code> right? It absolutely needs to go through the enter/exit code?</p>",
+        "id": 254770962,
+        "sender_full_name": "Rom Grk",
+        "timestamp": 1632516868
+    },
+    {
+        "content": "<p>we actually just landed <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3350\">https://github.com/bytecodealliance/wasmtime/pull/3350</a> and the corresponding <a href=\"https://github.com/bytecodealliance/wasmtime-cpp/pull/17\">https://github.com/bytecodealliance/wasmtime-cpp/pull/17</a> is the C++ bindings, and those should be much lower overhead than the existing versions</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/3350\" style=\"background-image: url(https://opengraph.githubassets.com/d819a90d6d5cf3736a10bc3da4468058daab34700373d03c85e760f9c9b69674/bytecodealliance/wasmtime/pull/3350)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/3350\" title=\"Add `*_unchecked` variants of `Func` APIs for the C API by alexcrichton · Pull Request #3350 · bytecodealliance/wasmtime\">Add `*_unchecked` variants of `Func` APIs for the C API by alexcrichton · Pull Request #3350 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This commit is what is hopefully going to be my last installment within\nthe saga of optimizing function calls in/out of WebAssembly modules in\nthe C API. This is yet another alternative approach to...</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime-cpp/pull/17\" style=\"background-image: url(https://opengraph.githubassets.com/925618c7028052bb10d804a98156fd9a796019acc50ba2ab1ca52a2e74e2a680/bytecodealliance/wasmtime-cpp/pull/17)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime-cpp/pull/17\" title=\"Bind the new `*_unchecked` function APIs by alexcrichton · Pull Request #17 · bytecodealliance/wasmtime-cpp\">Bind the new `*_unchecked` function APIs by alexcrichton · Pull Request #17 · bytecodealliance/wasmtime-cpp</a></div><div class=\"message_embed_description\">This commit binds two new APIs added to wasmtime&#39;s C API recently:\n\nwasmtime_func_new_unchecked\nwamstime_func_call_unchecked\n\nThese two functions are a more accelerated path of invoking a\nWebAs...</div></div></div>",
+        "id": 254771082,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1632516924
+    },
+    {
+        "content": "<p>there's no way to go directly to the machine code because that's a private implementation detail of Wasmtime and we need to do other things like set up stack overflow checks and such</p>",
+        "id": 254771111,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1632516942
+    },
+    {
+        "content": "<p>Cool stuff! Do you think there are technical limitations that would prevent compiling wasm directly to callable machine code eventually? Looking into various jit options, was hoping to find some portable assembly so I don't need to do x86/arm codegen myself :|</p>",
+        "id": 254771572,
+        "sender_full_name": "Rom Grk",
+        "timestamp": 1632517187
+    },
+    {
+        "content": "<p>we do have that effectively as-is, if you run <code>wasmtime compile</code> it'll generate something you can feed to <code>objdump</code> and look at the disassembly. These functions are callable directly but not in a way that's really feasible from general applications, if you did that then that would break how we implement traps, interrupts, stack overflow, etc. Implementing all of wasm's semantics requires careful planning, especially if this is all suppose to be stable API-wise</p>",
+        "id": 254771871,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1632517295
+    },
+    {
+        "content": "<p>We try to minimize these overheads as much as possible though and look for ways to improve them over time, and theoretically a <code>call</code> instruction is all that's necessary, but we'd have to figure out other ways to implement things like traps and such</p>",
+        "id": 254772025,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1632517343
+    },
+    {
+        "content": "<p>Ok ok. Well then, I'll test those unchecked variants see if they're good enough. Thanks for the assistance</p>",
+        "id": 254772283,
+        "sender_full_name": "Rom Grk",
+        "timestamp": 1632517453
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"441813\">@Rom Grk</span> if the alternative you're considering is direct machine-code generation, it's worth considering whether Cranelift itself (without the Wasmtime runtime) would still help you out; then you could generate the IR (CLIF) and compile a function that you truly could call directly, as Cranelift knows about e.g. the normal System V calling convention</p>",
+        "id": 254772655,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1632517635
+    },
+    {
+        "content": "<p>Oh sure, very interesting option. I'll look into that!</p>",
+        "id": 254772739,
+        "sender_full_name": "Rom Grk",
+        "timestamp": 1632517678
+    },
+    {
+        "content": "<p>the advantage that the Wasmtime runtime gives you is that it provides all of the Wasm-specific concepts, like heap memories, tables, imports, and the like; but if you're considering doing direct codegen instead, it sounds like you're not too attached to using Wasm specifically</p>",
+        "id": 254772747,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1632517681
+    },
+    {
+        "content": "<p>(Cranelift is used in this way by e.g. cg_clif, a rust compiler backend, so it's semi-regularly-tested to be able to interact with native code in a direct way)</p>",
+        "id": 254772880,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1632517741
+    },
+    {
+        "content": "<p>No indeed I really just need a portable assembly-like target that can be compiled to x86 &amp; arm. Will look into that :]</p>",
+        "id": 254772902,
+        "sender_full_name": "Rom Grk",
+        "timestamp": 1632517758
+    }
+]

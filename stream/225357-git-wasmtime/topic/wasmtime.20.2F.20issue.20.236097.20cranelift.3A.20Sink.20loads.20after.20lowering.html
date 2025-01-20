@@ -1,0 +1,189 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #6097 cranelift: Sink loads after lowering · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236097.20cranelift.3A.20Sink.20loads.20after.20lowering.html">wasmtime / issue #6097 cranelift: Sink loads after lowering</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="344136858"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236097%20cranelift%3A%20Sink%20loads%20after%20lowering/near/344136858" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236097.20cranelift.3A.20Sink.20loads.20after.20lowering.html#344136858">(Mar 24 2023 at 01:36)</a>:</h4>
+<p>jameysharp opened <a href="https://github.com/bytecodealliance/wasmtime/issues/6097">issue #6097</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>On x86-64, unlike RISC-style instruction sets, many instructions have the ability to do a memory load. We can "sink" a load instruction into one of these other instructions, under the right conditions. One of those conditions is that the result of the load must be used exactly once. If it's used multiple times, then sinking the load means that the load is duplicated.</p>
+<p>Our current mechanism for checking whether load-sinking is safe has been quite error-prone. We check for unique uses in the input CLIF, but during lowering, a single use of a CLIF <code>Value</code> may turn into multiple uses of the corresponding register. To deal with that, we try to ensure that lowering rules only convert a <code>Value</code> into a register once if they need to use the register multiple times. However this has been difficult to ensure because there's an implicit conversion from <code>Value</code> to types like <code>GprMem</code> and <code>XmmMem</code>.</p>
+<p>This would all be much easier if we could count the number of times that the value is used _after_ lowering, since that's what we actually want to know.</p>
+<h4>Benefit</h4>
+<p>The primary benefit is to eliminate this class of bugs from the x86-64 backend. (In principle other architectures could do load-sinking too, but we don't currently support any that do.)</p>
+<p>Also, I think we can delete a bunch of code in <code>cranelift/codegen/src/machinst/lower.rs</code>, and possibly one linear-time pass over the input CLIF, by specializing this.</p>
+<h4>Implementation</h4>
+<p>Besides the single-use rule, the other rule is that a load must not be moved past another side-effecting instruction. The machinst::lower module currently uses "instruction coloring" to enforce this. As far as I can tell, there are no other ways for instructions to be re-ordered during lowering, so this is the only use of these colors.</p>
+<p>It's important to note that machinst lowers basic blocks in post-order, so all blocks which could have used a value are lowered before the block which defines that value. In addition, it lowers the instructions in each block in reverse order, so again the uses are seen before their definition.</p>
+<p>So here's the approach I have in mind:</p>
+<ol>
+<li>In enums like <code>GprMem</code>, have the <code>Mem</code> variant keep not only the address-mode, but also the <code>Value</code> that we got the input from.</li>
+<li>For each <code>Value</code> which is the result of a load, track whether it is used more than once during lowering. Currently machinst does this in <code>value_lowered_uses</code>, but I think it might not need that after this.</li>
+<li>When converting a <code>Value</code> produced by a load in the current block into e.g. <code>GprMem</code>, assume that we're going to sink the load, unless we've already seen other uses of this value. (We won't try to sink loads across block boundaries.) Add the <code>Value</code> to a queue of tentatively-sunk loads.</li>
+<li>
+<p>When we're about to lower a side-effecting instruction, check its opcode:</p>
+<ul>
+<li>If it's a load, then pop <code>Value</code>s from the queue until we find the result of _this_ load. If it is still only used once, then we can forget about it: we've successfully sunk the load. Afterward we can forget about how many times this load is used, too: now that we've found its definition, we won't see any more uses.</li>
+<li>If it isn't a load, then pop every <code>Value</code> from the queue. We can't sink any loads past this instruction.</li>
+</ul>
+</li>
+<li>
+<p>For every <code>Value</code> popped from the queue without proving that sinking that load was safe, add it to a set of failed attempts so we can clean it up later.</p>
+</li>
+<li>During register allocation and again while emitting machine code, any time a <code>Mem</code> variant comes up, check it against the set of failed attempts. If it's there, treat it as the equivalent <code>Reg</code> variant instead. Alternatively, rewrite the current block when we're done lowering it, so we can discard the failed-attempt set early.</li>
+</ol>
+<p>The queue is necessary because we may have tentatively sunk multiple loads by the time we see the actual load instructions, in which case we need to make sure that they're all in the right order. If we wanted to allow reordering loads with respect to each other but not with any other side effects, this could be a set instead of a queue. We could even keep a queue for atomic loads and a set for other loads if we want to implement a hybrid policy…</p>
+<p>Note that the queue must be empty by the time we finish lowering a block, because we only add loads to it which are in the current block.</p>
+<p>I don't think any of the above needs any machinery in <code>machinst</code> beyond the guarantee that we always lower uses before definitions. So other backends can avoid paying the cost of tracking colors and unique uses. If/when we add another backend that supports sinking loads, we can factor it out to common code then.</p>
+</blockquote>
+
+
+
+<a name="344136862"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236097%20cranelift%3A%20Sink%20loads%20after%20lowering/near/344136862" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236097.20cranelift.3A.20Sink.20loads.20after.20lowering.html#344136862">(Mar 24 2023 at 01:36)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/6097">issue #6097</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>On x86-64, unlike RISC-style instruction sets, many instructions have the ability to do a memory load. We can "sink" a load instruction into one of these other instructions, under the right conditions. One of those conditions is that the result of the load must be used exactly once. If it's used multiple times, then sinking the load means that the load is duplicated.</p>
+<p>Our current mechanism for checking whether load-sinking is safe has been quite error-prone. We check for unique uses in the input CLIF, but during lowering, a single use of a CLIF <code>Value</code> may turn into multiple uses of the corresponding register. To deal with that, we try to ensure that lowering rules only convert a <code>Value</code> into a register once if they need to use the register multiple times. However this has been difficult to ensure because there's an implicit conversion from <code>Value</code> to types like <code>GprMem</code> and <code>XmmMem</code>.</p>
+<p>This would all be much easier if we could count the number of times that the value is used _after_ lowering, since that's what we actually want to know.</p>
+<h4>Benefit</h4>
+<p>The primary benefit is to eliminate this class of bugs from the x86-64 backend. (In principle other architectures could do load-sinking too, but we don't currently support any that do.)</p>
+<p>Also, I think we can delete a bunch of code in <code>cranelift/codegen/src/machinst/lower.rs</code>, and possibly one linear-time pass over the input CLIF, by specializing this.</p>
+<h4>Implementation</h4>
+<p>Besides the single-use rule, the other rule is that a load must not be moved past another side-effecting instruction. The machinst::lower module currently uses "instruction coloring" to enforce this. As far as I can tell, there are no other ways for instructions to be re-ordered during lowering, so this is the only use of these colors.</p>
+<p>It's important to note that machinst lowers basic blocks in post-order, so all blocks which could have used a value are lowered before the block which defines that value. In addition, it lowers the instructions in each block in reverse order, so again the uses are seen before their definition.</p>
+<p>So here's the approach I have in mind:</p>
+<ol>
+<li>In enums like <code>GprMem</code>, have the <code>Mem</code> variant keep not only the address-mode, but also the <code>Value</code> that we got the input from.</li>
+<li>For each <code>Value</code> which is the result of a load, track whether it is used more than once during lowering. Currently machinst does this in <code>value_lowered_uses</code>, but I think it might not need that after this.</li>
+<li>When converting a <code>Value</code> produced by a load in the current block into e.g. <code>GprMem</code>, assume that we're going to sink the load, unless we've already seen other uses of this value. (We won't try to sink loads across block boundaries.) Add the <code>Value</code> to a queue of tentatively-sunk loads.</li>
+<li>
+<p>When we're about to lower a side-effecting instruction, check its opcode:</p>
+<ul>
+<li>If it's a load, then pop <code>Value</code>s from the queue until we find the result of _this_ load. If it is still only used once, then we can forget about it: we've successfully sunk the load. Afterward we can forget about how many times this load is used, too: now that we've found its definition, we won't see any more uses.</li>
+<li>If it isn't a load, then pop every <code>Value</code> from the queue. We can't sink any loads past this instruction.</li>
+</ul>
+</li>
+<li>
+<p>For every <code>Value</code> popped from the queue without proving that sinking that load was safe, add it to a set of failed attempts so we can clean it up later.</p>
+</li>
+<li>During register allocation and again while emitting machine code, any time a <code>Mem</code> variant comes up, check it against the set of failed attempts. If it's there, treat it as the equivalent <code>Reg</code> variant instead. Alternatively, rewrite the current block when we're done lowering it, so we can discard the failed-attempt set early.</li>
+</ol>
+<p>The queue is necessary because we may have tentatively sunk multiple loads by the time we see the actual load instructions, in which case we need to make sure that they're all in the right order. If we wanted to allow reordering loads with respect to each other but not with any other side effects, this could be a set instead of a queue. We could even keep a queue for atomic loads and a set for other loads if we want to implement a hybrid policy…</p>
+<p>Note that the queue must be empty by the time we finish lowering a block, because we only add loads to it which are in the current block.</p>
+<p>I don't think any of the above needs any machinery in <code>machinst</code> beyond the guarantee that we always lower uses before definitions. So other backends can avoid paying the cost of tracking colors and unique uses. If/when we add another backend that supports sinking loads, we can factor it out to common code then.</p>
+</blockquote>
+
+
+
+<a name="344136863"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236097%20cranelift%3A%20Sink%20loads%20after%20lowering/near/344136863" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236097.20cranelift.3A.20Sink.20loads.20after.20lowering.html#344136863">(Mar 24 2023 at 01:36)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/6097">issue #6097</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>On x86-64, unlike RISC-style instruction sets, many instructions have the ability to do a memory load. We can "sink" a load instruction into one of these other instructions, under the right conditions. One of those conditions is that the result of the load must be used exactly once. If it's used multiple times, then sinking the load means that the load is duplicated.</p>
+<p>Our current mechanism for checking whether load-sinking is safe has been quite error-prone. We check for unique uses in the input CLIF, but during lowering, a single use of a CLIF <code>Value</code> may turn into multiple uses of the corresponding register. To deal with that, we try to ensure that lowering rules only convert a <code>Value</code> into a register once if they need to use the register multiple times. However this has been difficult to ensure because there's an implicit conversion from <code>Value</code> to types like <code>GprMem</code> and <code>XmmMem</code>.</p>
+<p>This would all be much easier if we could count the number of times that the value is used _after_ lowering, since that's what we actually want to know.</p>
+<h4>Benefit</h4>
+<p>The primary benefit is to eliminate this class of bugs from the x86-64 backend. (In principle other architectures could do load-sinking too, but we don't currently support any that do.)</p>
+<p>Also, I think we can delete a bunch of code in <code>cranelift/codegen/src/machinst/lower.rs</code>, and possibly one linear-time pass over the input CLIF, by specializing this.</p>
+<h4>Implementation</h4>
+<p>Besides the single-use rule, the other rule is that a load must not be moved past another side-effecting instruction. The machinst::lower module currently uses "instruction coloring" to enforce this. As far as I can tell, there are no other ways for instructions to be re-ordered during lowering, so this is the only use of these colors.</p>
+<p>It's important to note that machinst lowers basic blocks in post-order, so all blocks which could have used a value are lowered before the block which defines that value. In addition, it lowers the instructions in each block in reverse order, so again the uses are seen before their definition.</p>
+<p>So here's the approach I have in mind:</p>
+<ol>
+<li>In enums like <code>GprMem</code>, have the <code>Mem</code> variant keep not only the address-mode, but also the <code>Value</code> that we got the input from.</li>
+<li>For each <code>Value</code> which is the result of a load, track whether it is used more than once during lowering. Currently machinst does this in <code>value_lowered_uses</code>, but I think it might not need that after this.</li>
+<li>When converting a <code>Value</code> produced by a load in the current block into e.g. <code>GprMem</code>, assume that we're going to sink the load, unless we've already seen other uses of this value. (We won't try to sink loads across block boundaries.) Add the <code>Value</code> to a queue of tentatively-sunk loads.</li>
+<li>
+<p>When we're about to lower a side-effecting instruction, check its opcode:</p>
+<ul>
+<li>If it's a load, then pop <code>Value</code>s from the queue until we find the result of _this_ load. If it is still only used once, then we can forget about it: we've successfully sunk the load. Afterward we can forget about how many times this load is used, too: now that we've found its definition, we won't see any more uses.</li>
+<li>If it isn't a load, then pop every <code>Value</code> from the queue. We can't sink any loads past this instruction.</li>
+</ul>
+</li>
+<li>
+<p>For every <code>Value</code> popped from the queue without proving that sinking that load was safe, add it to a set of failed attempts so we can clean it up later.</p>
+</li>
+<li>During register allocation and again while emitting machine code, any time a <code>Mem</code> variant comes up, check it against the set of failed attempts. If it's there, treat it as the equivalent <code>Reg</code> variant instead. Alternatively, rewrite the current block when we're done lowering it, so we can discard the failed-attempt set early.</li>
+</ol>
+<p>The queue is necessary because we may have tentatively sunk multiple loads by the time we see the actual load instructions, in which case we need to make sure that they're all in the right order. If we wanted to allow reordering loads with respect to each other but not with any other side effects, this could be a set instead of a queue. We could even keep a queue for atomic loads and a set for other loads if we want to implement a hybrid policy…</p>
+<p>Note that the queue must be empty by the time we finish lowering a block, because we only add loads to it which are in the current block.</p>
+<p>I don't think any of the above needs any machinery in <code>machinst</code> beyond the guarantee that we always lower uses before definitions. So other backends can avoid paying the cost of tracking colors and unique uses. If/when we add another backend that supports sinking loads, we can factor it out to common code then.</p>
+</blockquote>
+
+
+
+<a name="344136864"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236097%20cranelift%3A%20Sink%20loads%20after%20lowering/near/344136864" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236097.20cranelift.3A.20Sink.20loads.20after.20lowering.html#344136864">(Mar 24 2023 at 01:36)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/6097">issue #6097</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>On x86-64, unlike RISC-style instruction sets, many instructions have the ability to do a memory load. We can "sink" a load instruction into one of these other instructions, under the right conditions. One of those conditions is that the result of the load must be used exactly once. If it's used multiple times, then sinking the load means that the load is duplicated.</p>
+<p>Our current mechanism for checking whether load-sinking is safe has been quite error-prone. We check for unique uses in the input CLIF, but during lowering, a single use of a CLIF <code>Value</code> may turn into multiple uses of the corresponding register. To deal with that, we try to ensure that lowering rules only convert a <code>Value</code> into a register once if they need to use the register multiple times. However this has been difficult to ensure because there's an implicit conversion from <code>Value</code> to types like <code>GprMem</code> and <code>XmmMem</code>.</p>
+<p>This would all be much easier if we could count the number of times that the value is used _after_ lowering, since that's what we actually want to know.</p>
+<h4>Benefit</h4>
+<p>The primary benefit is to eliminate this class of bugs from the x86-64 backend. (In principle other architectures could do load-sinking too, but we don't currently support any that do.)</p>
+<p>Also, I think we can delete a bunch of code in <code>cranelift/codegen/src/machinst/lower.rs</code>, and possibly one linear-time pass over the input CLIF, by specializing this.</p>
+<h4>Implementation</h4>
+<p>Besides the single-use rule, the other rule is that a load must not be moved past another side-effecting instruction. The machinst::lower module currently uses "instruction coloring" to enforce this. As far as I can tell, there are no other ways for instructions to be re-ordered during lowering, so this is the only use of these colors.</p>
+<p>It's important to note that machinst lowers basic blocks in post-order, so all blocks which could have used a value are lowered before the block which defines that value. In addition, it lowers the instructions in each block in reverse order, so again the uses are seen before their definition.</p>
+<p>So here's the approach I have in mind:</p>
+<ol>
+<li>In enums like <code>GprMem</code>, have the <code>Mem</code> variant keep not only the address-mode, but also the <code>Value</code> that we got the input from.</li>
+<li>For each <code>Value</code> which is the result of a load, track whether it is used more than once during lowering. Currently machinst does this in <code>value_lowered_uses</code>, but I think it might not need that after this.</li>
+<li>When converting a <code>Value</code> produced by a load in the current block into e.g. <code>GprMem</code>, assume that we're going to sink the load, unless we've already seen other uses of this value. (We won't try to sink loads across block boundaries.) Add the <code>Value</code> to a queue of tentatively-sunk loads.</li>
+<li>
+<p>When we're about to lower a side-effecting instruction, check its opcode:</p>
+<ul>
+<li>If it's a load, then pop <code>Value</code>s from the queue until we find the result of _this_ load. If it is still only used once, then we can forget about it: we've successfully sunk the load. Afterward we can forget about how many times this load is used, too: now that we've found its definition, we won't see any more uses.</li>
+<li>If it isn't a load, then pop every <code>Value</code> from the queue. We can't sink any loads past this instruction.</li>
+</ul>
+</li>
+<li>
+<p>For every <code>Value</code> popped from the queue without proving that sinking that load was safe, add it to a set of failed attempts so we can clean it up later.</p>
+</li>
+<li>During register allocation and again while emitting machine code, any time a <code>Mem</code> variant comes up, check it against the set of failed attempts. If it's there, treat it as the equivalent <code>Reg</code> variant instead. Alternatively, rewrite the current block when we're done lowering it, so we can discard the failed-attempt set early.</li>
+</ol>
+<p>The queue is necessary because we may have tentatively sunk multiple loads by the time we see the actual load instructions, in which case we need to make sure that they're all in the right order. If we wanted to allow reordering loads with respect to each other but not with any other side effects, this could be a set instead of a queue. We could even keep a queue for atomic loads and a set for other loads if we want to implement a hybrid policy…</p>
+<p>Note that the queue must be empty by the time we finish lowering a block, because we only add loads to it which are in the current block.</p>
+<p>I don't think any of the above needs any machinery in <code>machinst</code> beyond the guarantee that we always lower uses before definitions. So other backends can avoid paying the cost of tracking colors and unique uses. If/when we add another backend that supports sinking loads, we can factor it out to common code then.</p>
+</blockquote>
+
+
+
+<a name="344140164"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236097%20cranelift%3A%20Sink%20loads%20after%20lowering/near/344140164" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236097.20cranelift.3A.20Sink.20loads.20after.20lowering.html#344140164">(Mar 24 2023 at 02:13)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/6097#issuecomment-1482155656">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6097">issue #6097</a>:</p>
+<blockquote>
+<p>I do like this approach -- thank you very much for filling out some details here!</p>
+<p>I, too, dislike the current unique/multi-use analysis and the way it interacts with lowering rules; I'd love to see something better. I'll inject some general caution that this is an extremely subtle problem space and I've been surprised by unexpected interactions, and there are a lot of hard-won (as in "learned the hard way") correctness conditions in the current code; all that to say, we should just be very careful with the replacement too!</p>
+<p>One general principle I'd want to try to stick to is that to whatever degree possible, I'd like to see the infrastructure for this built in a way that is not backend-specific. While it's true that we're thinking about load-merging now and that is mostly relevant for x86, there may be other kinds of side-effect motion that we want to do later (perhaps with traps, for example); so a system that reasons generally about sinking/hoisting and merging has value beyond just the x86 <code>RegMem</code> case. That doesn't have to mean that we have state in <code>machinst::Lower</code> as we do today -- maybe it's a separate <code>SinkingTracker</code> or somesuch.</p>
+<p>I suspect that your system can be generalized such that items in the queue are any side-effecting ops that we want to try to sink, is that right?</p>
+<p>It'd be worthwhile trying to write a (semi-formal) correctness argument for this, if you haven't yet. (It feels like the right kind of correctness property that is both extremely important, and tractable to actually show holds.) I think I can see how you'd argue that the total order of side-effecting ops (including loads) is maintained. The items in the queue represent a sliding window, but the order in the queue does not necessarily correspond to program order (it corresponds to use-order). Rather, we reconcile <em>with</em> program order as we pop, and discard (reject the sinking) anything that would have come out-of-order. So basically the queue only ever holds the in-(reverse)-use-order list of sinkable ops within a single inter-side-effect-window region of code. Is that right?</p>
+<p>(Also, I think we need to consider start-of-basic-block a "side-effecting point" that flushes the queue as well, unless you can make an argument about how the traversal order makes that unnecessary but my head is starting to hurt now :-) )</p>
+<p>Anyway, I look forward to seeing this work out!</p>
+</blockquote>
+
+
+
+<a name="344381635"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236097%20cranelift%3A%20Sink%20loads%20after%20lowering/near/344381635" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236097.20cranelift.3A.20Sink.20loads.20after.20lowering.html#344381635">(Mar 24 2023 at 22:48)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6097#issuecomment-1483537653">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6097">issue #6097</a>:</p>
+<blockquote>
+<p>A brief (because I'm taking today off and totally not here right now) note on one small point: In my first draft of this I had it emptying the queue at basic block boundaries like you suggest. Then I changed it so things don't go into the queue in the first place if they come from another basic block, so we can just assert that the queue is empty at block boundaries.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

@@ -1,0 +1,99 @@
+<html>
+<head><meta charset="utf-8"><title>Releasing memory with custom allocators · wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/index.html">wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html">Releasing memory with custom allocators</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="279223062"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279223062" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> theduke <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279223062">(Apr 17 2022 at 14:02)</a>:</h4>
+<p>Has anyone thought about using custom allocators (both on the embedder and on the instance side) to make it possible for instances to release memory?</p>
+<p>Background: the grow-only semantics are turning out to be quite the problem for persistent instances in my runtime. A lot of code will have short bursts of larger memory usage and the instance ends up with way more memory than it actually needs. New code can be written to regularly re-create instances when they get too large, but that's both awkward and doesn't work for general purpose code that's not written with that constraint in mind.</p>
+<p>So in lack of an official solution my idea was to essentially emulate virtual linear memory for the guest with memory mapping.</p>
+<p>A custom allocator on the host provides two functions: <code>malloc</code> and <code>free</code>.</p>
+<p><code>malloc</code> initially always creates a new memory mapping at the end of current linear memory (think <code>MAP_ANONYMOUS | MAP_FIXED_NOREPLACE</code> on Linux)  to grow the memory. This should probably always do large chunks at once, at least 20+ Wasm pages.</p>
+<p><code>free</code> can now be used to release the memory, which will simply unmap the mapping, returning the memory to the host or to a cross-instance allocator. The relevant memory range needs to be reserved/protected to prevent access by the instance and a signal handler to recover from illegal access.</p>
+<p>There is now a hole in linear memory which can be re-used for future allocations.</p>
+<p>===</p>
+<p>On the guest side this needs a custom allocator that expects relatively large chunks of memory for each <code>malloc</code> and then uses it internally. It shouldn't be too hard to customize an existing allocator to do this, which can then be pretty easily used to patch up Rust/C/C++ code unobtrusively.</p>
+
+
+
+<a name="279223205"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279223205" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> theduke <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279223205">(Apr 17 2022 at 14:06)</a>:</h4>
+<p>I <strong>think</strong> this should be implementable in Wasmtime as is with a <code>MemoryCreator</code>. The only open question for me is probably how to handle illegal access without blowing up the thread.</p>
+<p>Has anyone thought about or actually implemented something like this?<br>
+Or sees any concrete problems with the idea?</p>
+
+
+
+<a name="279223536"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279223536" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> theduke <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279223536">(Apr 17 2022 at 14:14)</a>:</h4>
+<p>(addendum: ignore the <code>or to a cross-instance allocator</code> part above, which of course doesn't make sense with mapped memory)</p>
+
+
+
+<a name="279223705"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279223705" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> theduke <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279223705">(Apr 17 2022 at 14:19)</a>:</h4>
+<p>I also don't know if creating tens of thousands or millions of mappings is a problem for the OS.<br>
+On Linux the default limit is quite low with 65530. (<code>sysctl vm.max_map_count</code>)<br>
+Quite possible that this is rather unusual and could cause problems.</p>
+
+
+
+<a name="279290829"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279290829" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279290829">(Apr 18 2022 at 14:24)</a>:</h4>
+<p>If I understand you right I believe this is something that Wasmtime does indeed not implement, but mainly because wasm itself has no facility for this. Linear memories in wasm can only be grown and never shrunk (or have holes in them). Changing that would be a CG-level proposal I believe.</p>
+<p>It may also be worth pointing out that linear memories and instances live as long as the Store that contains them, and that's an architectural decision of Wasmtime itself and not necessarily inherent to wasm (although I dont' think your question is directly related to this)</p>
+
+
+
+<a name="279319557"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279319557" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279319557">(Apr 18 2022 at 18:49)</a>:</h4>
+<p>Yeah this is something we are very unlikely to implement in a non-standard way.</p>
+<p>However, you may be interested in the <code>memory-control</code> Wasm proposal: <a href="https://github.com/WebAssembly/memory-control/blob/master/proposals/memory-control/Overview.md">https://github.com/WebAssembly/memory-control/blob/master/proposals/memory-control/Overview.md</a></p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/WebAssembly/memory-control/blob/master/proposals/memory-control/Overview.md" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/86fa8552984caa6489c8ba525e9964a5107fad93\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f386539386432373636663230653161313437626434396337643763633835333033363134343037373661396162383333653837383561383364323765363838652f576562417373656d626c792f6d656d6f72792d636f6e74726f6c)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/WebAssembly/memory-control/blob/master/proposals/memory-control/Overview.md" title="memory-control/Overview.md at master · WebAssembly/memory-control">memory-control/Overview.md at master · WebAssembly/memory-control</a></div><div class="message_embed_description">A proposal to introduce finer grained control of WebAssembly memory. - memory-control/Overview.md at master · WebAssembly/memory-control</div></div></div>
+
+
+
+<a name="279319675"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279319675" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279319675">(Apr 18 2022 at 18:50)</a>:</h4>
+<p>(specifically the <code>memory.discard</code> functionality)</p>
+
+
+
+<a name="279324047"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279324047" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> theduke <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279324047">(Apr 18 2022 at 19:28)</a>:</h4>
+<p>I didn't mean to suggest this was something that wasmtime should implement, exactly because it's not standard and requires a custom allocator inside the instance.</p>
+<p>It's basically a hack to let linear memory grow as much as it wants to while still releasing the "holes" in it back to the OS , and hence indirectly back to the process running wasmtime because another mapping can reuse the physical memory. </p>
+<p>I just wanted to bring up the idea and see if someone sees a reason this really wouldn't work.</p>
+<p>Like I said, this should probably already be doable without any changes to wasmtime via a a custom <code>MemoryCreator</code>.</p>
+
+
+
+<a name="279324309"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279324309" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> theduke <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279324309">(Apr 18 2022 at 19:30)</a>:</h4>
+<p><span class="user-mention" data-user-id="253990">@fitzgen (he/him)</span> </p>
+<p>Ah, thanks for that link. I now also stumbled on <a href="https://github.com/WebAssembly/design/issues/1397">https://github.com/WebAssembly/design/issues/1397</a> and <a href="https://github.com/WebAssembly/design/issues/1397">https://github.com/WebAssembly/design/issues/1397</a>.</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/WebAssembly/design/issues/1397" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/992164f981a8ba588fad7ef0bc1444e73aa59deb\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343238656135353730373039623635626634613836656366613934336338336262313565633332633333356139643763386330346638396137333762343262362f576562417373656d626c792f64657369676e2f6973737565732f31333937)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/WebAssembly/design/issues/1397" title="Wasm needs a better memory management story · Issue #1397 · WebAssembly/design">Wasm needs a better memory management story · Issue #1397 · WebAssembly/design</a></div><div class="message_embed_description">Hi all, after a video call with google last week, I was encouraged to raise a conversation here around issues we at Unity have with Wasm memory allocation. The short summary is that currently Wasm ...</div></div></div>
+
+
+
+<a name="279324376"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279324376" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> theduke <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279324376">(Apr 18 2022 at 19:31)</a>:</h4>
+<p>Some of the ideas there around mapping mentioned in the discussion would actually allow my idea in a non-hacky way.</p>
+
+
+
+<a name="279410965"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Releasing%20memory%20with%20custom%20allocators/near/279410965" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Releasing.20memory.20with.20custom.20allocators.html#279410965">(Apr 19 2022 at 13:47)</a>:</h4>
+<p>I think if you were to implement a custom <code>MemoryCreator</code> this would probably work, but if you create a "hole" which segfaults instead of being lazily initialized to zero it may not be safe from a Rust perspective depending on what you're doing because we hand out <code>&amp;[u8]</code> safely for all of linear memory.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

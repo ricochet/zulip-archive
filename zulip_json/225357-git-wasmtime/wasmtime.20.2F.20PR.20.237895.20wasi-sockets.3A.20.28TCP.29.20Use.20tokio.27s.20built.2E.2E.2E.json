@@ -1,0 +1,86 @@
+[
+    {
+        "content": "<p>badeend opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895\">PR #7895</a> from <code>badeend:tcp-tokio</code> to <code>bytecodealliance:main</code>:</p>\n<blockquote>\n<p>Full discussion: <a href=\"#narrow/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness\">https://bytecodealliance.zulipchat.com/#narrow/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness</a></p>\n<p>TLDR: Our implementation was flawed. It called <code>tokio::net::TcpStream::try_from(...)</code> directly after creating the socket. That triggers Tokio to call <code>epoll_ctl</code> to add it to the poll list. Linux sees that the socket is not connected (yet) and emits EPOLLHUP. Tokio interprets that to be a \"final\" state and never recovers from it. All future attempts to await I/O readiness immediately succeed.</p>\n<p>This PR moves away from rustix and uses Tokio's own methods for constructing, binding, connecting, listening &amp; accepting sockets. It still uses rustix for socket options</p>\n</blockquote>",
+        "id": 420454777,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707398124
+    },
+    {
+        "content": "<p><strong>badeend</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers\">wasmtime-core-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895\">PR #7895</a>.</p>",
+        "id": 420454780,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707398125
+    },
+    {
+        "content": "<p><strong>badeend</strong> requested <a href=\"https://github.com/alexcrichton\">alexcrichton</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895\">PR #7895</a>.</p>",
+        "id": 420454782,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707398125
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#pullrequestreview-1870414668\">PR review</a>:</p>\n<blockquote>\n<p>Nice! One very small comment but otherwise everything looks as I'd expect here <span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span> </p>\n</blockquote>",
+        "id": 420474378,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707403966
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#pullrequestreview-1870414668\">PR review</a>:</p>\n<blockquote>\n<p>Nice! One very small comment but otherwise everything looks as I'd expect here <span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span> </p>\n</blockquote>",
+        "id": 420474379,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707403966
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#discussion_r1483091244\">PR review comment</a>:</p>\n<blockquote>\n<p>How come this does a <code>spawn</code>?</p>\n</blockquote>",
+        "id": 420474380,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707403966
+    },
+    {
+        "content": "<p>badeend submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#pullrequestreview-1870538158\">PR review</a>.</p>",
+        "id": 420481776,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707406037
+    },
+    {
+        "content": "<p>badeend created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#discussion_r1483165121\">PR review comment</a>:</p>\n<blockquote>\n<p>Without it, tokio would complain about the future not running within a tokio runtime context. Let me know if there are better ways to deal with this.</p>\n</blockquote>",
+        "id": 420481779,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707406037
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#pullrequestreview-1872120043\">PR review</a>.</p>",
+        "id": 420629122,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707476470
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#discussion_r1484162789\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah ok in that case you can handle that with some judicious calls to <code>with_ambient_tokio_runtime</code>. This got a panicking test to pass for me for example:</p>\n<p><div class=\"codehilite\" data-code-language=\"Diff\"><pre><span></span><code><span class=\"gh\">diff --git a/crates/wasi/src/preview2/host/tcp.rs b/crates/wasi/src/preview2/host/tcp.rs</span>\n<span class=\"gh\">index 1fce052cd..614495874 100644</span>\n<span class=\"gd\">--- a/crates/wasi/src/preview2/host/tcp.rs</span>\n<span class=\"gi\">+++ b/crates/wasi/src/preview2/host/tcp.rs</span>\n<span class=\"gu\">@@ -158,7 +160,7 @@ impl&lt;T: WasiView&gt; crate::preview2::host::tcp::tcp::HostTcpSocket for T {</span>\n<span class=\"w\"> </span>            TcpState::ConnectReady(result) =&gt; result,\n<span class=\"w\"> </span>            TcpState::Connecting(mut future) =&gt; {\n<span class=\"w\"> </span>                let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());\n<span class=\"gd\">-                match future.as_mut().poll(&amp;mut cx) {</span>\n<span class=\"gi\">+                match with_ambient_tokio_runtime(|| future.as_mut().poll(&amp;mut cx)) {</span>\n<span class=\"w\"> </span>                    Poll::Ready(result) =&gt; result,\n<span class=\"w\"> </span>                    Poll::Pending =&gt; {\n<span class=\"w\"> </span>                        socket.tcp_state = TcpState::Connecting(future);\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 420629472,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707476598
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#issuecomment-1935706980\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895\">PR #7895</a>:</p>\n<blockquote>\n<p>Looking into the <code>spawn</code> bits now one orthogonal thing to highlight is that this doesn't compile currently on macOS and there's a few more bits and pieces that need an update (feel free to <code>prtest:full</code> here)</p>\n</blockquote>",
+        "id": 420629486,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707476603
+    },
+    {
+        "content": "<p>badeend updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895\">PR #7895</a>.</p>",
+        "id": 420890951,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707659300
+    },
+    {
+        "content": "<p>badeend <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895#issuecomment-1937760539\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895\">PR #7895</a>:</p>\n<blockquote>\n<p>Thanks! I've removed the task spawn and fixed the MacOS build.</p>\n</blockquote>",
+        "id": 420891120,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707659486
+    },
+    {
+        "content": "<p>alexcrichton merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7895\">PR #7895</a>.</p>",
+        "id": 421067544,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1707753208
+    }
+]

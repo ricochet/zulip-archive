@@ -1,0 +1,416 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #3275 Use relative `call` instructions betw... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html">wasmtime / PR #3275 Use relative `call` instructions betw...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="251584831"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251584831" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251584831">(Sep 01 2021 at 16:06)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/3275">PR #3275</a> from <code>call-relative</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit is a relatively major change to the way that Wasmtime<br>
+generates code for Wasm modules and how functions call each other.<br>
+Prior to this commit all function calls between functions, even if they<br>
+were defined in the same module, were done indirectly through a<br>
+register. To implement this the backend would emit an absolute 8-byte<br>
+relocation near all function calls, load that address into a register,<br>
+and then call it. While this technique is simple to implement and easy<br>
+to get right, it has two primary downsides associated with it:</p>
+<ul>
+<li>
+<p>Function calls are always indirect which means they are more difficult<br>
+  to predict, resulting in worse performance.</p>
+</li>
+<li>
+<p>Generating a relocation-per-function call requires expensive<br>
+  relocation resolution at module-load time, which can be a large<br>
+  contributing factor to how long it takes to load a precompiled module.</p>
+</li>
+</ul>
+<p>To fix these issues, while also somewhat compromising on the previously<br>
+simple implementation technique, this commit switches wasm calls within<br>
+a module to using the <code>colocated</code> flag enabled in Cranelift-speak, which<br>
+basically means that a relative call instruction is used with a<br>
+relocation that's resolved relative to the pc of the call instruction<br>
+itself.</p>
+<p>When switching the <code>colocated</code> flag to <code>true</code> this commit is also then<br>
+able to move much of the relocation resolution from <code>wasmtime_jit::link</code><br>
+into <code>wasmtime_cranelift::obj</code> during object-construction time. This<br>
+frontloads all relocation work which means that there's actually no<br>
+relocations related to function calls in the final image, solving both<br>
+of our points above.</p>
+<p>The main gotcha in implementing this technique is that there are<br>
+hardware limitations to relative function calls which mean we can't<br>
+simply blindly use them. AArch64, for example, can only go +/- 64 MB<br>
+from the <code>bl</code> instruction to the target, which means that if the<br>
+function we're calling is a greater distance away then we would fail to<br>
+resolve that relocation. On x86_64 the limits are +/- 2GB which are much<br>
+larger, but theoretically still feasible to hit. Consequently the main<br>
+increase in implementation complexity is fixing this issue.</p>
+<p>This issue is actually already present in Cranelift itself, and is<br>
+internally one of the invariants handled by the <code>MachBuffer</code> type. When<br>
+generating a function relative jumps between basic blocks have similar<br>
+restrictions. This commit adds new methods for the <code>MachBackend</code> trait<br>
+and updates the implementation of <code>MachBuffer</code> to account for all these<br>
+new branches. Specifically the changes to <code>MachBuffer</code> are:</p>
+<ul>
+<li>
+<p>For AAarch64 the <code>LabelUse::Branch26</code> value now supports veneers, and<br>
+  AArch64 calls use this to resolve relocations.</p>
+</li>
+<li>
+<p>The <code>emit_island</code> function has been rewritten internally to handle<br>
+  some cases which previously didn't come up before, such as:</p>
+<ul>
+<li>
+<p>When emitting an island the deadline is now recalculated, where<br>
+  previously it was always set to infinitely in the future. This was ok<br>
+  prior since only a <code>Branch19</code> supported veneers and once it was<br>
+  promoted no veneers were supported, so without multiple layers of<br>
+  promotion the lack of a new deadline was ok.</p>
+</li>
+<li>
+<p>When emitting an island all pending fixups had veneers forced if<br>
+  their branch target wasn't known yet. This was generally ok for<br>
+  19-bit fixups since the only kind getting a veneer was a 19-bit<br>
+  fixup, but with mixed kinds it's a bit odd to force veneers for a<br>
+  26-bit fixup just because a nearby 19-bit fixup needed a veneer.<br>
+  Instead fixups are now re-enqueued unless they're known to be<br>
+  out-of-bounds. This may run the risk of generating more islands for<br>
+  19-bit branches but it should also reduce the number of islands for<br>
+  between-function calls.</p>
+</li>
+<li>
+<p>Otherwise the internal logic was tweaked to ideally be a bit more<br>
+  simple, but that's a pretty subjective criteria in compilers...</p>
+</li>
+</ul>
+</li>
+</ul>
+<p>I've added some simple testing of this for now. A synthetic compiler<br>
+option was create to simply add padded 0s between functions and test<br>
+cases implement various forms of calls that at least need veneers. A<br>
+test is also included for x86_64, but it is unfortunately pretty slow<br>
+because it requires generating 2GB of output. I'm hoping for now it's<br>
+not too bad, but we can disable the test if it's prohibitive and<br>
+otherwise just comment the necessary portions to be sure to run the<br>
+ignored test if these parts of the code have changed.</p>
+<p>The final end-result of this commit is that for a large module I'm<br>
+working with the number of relocations dropped to zero, meaning that<br>
+nothing actually needs to be done to the text section when it's loaded<br>
+into memory (yay!). I haven't run final benchmarks yet but this is the<br>
+last remaining source of significant slowdown when loading modules,<br>
+after I land a number of other PRs both active and ones that I only have<br>
+locally for now.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="251584909"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251584909" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251584909">(Sep 01 2021 at 16:06)</a>:</h4>
+<p>alexcrichton edited <a href="https://github.com/bytecodealliance/wasmtime/pull/3275">PR #3275</a> from <code>call-relative</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit is a relatively major change to the way that Wasmtime<br>
+generates code for Wasm modules and how functions call each other.<br>
+Prior to this commit all function calls between functions, even if they<br>
+were defined in the same module, were done indirectly through a<br>
+register. To implement this the backend would emit an absolute 8-byte<br>
+relocation near all function calls, load that address into a register,<br>
+and then call it. While this technique is simple to implement and easy<br>
+to get right, it has two primary downsides associated with it:</p>
+<ul>
+<li>
+<p>Function calls are always indirect which means they are more difficult<br>
+  to predict, resulting in worse performance.</p>
+</li>
+<li>
+<p>Generating a relocation-per-function call requires expensive<br>
+  relocation resolution at module-load time, which can be a large<br>
+  contributing factor to how long it takes to load a precompiled module.</p>
+</li>
+</ul>
+<p>To fix these issues, while also somewhat compromising on the previously<br>
+simple implementation technique, this commit switches wasm calls within<br>
+a module to using the <code>colocated</code> flag enabled in Cranelift-speak, which<br>
+basically means that a relative call instruction is used with a<br>
+relocation that's resolved relative to the pc of the call instruction<br>
+itself.</p>
+<p>When switching the <code>colocated</code> flag to <code>true</code> this commit is also then<br>
+able to move much of the relocation resolution from <code>wasmtime_jit::link</code><br>
+into <code>wasmtime_cranelift::obj</code> during object-construction time. This<br>
+frontloads all relocation work which means that there's actually no<br>
+relocations related to function calls in the final image, solving both<br>
+of our points above.</p>
+<p>The main gotcha in implementing this technique is that there are<br>
+hardware limitations to relative function calls which mean we can't<br>
+simply blindly use them. AArch64, for example, can only go +/- 64 MB<br>
+from the <code>bl</code> instruction to the target, which means that if the<br>
+function we're calling is a greater distance away then we would fail to<br>
+resolve that relocation. On x86_64 the limits are +/- 2GB which are much<br>
+larger, but theoretically still feasible to hit. Consequently the main<br>
+increase in implementation complexity is fixing this issue.</p>
+<p>This issue is actually already present in Cranelift itself, and is<br>
+internally one of the invariants handled by the <code>MachBuffer</code> type. When<br>
+generating a function relative jumps between basic blocks have similar<br>
+restrictions. This commit adds new methods for the <code>MachBackend</code> trait<br>
+and updates the implementation of <code>MachBuffer</code> to account for all these<br>
+new branches. Specifically the changes to <code>MachBuffer</code> are:</p>
+<ul>
+<li>
+<p>For AAarch64 the <code>LabelUse::Branch26</code> value now supports veneers, and<br>
+  AArch64 calls use this to resolve relocations.</p>
+</li>
+<li>
+<p>The <code>emit_island</code> function has been rewritten internally to handle<br>
+  some cases which previously didn't come up before, such as:</p>
+<ul>
+<li>
+<p>When emitting an island the deadline is now recalculated, where<br>
+  previously it was always set to infinitely in the future. This was ok<br>
+  prior since only a <code>Branch19</code> supported veneers and once it was<br>
+  promoted no veneers were supported, so without multiple layers of<br>
+  promotion the lack of a new deadline was ok.</p>
+</li>
+<li>
+<p>When emitting an island all pending fixups had veneers forced if<br>
+  their branch target wasn't known yet. This was generally ok for<br>
+  19-bit fixups since the only kind getting a veneer was a 19-bit<br>
+  fixup, but with mixed kinds it's a bit odd to force veneers for a<br>
+  26-bit fixup just because a nearby 19-bit fixup needed a veneer.<br>
+  Instead fixups are now re-enqueued unless they're known to be<br>
+  out-of-bounds. This may run the risk of generating more islands for<br>
+  19-bit branches but it should also reduce the number of islands for<br>
+  between-function calls.</p>
+</li>
+<li>
+<p>Otherwise the internal logic was tweaked to ideally be a bit more<br>
+  simple, but that's a pretty subjective criteria in compilers...</p>
+</li>
+</ul>
+</li>
+</ul>
+<p>I've added some simple testing of this for now. A synthetic compiler<br>
+option was create to simply add padded 0s between functions and test<br>
+cases implement various forms of calls that at least need veneers. A<br>
+test is also included for x86_64, but it is unfortunately pretty slow<br>
+because it requires generating 2GB of output. I'm hoping for now it's<br>
+not too bad, but we can disable the test if it's prohibitive and<br>
+otherwise just comment the necessary portions to be sure to run the<br>
+ignored test if these parts of the code have changed.</p>
+<p>The final end-result of this commit is that for a large module I'm<br>
+working with the number of relocations dropped to zero, meaning that<br>
+nothing actually needs to be done to the text section when it's loaded<br>
+into memory (yay!). I haven't run final benchmarks yet but this is the<br>
+last remaining source of significant slowdown when loading modules,<br>
+after I land a number of other PRs both active and ones that I only have<br>
+locally for now.</p>
+<p>cc <a href="https://github.com/bytecodealliance/wasmtime/issues/3230">https://github.com/bytecodealliance/wasmtime/issues/3230</a></p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="251584911"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251584911" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251584911">(Sep 01 2021 at 16:06)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/cfallin">cfallin</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/3275">PR #3275</a>.</p>
+
+
+
+<a name="251590874"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251590874" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251590874">(Sep 01 2021 at 16:43)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744165745">PR review</a>.</p>
+
+
+
+<a name="251590875"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251590875" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251590875">(Sep 01 2021 at 16:43)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700388765">PR review comment</a>:</p>
+<blockquote>
+<p>Crazy idea, but would it be possible for a single <code>MachBuffer</code> to somehow be used across all functions in a module? This would reduce the ability to compile functions in parallel though.</p>
+</blockquote>
+
+
+
+<a name="251593327"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251593327" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251593327">(Sep 01 2021 at 16:59)</a>:</h4>
+<p>pchickey submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744181520">PR review</a>.</p>
+
+
+
+<a name="251593328"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251593328" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251593328">(Sep 01 2021 at 16:59)</a>:</h4>
+<p>pchickey created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700400679">PR review comment</a>:</p>
+<blockquote>
+<p>Compiling functions in parallel is an important optimization we rely on in production</p>
+</blockquote>
+
+
+
+<a name="251596687"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251596687" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251596687">(Sep 01 2021 at 17:21)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3275">PR #3275</a> from <code>call-relative</code> to <code>main</code>.</p>
+
+
+
+<a name="251604799"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251604799" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251604799">(Sep 01 2021 at 18:15)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744235289">PR review</a>.</p>
+
+
+
+<a name="251604800"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251604800" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251604800">(Sep 01 2021 at 18:15)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744235289">PR review</a>.</p>
+
+
+
+<a name="251604801"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251604801" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251604801">(Sep 01 2021 at 18:15)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700442424">PR review comment</a>:</p>
+<blockquote>
+<p>extreme grammar-nit mode (sorry!) but end the sentence with a period here (thanks!).</p>
+</blockquote>
+
+
+
+<a name="251604802"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251604802" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251604802">(Sep 01 2021 at 18:15)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700441215">PR review comment</a>:</p>
+<blockquote>
+<p>s/can be reach/can reach/</p>
+</blockquote>
+
+
+
+<a name="251604803"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251604803" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251604803">(Sep 01 2021 at 18:15)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700444044">PR review comment</a>:</p>
+<blockquote>
+<p>s/it's in in-bounds/it's an in-bounds/</p>
+</blockquote>
+
+
+
+<a name="251604804"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251604804" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251604804">(Sep 01 2021 at 18:15)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700449171">PR review comment</a>:</p>
+<blockquote>
+<p>Once this PR merges, would you mind creating an issue to track this?</p>
+</blockquote>
+
+
+
+<a name="251604805"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251604805" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251604805">(Sep 01 2021 at 18:15)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700448779">PR review comment</a>:</p>
+<blockquote>
+<p>Yeah, fundamentally it makes sense to have a serialized process only at the very end, which is what this separate "text builder" use of <code>MachBuffer</code> is. Conceptually it's like a linker; I think the stage separation is reasonable.</p>
+</blockquote>
+
+
+
+<a name="251604806"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251604806" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251604806">(Sep 01 2021 at 18:15)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700453234">PR review comment</a>:</p>
+<blockquote>
+<p>Would it make sense to have some notion of page alignment per platform, or maybe just take the least-common-multiple of those for platforms we support? I'm thinking specifically of macOS/aarch64, where mmap'ing part of a file with only 4K alignment might be problematic with the 16K (?) pages by default.</p>
+</blockquote>
+
+
+
+<a name="251606167"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251606167" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251606167">(Sep 01 2021 at 18:24)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744260630">PR review</a>.</p>
+
+
+
+<a name="251606168"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251606168" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251606168">(Sep 01 2021 at 18:24)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700460121">PR review comment</a>:</p>
+<blockquote>
+<p>#3277, and indeed!</p>
+</blockquote>
+
+
+
+<a name="251606402"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251606402" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251606402">(Sep 01 2021 at 18:25)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744262110">PR review</a>.</p>
+
+
+
+<a name="251606403"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251606403" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251606403">(Sep 01 2021 at 18:25)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700461239">PR review comment</a>:</p>
+<blockquote>
+<p>Indeed! This PR is just moving this logic around as opposed to adding it (it's actually been around for quite some time, although it's more important to get right now that we're directly mmap'ing cache artifacts), so I'll leave this as-is for now, but I'll open an issue. The issue with M1 macs was actually <em>just</em> fixed in <a href="https://github.com/bytecodealliance/wasmtime/pull/3274">https://github.com/bytecodealliance/wasmtime/pull/3274</a> as well, so it definitely needs fixing soon!</p>
+</blockquote>
+
+
+
+<a name="251606489"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251606489" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251606489">(Sep 01 2021 at 18:26)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3275">PR #3275</a> from <code>call-relative</code> to <code>main</code>.</p>
+
+
+
+<a name="251606673"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233275%20Use%20relative%20%60call%60%20instructions%20betw.../near/251606673" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233275.20Use.20relative.20.60call.60.20instructions.20betw.2E.2E.2E.html#251606673">(Sep 01 2021 at 18:27)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/3275">PR #3275</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

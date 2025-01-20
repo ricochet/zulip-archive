@@ -1,0 +1,203 @@
+<html>
+<head><meta charset="utf-8"><title>call indirect index &amp; idiosyncrasies of wasm · wasm · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/index.html">wasm</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html">call indirect index &amp; idiosyncrasies of wasm</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="405119373"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/405119373" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jannik Schütz <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#405119373">(Nov 30 2023 at 13:38)</a>:</h4>
+<p>Hi, i am new here and hope this is the correct stream for this. I am trying to understand, where <code>call_indirect</code>'s come from and i want to determine the call indirect index for a static analysis call graph generator.<br>
+Why are there so many in Rust? Even if you compile this simple code snippet:</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>fn<span class="w"> </span>main<span class="o">()</span><span class="w"> </span><span class="o">{</span><span class="w"> </span><span class="nb">let</span><span class="w"> </span><span class="nv">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="m">123</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+</code></pre></div>
+<p>to WebAssembly you get 76 indirect calls. For a hello world you get over one hundred.<br>
+I analyzed the <a href="https://github.com/sola-st/WasmBench">WasmBench dataset</a> and looked for pattern ahead of a call indirect and it turns out, that there are basically two patterns determining over 87% the index. <br>
+The first one is the <code>Add Case</code> and the second one the <code>Load Offset Case</code>:<br>
+<a href="/user_uploads/15107/ZlsphItJBc6BqR0R79dH24RV/add.png">add.png</a><br>
+<a href="/user_uploads/15107/6pm8o6XYbZ97RJwoLGjlNyWR/load-offset.png">load-offset.png</a></p>
+<div class="message_inline_image"><a href="/user_uploads/15107/ZlsphItJBc6BqR0R79dH24RV/add.png" title="add.png"><img src="/user_uploads/15107/ZlsphItJBc6BqR0R79dH24RV/add.png"></a></div><div class="message_inline_image"><a href="/user_uploads/15107/6pm8o6XYbZ97RJwoLGjlNyWR/load-offset.png" title="load-offset.png"><img src="/user_uploads/15107/6pm8o6XYbZ97RJwoLGjlNyWR/load-offset.png"></a></div><p>The interesting part is that the <code>Add Case</code> has a bitwise AND and only the last instruction differs, which is either a <code>load/load offset</code> or a <code>local.get</code>(they sum up to 99.78% of this pattern). And the <code>Load Offset Case</code>is just a mixture of <code>load/load offset</code> and the <code>local.get</code> instruction.</p>
+<p>So to predict the index, i would have the read from the memory and get a local variable(which could also be a function parameter). I build the memory from the data segments with <a href="https://docs.rs/walrus/latest/walrus/">Walrus</a> assuming that the memory holding the value doesn't change - but encountered, that the assumption is wrong - since i've found that in a file we read from a different offset and call a different function type, but with the same "self read from memory index" 0, which is a violation to the language, as the table only holds one function under each index with a fixed type.<br>
+This leads me to the question, why does WebAssembly take the indirection over the memory?</p>
+<p>Another idiosyncrasie i found, was when looking at the metadata file containing the source languages/compilers of each file. I did this, because i thought there must be correlation between the compiler and the occurrence of these two cases.</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>Case:<span class="w"> </span>C++<span class="w"> </span>-<span class="w"> </span>Rust
+Add:<span class="w">   </span><span class="m">540</span><span class="w"> </span>-<span class="w"> </span><span class="m">46</span>
+Load:<span class="w"> </span><span class="m">305</span><span class="w"> </span>-<span class="w"> </span><span class="m">1118</span>
+
+Files<span class="w"> </span>from<span class="w"> </span>C++:<span class="w"> </span><span class="m">4047</span>
+Files<span class="w"> </span>from<span class="w"> </span>Rust:<span class="w"> </span><span class="m">1261</span>
+Files<span class="w"> </span>with<span class="w"> </span>both<span class="w"> </span>cases:<span class="w"> </span><span class="m">0</span>
+</code></pre></div>
+<p>The interesting thing is, that i never found a file, which contained both cases. It seems like once the compiler decides to use either the <code>Add Case</code> or the <code>Load Offset Case</code> it sticks to it.<br>
+Another obscure thing is, that there are often empty function declarations as the first local function in WebAssembly - since they do not have any function body, they can't do anything <code>(func (;;1;;) (type 1: [], [])</code>. </p>
+<p>So hopefully you can help me with my questions:</p>
+<ol>
+<li>Why are there so many indirect calls in even the simplest Rust code?</li>
+<li>Where do these indirect calls come from, when does the compiler decide to use one?</li>
+<li>Why does WebAssembly use the indirection over the memory determining the index?</li>
+</ol>
+<hr>
+<p>Not so relevant, but still interesting questions:</p>
+<ol start="4">
+<li>Why are there never both cases in a file?</li>
+<li>Why is there often an empty function as the first local function?</li>
+<li>Why is the a bitwise AND instruction in the Add Case, if we are working on an integer, which is the index of a table?</li>
+</ol>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/sola-st/WasmBench" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/a6bd9343c6437d66341888ce32dc5d388c59c8ed\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f356566333339663361326638633930376230373537653761386338316230333962663436366335623639316438653239333133613566336630623039616631382f736f6c612d73742f5761736d42656e6368)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/sola-st/WasmBench" title="GitHub - sola-st/WasmBench: A large dataset of real-world WebAssembly binaries, collected from the Web, GitHub, NPM and other sources. Useful as test data, to study WebAssembly, for training machine learning models, and much more.">GitHub - sola-st/WasmBench: A large dataset of real-world WebAssembly binaries, collected from the Web, GitHub, NPM and other sources. Useful as test data, to study WebAssembly, for training machine learning models, and much more.</a></div><div class="message_embed_description">A large dataset of real-world WebAssembly binaries, collected from the Web, GitHub, NPM and other sources. Useful as test data, to study WebAssembly, for training machine learning models, and much ...</div></div></div>
+
+
+
+<a name="405146252"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/405146252" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#405146252">(Nov 30 2023 at 15:51)</a>:</h4>
+<blockquote>
+<p>Why are there so many indirect calls in even the simplest Rust code?</p>
+</blockquote>
+<p>This is more-or-less answered "the rust standard library". There's code that runs before <code>main</code>, so your function isn't literally the only one in the program, and this supporting code does indirect calls.</p>
+<blockquote>
+<p>Where do these indirect calls come from, when does the compiler decide to use one?</p>
+</blockquote>
+<p>The answer to this is an indirect function call. Think calling through a function pointer in Rust or C/C++.</p>
+<blockquote>
+<p>Why does WebAssembly use the indirection over the memory determining the index?</p>
+</blockquote>
+<p>WebAssembly functions are stored in a "table" which cannot be modified by Rust/C/C++ at this time (or at least wasn't modifiable historically, Clang may have niche intrinsics nowadays). This means that function "pointers" are actually indices into this table (as represented in these languages). The function pointer is frequently stored in memory since that's how the program stored it.</p>
+
+
+
+<a name="405146841"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/405146841" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#405146841">(Nov 30 2023 at 15:54)</a>:</h4>
+<blockquote>
+<p>Why are there never both cases in a file?</p>
+</blockquote>
+<p>Unsure! Might just be idiomatic differences between languages.</p>
+<blockquote>
+<p>Why is there often an empty function as the first local function?</p>
+</blockquote>
+<p>Table index 0 is intended to be empty, or the equivalent of <code>ref.null func</code>. This is so if you happen to call the "null pointer", which in this case is table index 0, then you'll get a trap which is similar to a segfault on native platforms.</p>
+<blockquote>
+<p>Why is the a bitwise AND instruction in the Add Case, if we are working on an integer, which is the index of a table?</p>
+</blockquote>
+<p>I'm not sure myself.</p>
+
+
+
+<a name="405844991"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/405844991" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jannik Schütz <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#405844991">(Dec 04 2023 at 15:09)</a>:</h4>
+<p>Hi Alex,</p>
+<p>thank you so far, for your answers. I want to dig deeper and i hope you can help me.<br>
+Can you give me a link to the code, where the call_indirects are produced by the compiler?</p>
+<p>Thank you in advance</p>
+
+
+
+<a name="405848077"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/405848077" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#405848077">(Dec 04 2023 at 15:23)</a>:</h4>
+<p>Ah sorry I dont know where they're produced in LLVM</p>
+
+
+
+<a name="406292501"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406292501" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jannik Schütz <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406292501">(Dec 06 2023 at 12:15)</a>:</h4>
+<blockquote>
+<blockquote>
+<p>Why is there often an empty function as the first local function?</p>
+</blockquote>
+<p>Table index 0 is intended to be empty, or the equivalent of <code>ref.null func</code>. This is so if you happen to call the "null pointer", which in this case is table index 0, then you'll get a trap which is similar to a segfault on native platforms.</p>
+</blockquote>
+<p>As there is currently only one table at most allowed in WA, that can only hold <code>funcref</code>s i thought, that the table is the function table, used for the <code>call_indirect</code>s, to determine which function is called.<br>
+How is this table build? I thought it was simply first all the imported functions starting at index 0 and then the local functions? But this doesn't work out with the <code>elem</code>statements - do these come before or after the imports? Are all functions of the module in this function table? Or is it rather, that the function table only contains <code>call_indirect</code> related functions (so a limited set of all functions in the module)? For example only the functions set with an active elem declaration. </p>
+<blockquote>
+<blockquote>
+<p>Why does WebAssembly use the indirection over the memory determining the index?</p>
+</blockquote>
+<p>WebAssembly functions are stored in a "table" which cannot be modified by Rust/C/C++ at this time (or at least wasn't modifiable historically, Clang may have niche intrinsics nowadays). This means that function "pointers" are actually indices into this table (as represented in these languages). The function pointer is frequently stored in memory since that's how the program stored it.</p>
+</blockquote>
+<p>Why do they use the memory to store pointer, rather than the stack? Isn't this causing a lot of overhead (reading and writing from and to the memory)?</p>
+<blockquote>
+<blockquote>
+<p>Why are there so many indirect calls in even the simplest Rust code?</p>
+</blockquote>
+<p>This is more-or-less answered "the rust standard library". There's code that runs before <code>main</code>, so your function isn't literally the only one in the program, and this supporting code does indirect calls.</p>
+</blockquote>
+<p>Yes, nice - i compiled <code>main() { let a=123; }</code> to WebAssembly and received 76 call_indirects. Compiling the same example with <code>#[no_std] #[no_main]</code>gives us zero call_indirects <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="406321188"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406321188" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406321188">(Dec 06 2023 at 14:47)</a>:</h4>
+<p>Presumably function pointers <em>are</em> sometimes stored in on the stack.  But also sometimes in memory, e.g.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">bar</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">u32</span> <span class="p">{</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">}</span>
+<span class="k">struct</span> <span class="nc">Foo</span><span class="w"> </span><span class="p">{</span>
+<span class="w">  </span><span class="n">ptr</span>: <span class="nc">fn</span><span class="p">(</span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">u32</span><span class="p">,</span>
+<span class="p">}</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">foo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span>::<span class="n">new</span><span class="p">(</span><span class="n">Foo</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ptr</span>: <span class="nc">bar</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+
+
+
+<a name="406331981"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406331981" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406331981">(Dec 06 2023 at 15:38)</a>:</h4>
+<p>Rust function pointers are lowered to indexes into the wasm table with function referenced.</p>
+
+
+
+<a name="406332053"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406332053" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406332053">(Dec 06 2023 at 15:38)</a>:</h4>
+<p>You can't directly store a funcref in the linear memory.</p>
+
+
+
+<a name="406332231"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406332231" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406332231">(Dec 06 2023 at 15:39)</a>:</h4>
+<p>Note that the emulated stack is stored in the linear memory next to the heap and global variables.</p>
+
+
+
+<a name="406332266"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406332266" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406332266">(Dec 06 2023 at 15:39)</a>:</h4>
+<p>right, but you can store the table index in linear memory, which is what the code above illustrates.</p>
+
+
+
+<a name="406332431"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406332431" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406332431">(Dec 06 2023 at 15:40)</a>:</h4>
+<p>Indeed</p>
+
+
+
+<a name="406332444"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406332444" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406332444">(Dec 06 2023 at 15:40)</a>:</h4>
+<p>and as long as you don't take the address of that index, you can put it on the actual wasm stack</p>
+
+
+
+<a name="406332548"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406332548" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406332548">(Dec 06 2023 at 15:40)</a>:</h4>
+<p>(I assume)</p>
+
+
+
+<a name="406332647"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406332647" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406332647">(Dec 06 2023 at 15:41)</a>:</h4>
+<p>That is correct.</p>
+
+
+
+<a name="406956942"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/406956942" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jannik Schütz <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#406956942">(Dec 09 2023 at 17:19)</a>:</h4>
+<p>Ok, thank you. And how is the table build? Are all functions of the module in this function table? Or is it rather, that the function table only contains a subset of functions, which are loaded via <code>elem</code> segments into the table?</p>
+
+
+
+<a name="407030235"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/223391-wasm/topic/call%20indirect%20index%20%26%20idiosyncrasies%20of%20wasm/near/407030235" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/223391-wasm/topic/call.20indirect.20index.20.26.20idiosyncrasies.20of.20wasm.html#407030235">(Dec 10 2023 at 09:14)</a>:</h4>
+<p>The wasm file contains the list of things to put in the table. I believe wasm-ld by default only puts functions that actually get turned into a function pointer there, not every function in existence.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

@@ -1,0 +1,1292 @@
+[
+    {
+        "content": "<p>Yesterday we discussed with <span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span>, <span class=\"user-mention\" data-user-id=\"234973\">@Till Schneidereit</span>  and others that TCP+TLS handshake typically have significant network latency.</p>\n<p>That latency is not great fit for hosting model where we want to create application/component instance per incoming request/event.</p>\n<p>In dotnet application servers this is solved by <a href=\"https://learn.microsoft.com/en-us/sql/connect/ado-net/sql-server-connection-pooling\">connection pooling.</a>. But that is not compatible with instance per request hosting.</p>\n<p>So I wonder if we could have something like network session pooling as WASI interface. It could be implemented by the host or by another component with longer lifecycle.</p>\n<p>We are designing <a href=\"https://github.com/WebAssembly/wasi-sockets/issues/100\">TLS stream</a> as a transformer. Without the TCP connection. But I wonder if a wrapper of that together with TCP connection is the right direction? Let's call it \"TLS session pooling\".</p>\n<p>Problems I can see are in security and state management of such session.<br>\nThe session typically would be authenticated to particular DB user, using password or using private key on TLS layer.<br>\nThe generic session cache would no way knowing how to make the application level (SQL) handshake, like login, selection of the database schema etc.<br>\nSo the creation of new session would have to be done inside of the application component ?<br>\nAlso the application should not release the session back to the pool, unless it's in some base state. For example, no open DB transaction.</p>\n<p>Alternatively I can see alternate design, where the Microsoft.Data.SqlClient would long lived WASI component living side by side next to the short lived request handler WASI component.<br>\nThat would make the whole affair very specific to SQL server and dotnet. We could have bespoke WIT for that.<br>\nThe benefit would be that the existing code is solving those security/state problems already.<br>\nI would call that \"SQL server connection pooling component for dotnet\".</p>\n<p>In any case, it seems to me we could not make it work transparently without WASI specific changes in Microsoft.Data.SqlClient, right ?</p>\n<p>I can see that other long lived protocols may have similar problems, if they are implemented in terms of wasi:sockets, rather than by the WASI host. Web Sockets and HTTP/3 come to mind.</p>\n<p>So I think it would be good to establish at least some common best practice guidance.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://learn.microsoft.com/en-us/sql/connect/ado-net/sql-server-connection-pooling\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/3ce17f2b2911dcb735720cc46e75758679339053/68747470733a2f2f6c6561726e2e6d6963726f736f66742e636f6d2f656e2d75732f6d656469612f6f70656e2d67726170682d696d6167652e706e67&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://learn.microsoft.com/en-us/sql/connect/ado-net/sql-server-connection-pooling\" title=\"SQL Server connection pooling - ADO.NET Provider for SQL Server\">SQL Server connection pooling - ADO.NET Provider for SQL Server</a></div><div class=\"message_embed_description\">Learn how Microsoft SqlClient Data Provider for SQL Server minimizes the cost of opening connections by using SQL Server connection pooling, which reduces overhead for new connections.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasi-sockets/issues/100\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/aed9451697747ac7622647bdd7fa0a36a8f4458b/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f373337333861356537333064396666666561316533363436656465373864633666306434323766303833323339313338643030633036633631626134356663632f576562417373656d626c792f776173692d736f636b6574732f6973737565732f313030&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasi-sockets/issues/100\" title=\"TLS (Transport Layer Security) · Issue #100 · WebAssembly/wasi-sockets\">TLS (Transport Layer Security) · Issue #100 · WebAssembly/wasi-sockets</a></div><div class=\"message_embed_description\">TODO https://github.com/Mbed-TLS/mbedtls https://github.com/enarx-archive/tlssock</div></div></div>",
+        "id": 469593586,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726128887
+    },
+    {
+        "content": "<p>this is of course a great and difficult conversation. I'd chatted a bit with Till periodically about similar things</p>",
+        "id": 469631963,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726137751
+    },
+    {
+        "content": "<p>what follows is my take, with which everyone should feel free to disagree.</p>",
+        "id": 469632049,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726137785
+    },
+    {
+        "content": "<p>I see several variables at play:</p>\n<ul>\n<li>preview 2 vs preview 3++</li>\n<li>lifetime considerations, which are typically related to state held on behalf of the shorter-lifetime subcomponents that import the dep</li>\n<li>security concerns related to the fact that within a module, there's no readonly memory, meaning that you <strong>must</strong> use component memory boundaries as a primary mechanism to isolate against hostile calling code</li>\n</ul>",
+        "id": 469632625,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726137911
+    },
+    {
+        "content": "<p>in very short-lived functions, CDN functions for example, you really do not WANT threading because scheduling/orch of external work is not really what the function is for. You want execution and cleanup. In these cases:</p>\n<ul>\n<li>threading is only for code compilation needs, and not for increased throughput. turning off gc in go, for example.</li>\n<li>preview 2 doesn't have stream/processing capabilities yet, so there's a bunch of copying for now (not a huge problem except with big data -- wasi-nn's named model escape hatch is for that reason</li>\n<li>no real lifetime considerations unrelated to networking and other things that are dependencies that live longer  than the request processing</li>\n</ul>",
+        "id": 469639427,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726139591
+    },
+    {
+        "content": "<p>and for those kinds of functions, you're very likely to ship one component with everythign in it, as there are only a few functions you're implementing/using.</p>",
+        "id": 469639617,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726139625
+    },
+    {
+        "content": "<p>for me, these don't cause too much trouble</p>",
+        "id": 469640216,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726139721
+    },
+    {
+        "content": "<p>what does is the real world in which to achieve high throughput requires the things we do not yet have:threads/streams and so on. it also requires components that hold state (caches or pools) for shorter-lived items that use them -- here, the connection pooling is a great example. So I immediately think of layers of components most of which do basic work we already do in native \"servers\" or \"clients that handle lots of things on behalf of various functions\"</p>",
+        "id": 469640571,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726139847
+    },
+    {
+        "content": "<p>wasi:sockets would be the bottom layer, in this view, and then wasi:tcp and wasi:http. Somewhere at the appropriate layer, wasi:tls would be involved -- it handles that portion of the network handshake.</p>",
+        "id": 469640834,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726139925
+    },
+    {
+        "content": "<p>so this kind of layering might require additions to wasi:http/tcp and so on to do the tls dancing by calling out to a wasi:tls implementation. in each case, we lean into the security boundary of a component to protect against memory attacks from outside the component (keeping always in mind the lack fo readonly memory).</p>",
+        "id": 469641338,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140058
+    },
+    {
+        "content": "<p>one quick note before replying to other parts: <code>wasi:http</code> is very intentionally not specified in terms of <code>wasi:sockets</code>, so that layering picture doesn't reflect how things are actually set up. This is pretty key, because it means that <code>wasi:http</code> isn't restricted to functionality that can be expressed in terms of <code>wasi:sockets</code>, nor does being able to implement <code>wasi:http</code> need to imply also being able to implement <code>wasi:sockets</code> (see browsers as an example of the latter)</p>",
+        "id": 469641456,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726140092
+    },
+    {
+        "content": "<p>in the usual case, these would all be shipped as a \"stack\" of components that do the right thing, used by a client that invokes the highest abstraction it's necessary to use.</p>",
+        "id": 469641504,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140102
+    },
+    {
+        "content": "<p>I also don't think that we need to change any of this to address the issues Pavel raised</p>",
+        "id": 469641619,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726140122
+    },
+    {
+        "content": "<p>Pavel, Joel, and I had a chance to talk about this during a meeting yesterday, and my following thoughts are substantially based on that conversation:</p>\n<p>I agree with Pavel that establishing a new TCP+TLS connection in terms of <code>wasi:sockets</code> each and every time will be prohibitively costly and inefficient. I don't think that'll change in any meaningful way with WASIp3+, nor do intra-component security considerations change the picture all that much—but I'd like to understand your argument about that better, <span class=\"user-mention\" data-user-id=\"268586\">@Ralph</span></p>",
+        "id": 469641862,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726140170
+    },
+    {
+        "content": "<p>Till, that's a great point -- and one I love. I'm using a layering metaphor merely to ensure that we take into account the <em>feature</em> of the component boundary for memory and the higher level abstraction that most people should use that means -- like wasi:http -- that you can't just reach down and grab wasi:sockets from guest code.</p>",
+        "id": 469642027,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140203
+    },
+    {
+        "content": "<p>I also don't think threads really are involved all that much in this. In dotnet specifically, the connection pool is implemented in terms of threads, but that wouldn't have had to be the case. And to me the instance lifetime issues are the much more substantial concern</p>",
+        "id": 469642368,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726140248
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"234973\">Till Schneidereit</span> <a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling/near/469641862\">said</a>:</p>\n<blockquote>\n<p>Pavel, Joel, and I had a chance to talk about this during a meeting yesterday, and my following thoughts are substantially based on that conversation:</p>\n<p>I agree with Pavel that establishing a new TCP+TLS connection in terms of <code>wasi:sockets</code> each and every time will be prohibitively costly and inefficient. I don't think that'll change in any meaningful way with WASIp3+, nor do intra-component security considerations change the picture all that much—but I'd like to understand your argument about that better, <span class=\"user-mention silent\" data-user-id=\"268586\">Ralph</span></p>\n</blockquote>\n<p>Take the abstraction and figure out the path that relieves it. connection pooling is a cache to enable shorter-lived things to NOT do connection creation. and this happens at multiple layers with varying kinds of data. Caches are great things.</p>",
+        "id": 469642551,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140274
+    },
+    {
+        "content": "<p>Ah, that makes sense, and I strongly agree!</p>",
+        "id": 469642556,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726140275
+    },
+    {
+        "content": "<p>(will continue in a bit, have to switch trains)</p>",
+        "id": 469642974,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726140361
+    },
+    {
+        "content": "<p>so I'm thinking out loud about how you would establish a coherent http/tls story that doesn't just open calls up to everyone. Maybe we need to! But I'd like to think that whatever needs to establish secure connections AND pool them might be their own components that are typically configured together. Yes, the user might code to wasi:sql (for one example) and oracle:sql (for another) but we wouldn't be building either with full access to all the calls involved.</p>",
+        "id": 469643317,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140455
+    },
+    {
+        "content": "<p>I happen to love the component memory boundary <em>as a feature</em>, and I look for places to lean in.</p>",
+        "id": 469643465,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140489
+    },
+    {
+        "content": "<p>but when we're building the innards of the core protocols, it's possible we can't do it easily -- yet. And this is where the threading/streams comes in. Once you have threads, you can have async scale processing that takes advantage of cores. That means that <code>prohibitively costly and inefficient</code> will become less so. Once you have streams, you can have network filters that can actually approach native speeds (which can't happen with copying that fast).</p>",
+        "id": 469643908,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140608
+    },
+    {
+        "content": "<p>a real web server does several layers of caching different things and each one is managed using thread systems. They max out the OS functionality to the very best of their ability. There is no way we could hope to approach that in components until we have similar OS-like capabilities. Maybe even then we don't get close enough! But that's the point I'm trying to make about the difference between p2 and p3+.</p>",
+        "id": 469644335,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140719
+    },
+    {
+        "content": "<p>I'm thinking that read-only \"caching\" of the sessions would be ideal from layering and security perspective. We know how to do that for HTTP. Maybe the host uses keep-alive, but individual HTTP requests are well isolated and long-lived aspect is no business of the application code.</p>\n<p>This is not the case with SQL session, you use <code>SET NOCOUNT</code> in your session and now the session is \"dirty\".</p>",
+        "id": 469644541,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726140757
+    },
+    {
+        "content": "<p>F5's unitd <em>absolutely screams</em> using wasi:http and it's because it handles all the networking.</p>",
+        "id": 469644610,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140774
+    },
+    {
+        "content": "<p>I'll be very interested to hear Till's ideas here when he gets on the next train. But wrt <code>This is not the case with SQL session, you use </code>SET NOCOUNT<code> in your session and now the session is \"dirty\".</code>, how would you model that abstractly now?</p>",
+        "id": 469644966,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140840
+    },
+    {
+        "content": "<p>it sounds like a sql conn is potentially dirty and potentially clean.....</p>",
+        "id": 469645154,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140862
+    },
+    {
+        "content": "<p>what are the consequences of a dirtyconn, here? That the conn is long lived and has state floating around but is reused anyway?</p>",
+        "id": 469645532,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726140927
+    },
+    {
+        "content": "<p>And probably the implementation of the pooling in the <code>Microsoft.Data.SqlClient</code> is able to deal with that already. Modeling it abstractly .. we can't trust the application code to say \"i made it dirty\" with confidence.</p>",
+        "id": 469645797,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726140985
+    },
+    {
+        "content": "<p>SHOULD the app code be able to do that? currently, the answer is yes?</p>",
+        "id": 469645862,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141017
+    },
+    {
+        "content": "<p>and also, can it change the choice dynamically?</p>",
+        "id": 469645935,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141042
+    },
+    {
+        "content": "<p>In the case of MSSQL specifically: when the shortlived client exits, the host can <code>sp_reset_connection</code> to \"clean up\" the session and get it ready for the next client session, right?</p>",
+        "id": 469645986,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726141061
+    },
+    {
+        "content": "<p>does &lt;3 mean yes?</p>",
+        "id": 469646191,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141127
+    },
+    {
+        "content": "<p>:-)</p>",
+        "id": 469646196,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141129
+    },
+    {
+        "content": "<p>I means I didn't know about it. And that I love it's there. Is is \"clean enough\" ? IDK</p>",
+        "id": 469646323,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726141175
+    },
+    {
+        "content": "<p>guess who gets to make that decision? :-P</p>",
+        "id": 469646355,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141191
+    },
+    {
+        "content": "<p>question: does Microsoft.Data.SqlClient only connect to mssql? or can u use it against other dbs?</p>",
+        "id": 469646480,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141216
+    },
+    {
+        "content": "<p>MSSQL only</p>",
+        "id": 469646696,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726141283
+    },
+    {
+        "content": "<p>there is dedicated <a href=\"https://github.com/npgsql/npgsql\">https://github.com/npgsql/npgsql</a> for example</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/npgsql/npgsql\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/e01152bb0abe8e3ee710c9444fa12a8afa0cc9df/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f623363343663333132633761663637366231666361396163613435383266373836643331393231616633663236653966313435303264366134356261306637322f6e706773716c2f6e706773716c&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/npgsql/npgsql\" title=\"GitHub - npgsql/npgsql: Npgsql is the .NET data provider for PostgreSQL.\">GitHub - npgsql/npgsql: Npgsql is the .NET data provider for PostgreSQL.</a></div><div class=\"message_embed_description\">Npgsql is the .NET data provider for PostgreSQL. Contribute to npgsql/npgsql development by creating an account on GitHub.</div></div></div>",
+        "id": 469646730,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726141296
+    },
+    {
+        "content": "<p>But, AFAIK, every major database has its own equivalent of <code>sp_reset_connection</code></p>",
+        "id": 469646870,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726141325
+    },
+    {
+        "content": "<p>So that's a research point, because something like that will really help this conversation <em>about sql</em></p>",
+        "id": 469647003,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141354
+    },
+    {
+        "content": "<p>Correct</p>",
+        "id": 469647056,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726141364
+    },
+    {
+        "content": "<p>does HTTP/3 have such thing ?</p>",
+        "id": 469647290,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726141412
+    },
+    {
+        "content": "<p>http/3 is wild, imho</p>",
+        "id": 469647348,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141423
+    },
+    {
+        "content": "<p>that one requires thought. I still think the focus on lifetimes of things doing dependent caching for layers above is the thing that pops the design free</p>",
+        "id": 469647723,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141495
+    },
+    {
+        "content": "<p>you can handle varying lifetimes in the same component, but without internal threading that's going to bog down</p>",
+        "id": 469647893,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141542
+    },
+    {
+        "content": "<p>but kept separate, you have more possibilities and are likely leaning into the component memory boundary <em>feature</em></p>",
+        "id": 469648010,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141568
+    },
+    {
+        "content": "<p>that's my take -- you all are much more intelligent than me here</p>",
+        "id": 469648063,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141585
+    },
+    {
+        "content": "<p>I don't see what threads have to with this, though. The real issue to me seems to be: how to compose components with varying instance lifetimes.<br>\nE.g. in this case there should be a SQL \"driver\"/\"service\" instance with a longer lifetime than any of its short-lived consumers. _Without_ having to special case everything as special wasmtime/host behavior</p>",
+        "id": 469648082,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726141592
+    },
+    {
+        "content": "<p>What I'm saying is that <em>currently</em> if you wanna do pooling, your pool is going to want to scale out and that's done using async/threads.</p>",
+        "id": 469648297,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141662
+    },
+    {
+        "content": "<p>if you wanted a wasi:connectionpooling impl, you're either going to have everythign be a component inside or youu're going to use async/threads inside <em>because that's something you already know how to do</em></p>",
+        "id": 469648450,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141703
+    },
+    {
+        "content": "<p>Right, in the current world, you'd need to set up one long-lived component instance that handles _all_ requests.</p>",
+        "id": 469648468,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726141708
+    },
+    {
+        "content": "<p>because you can't create pollable in guest, right ?</p>",
+        "id": 469648645,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726141759
+    },
+    {
+        "content": "<p>now, <span class=\"user-mention\" data-user-id=\"378155\">@Dave Bakker (badeend)</span> you're right in your focus on \"compose components with varying lifetimes\". Right now, using wasi:http, we don't use threads to go fast! in fact, threads get in the way. The question becomes more important once \"people\" want to build a connectionpooling component. They can do it using subcomponents as shorterlived items that the outercomponents manages. it's essentially a very small \"serverless\" approach to avoid threads.</p>",
+        "id": 469648990,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141841
+    },
+    {
+        "content": "<p>well, I had written a long thing, which didn't go through because WIFI on trains, and now Zulip reloaded and (properly: correctly) decided that all of that was too poorly worded to retain</p>",
+        "id": 469649001,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726141846
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"234973\">Till Schneidereit</span> <a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling/near/469649001\">said</a>:</p>\n<blockquote>\n<p>well, I had written a long thing, which didn't go through because WIFI on trains, and now Zulip reloaded and (properly: correctly) decided that all of that was too poorly worded to retain</p>\n</blockquote>\n<p>NEVER, TILL, NEVER!!!!!</p>",
+        "id": 469649075,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141866
+    },
+    {
+        "content": "<p>in centralized services, you're always going to be handling the really large scale, long lived stuff <em>outside the guest function</em></p>",
+        "id": 469649230,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141919
+    },
+    {
+        "content": "<p>you don't need a \"host component\" for that, even if you could do it.</p>",
+        "id": 469649322,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141936
+    },
+    {
+        "content": "<p>too kind, too kind</p>",
+        "id": 469649338,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726141939
+    },
+    {
+        "content": "<blockquote>\n<p>because you can't create pollable in guest, right ?</p>\n</blockquote>\n<p>It Depends™. There exists a conversation somewhere on this Zulip with much more background on that. But the TLDR is somewehre on the spectrum between: \"No\" and \"Yes, but it will be a lot of work\"</p>",
+        "id": 469649434,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726141961
+    },
+    {
+        "content": "<p>but I'm thinking again of the hardware gateway that won't be updated for years and for which someone might want the entire webserver in a component.</p>",
+        "id": 469649583,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726141993
+    },
+    {
+        "content": "<p>anyway, I propose we set threading aside, because I think we can fully assume that we want to have a way to do pooling without requiring (very) long-lived instances</p>",
+        "id": 469649619,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726142004
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"234973\">Till Schneidereit</span> <a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling/near/469649619\">said</a>:</p>\n<blockquote>\n<p>anyway, I propose we set threading aside, because I think we can fully assume that we want to have a way to do pooling without requiring (very) long-lived instances</p>\n</blockquote>\n<p>agreed, officially set that aside, back to sql conn pooling/dirty/clean</p>",
+        "id": 469649763,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726142033
+    },
+    {
+        "content": "<p>While the \"dirty/clean\" aspect is an important prerequisite for connection sharing to work, its not really of importance to the WASI/WIT/Components discussion. Either the underlying protocol supports it (HTTP, SQL, ..) and can be implemented by an implementation-specific \"driver\". Or: the protocol doesn't support it, in which case there's also no need to think about it any further here :P</p>",
+        "id": 469651703,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726142525
+    },
+    {
+        "content": "<p>Great job! our work is done. :-)</p>",
+        "id": 469651775,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726142547
+    },
+    {
+        "content": "<p>Nice, let's take the rest of the day off <span aria-label=\"palm tree\" class=\"emoji emoji-1f334\" role=\"img\" title=\"palm tree\">:palm_tree:</span></p>",
+        "id": 469651898,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726142577
+    },
+    {
+        "content": "<p><em>already drinking</em></p>",
+        "id": 469651939,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726142585
+    },
+    {
+        "content": "<p>exactly! (And I now have proof that Zulip was correct in eating my homework: that's much more concise than what I had)</p>",
+        "id": 469651963,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726142590
+    },
+    {
+        "content": "<p>What I'm imagining as a minimum client connection pooling API for <code>wasi:tls</code> would be roughly this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">interface</span><span class=\"w\"> </span><span class=\"n\">client</span><span class=\"o\">-</span><span class=\"n\">connection</span><span class=\"o\">-</span><span class=\"n\">pool</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">put</span><span class=\"p\">(</span><span class=\"n\">connection</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">client</span><span class=\"o\">-</span><span class=\"n\">connection</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">identities</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">option</span><span class=\"o\">&lt;</span><span class=\"n\">list</span><span class=\"o\">&lt;</span><span class=\"n\">borrow</span><span class=\"o\">&lt;</span><span class=\"n\">private</span><span class=\"o\">-</span><span class=\"n\">identity</span><span class=\"o\">&gt;&gt;&gt;</span><span class=\"p\">);</span>\n<span class=\"w\">    </span><span class=\"n\">get</span><span class=\"p\">(</span><span class=\"n\">identities</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">option</span><span class=\"o\">&lt;</span><span class=\"n\">list</span><span class=\"o\">&lt;</span><span class=\"n\">borrow</span><span class=\"o\">&lt;</span><span class=\"n\">private</span><span class=\"o\">-</span><span class=\"n\">identity</span><span class=\"o\">&gt;&gt;&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">-&gt;</span><span class=\"w\"> </span><span class=\"nc\">option</span><span class=\"o\">&lt;</span><span class=\"n\">result</span><span class=\"o\">&lt;</span><span class=\"n\">client</span><span class=\"o\">-</span><span class=\"n\">connection</span><span class=\"o\">&gt;&gt;</span><span class=\"p\">;</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>The idea being that for connections that make use of client certificates, you must prove that you'd be able to create a new connection with the same certificate, otherwise you shouldn't get to reuse an existing one.</p>",
+        "id": 469652846,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726142732
+    },
+    {
+        "content": "<p>I guess it'd make sense to add a few things such as optional TTL setting and such</p>",
+        "id": 469652904,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726142754
+    },
+    {
+        "content": "<p>Zulip has weird opinions on how to highlight <code>.wit</code></p>",
+        "id": 469653016,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726142783
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"378155\">@Dave Bakker (badeend)</span> do you see any reason why we wouldn't be able to implement this kind of pool?</p>",
+        "id": 469653175,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726142834
+    },
+    {
+        "content": "<p>oh also, I think it'd make sense to have the same kind of pool for non-TLS socket connections</p>",
+        "id": 469653235,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726142854
+    },
+    {
+        "content": "<p>Hmm. I'd have to think about it more.<br>\nMy initial reaction is that TCP/TLS sockets is the wrong abstraction level (too low) to provide a pool for. As Resetting a connection requires higher-level knowledge on how to do that. (e.g. the <code>sp_reset_connection</code> example from above)</p>",
+        "id": 469653985,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726143037
+    },
+    {
+        "content": "<p>my thinking is that, outside of a hypothetical <code>wasi:mssql</code>, it should be up to the component to ensure that the connection is ready for reuse. Yes, that does mean that there's a risk of improperly reusing a connection, but that seems pretty fundamental to me (again, outside of higher-level interfaces)</p>",
+        "id": 469654645,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726143187
+    },
+    {
+        "content": "<p>i think that's the proper responsibility of the component, absolutely.</p>",
+        "id": 469656058,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726143503
+    },
+    {
+        "content": "<p>Maybe, that can only work <em>if</em> the components are cooperating and can 100% trust each other.</p>",
+        "id": 469656843,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726143711
+    },
+    {
+        "content": "<p>I would imagine that the most common scenario is for this pool to be implemented by the host</p>",
+        "id": 469657094,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726143779
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"234973\">Till Schneidereit</span> <a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling/near/469657094\">said</a>:</p>\n<blockquote>\n<p>I would imagine that the most common scenario is for this pool to be implemented by the host</p>\n</blockquote>\n<p>most commonly yes, but in the future a long lived client component could want to pool a large number of calls as well. But first things first.</p>",
+        "id": 469657293,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726143822
+    },
+    {
+        "content": "<blockquote>\n<p>would imagine that the most common scenario is for this pool to be implemented by the host</p>\n</blockquote>\n<p>Ok. My comment was targeted at:</p>\n<blockquote>\n<p>it should be up to the component to ensure that the connection is ready for reuse.</p>\n</blockquote>",
+        "id": 469658335,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726144011
+    },
+    {
+        "content": "<p>true, yes. But in that case it seems like you're fundamentally trusting the pooling component to give you back a connection with the same state that you'd have put it in, and conversely the pooling component fundamentally trusts its clients to properly clean up connections before putting them into the pool</p>",
+        "id": 469658374,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144020
+    },
+    {
+        "content": "<p>yes, this must be the case. the pooling component is an inner component of the ultimate used connection manager. Does that make any sense?</p>",
+        "id": 469658652,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144085
+    },
+    {
+        "content": "<p>ah, that gets to another thing Pavel and I talked about yesterday: ideally the pooling mechanism would be client-isolated. I.e., you'd not share a pool with other client components, so you get to rely on the exact set of properties you ensure for pooled connections</p>",
+        "id": 469658770,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144118
+    },
+    {
+        "content": "<p>and certainly one would never ever ever share a pool across tenants</p>",
+        "id": 469658872,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144148
+    },
+    {
+        "content": "<p>like, boooooooooooo</p>",
+        "id": 469658898,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144157
+    },
+    {
+        "content": "<p>Makes sense</p>",
+        "id": 469658900,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726144158
+    },
+    {
+        "content": "<p>I think for component composition scenarios that'd largely Just Happen, but we'd absolutely want to specify this as part of the semantics</p>",
+        "id": 469659303,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144252
+    },
+    {
+        "content": "<p>(then again, we don't even have the spec mechanisms for composing components with differing lifetimes, so who knows whether it'd still Just Happen once we have those)</p>",
+        "id": 469659470,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144300
+    },
+    {
+        "content": "<p>that's interesting: I was unaware we hadn't fleshed out what happens with different lifetimes. hmmmm. Or are you just saying we don't have the language to describe that?</p>",
+        "id": 469659929,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144417
+    },
+    {
+        "content": "<blockquote>\n<p>it seems like you're fundamentally trusting the pooling component to give you back a connection with the same state that you'd have put it in, and conversely the pooling component fundamentally trusts its clients to properly clean up connections before putting them into the pool</p>\n</blockquote>\n<p>Right. And that's exactly why I'm doubting this solution path. Ideally, a component shouldn't have to worry about pooling at all and would be able to just say \"give me a SQL[1] connection, I'll drop it when I'm done\". And let the pooling component figure out how to reset &amp; resuse the connection.</p>\n<p>[1] (mentally replace \"SQL\" with your favorite protocol in your head)</p>",
+        "id": 469660399,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726144499
+    },
+    {
+        "content": "<p>yes, but that's the ultimate guest code's position!</p>",
+        "id": 469660699,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144546
+    },
+    {
+        "content": "<p>what we're discussing here is the underlying imple components that actually do that work, right?</p>",
+        "id": 469660780,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144561
+    },
+    {
+        "content": "<p>Ralph the PM writing code to call a db should just say, \"give me a connection, I'll drop it when I'm done\"</p>",
+        "id": 469661083,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144630
+    },
+    {
+        "content": "<p>but something underneath that interface has to do the work of managing a pool, and underneath that actually implement the pool</p>",
+        "id": 469661175,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144660
+    },
+    {
+        "content": "<p>it could be the same component, of course.</p>",
+        "id": 469661230,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144679
+    },
+    {
+        "content": "<p>one big wasi:msssql</p>",
+        "id": 469661314,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144691
+    },
+    {
+        "content": "<p>for exzample</p>",
+        "id": 469661320,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144693
+    },
+    {
+        "content": "<p>I realized when reading we are possibly dealing with <code>MSDTC</code>because of \"transaction context\"</p>\n<p>That document about connection pooling I linked above is good read. It mentions </p>\n<ul>\n<li>\"Each connection pool is associated with a distinct connection string.\" </li>\n<li>\"Pool fragmentation due to integrated security\" and \"Pool fragmentation due to many databases\"</li>\n</ul>",
+        "id": 469661321,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726144693
+    },
+    {
+        "content": "<p>oh, transactions, fun</p>",
+        "id": 469661402,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144717
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"378155\">@Dave Bakker (badeend)</span> absolutely. But that seems to fundamentally require specific interfaces such as <code>wasi:mssql</code>, no?</p>\n<p>The only really alternative way to set up pooling without abstracting all the connection handling completely would involve an interface with setup and teardown/cleanup hooks, where you'd say \"give me a connection, and if you need to set it up, call this function, and if you need to reset it, call this one\". But I don't think that'd address your concerns at all, because you'd still have to trust that the reset is done correctly</p>",
+        "id": 469661440,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144725
+    },
+    {
+        "content": "<p>I mean, just fundamentally something has to do the setup/reset/teardown. And I think we should provide an interface that lets that \"something\" be the client component. Which then allows us to implement things like a pooling <code>wasi:mssql</code> in user space</p>",
+        "id": 469661787,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144831
+    },
+    {
+        "content": "<p>one important aspect here is that we've learned the hard way that even if we wanted to (and could) provide all the high-level interfaces, it'd not be enough: we'd not just have to provide all these interfaces, we'd also have to convince the world to change All The Code to make use of these interfaces instead of the implementations they already have in terms of a lower-level thing</p>",
+        "id": 469662187,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144936
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"234973\">Till Schneidereit</span> <a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling/near/469662187\">said</a>:</p>\n<blockquote>\n<p>one important aspect here is that we've learned the hard way that even if we wanted to (and could) provide all the high-level interfaces, it'd not be enough: we'd not just have to provide all these interfaces, we'd also have to convince the world to change All The Code to make use of these interfaces instead of the implementations they already have in terms of a lower-level thing</p>\n</blockquote>\n<p>this is the largest problem we face.</p>",
+        "id": 469662313,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144975
+    },
+    {
+        "content": "<p>well said</p>",
+        "id": 469662332,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726144980
+    },
+    {
+        "content": "<p>that's not to say the high-level interfaces aren't a good thing: where possible and where people are asking for them, we should provide them. But we shouldn't force them on people</p>",
+        "id": 469662344,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726144981
+    },
+    {
+        "content": "<p>the higher level and different interfaces will become popular if they hit the sweet spot for users. that is the only path they have. it may well take time for a lot of them.</p>",
+        "id": 469662459,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726145015
+    },
+    {
+        "content": "<p>(yes, I'm one of the people who had to learn this the hard way. See also: <code>wasi:grpc</code> requiring substantially more work in the spec, host implementations, and all language ecosystems than extending <code>wasi:http</code> to support gRPC)</p>",
+        "id": 469662767,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726145061
+    },
+    {
+        "content": "<p>it <em>will be better having wasi:grpc</em>! But man, that will take time for adoption.</p>",
+        "id": 469663552,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726145192
+    },
+    {
+        "content": "<p>yes to both!</p>",
+        "id": 469663631,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726145207
+    },
+    {
+        "content": "<p>at a minimum, the best higher level abstractions will take 3-5 years before they hit the sweet spot. It seems like a long time, but it really isn't.</p>",
+        "id": 469663672,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726145222
+    },
+    {
+        "content": "<p>but, I guess the optimistic look at this is that <em>we need time to make those all happen anyway</em></p>",
+        "id": 469663752,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726145253
+    },
+    {
+        "content": "<p>????????</p>",
+        "id": 469663761,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726145255
+    },
+    {
+        "content": "<p>I think we got it right by-and-large with <code>wasi:http</code>, and I still believe in the fundamental approach to WASI (and WIT more generally) API design of \"as high-level as feasible, but no higher\". My thinking on the \"feasible\" bit has evolved a bit</p>",
+        "id": 469663904,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726145289
+    },
+    {
+        "content": "<p>yes. I have a feeling that \"new\" interfaces will have more adoption than \"why did you screw up tcp?\"</p>",
+        "id": 469664009,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726145322
+    },
+    {
+        "content": "<p>my hope is also that as we see things like component-based middleware, db connectors, etc, all of this will matter less and less, because we'll have much tighter pinch-points</p>",
+        "id": 469664229,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726145398
+    },
+    {
+        "content": "<p>it's going to happen</p>",
+        "id": 469664449,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726145450
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"378155\">@Dave Bakker (badeend)</span> how do you feel about TLS connection pooling after all this discussion?</p>",
+        "id": 469664483,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726145458
+    },
+    {
+        "content": "<p>I think that single-use/throw-away pre-opened anonymous TLS sessions would reduce necessary latency on of the application code. And be generic and secure. It would not bring the scalability. But maybe that good enough for MVP ?</p>",
+        "id": 469667005,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726146053
+    },
+    {
+        "content": "<p>absolutely it would</p>",
+        "id": 469667059,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726146067
+    },
+    {
+        "content": "<p>imho, that is.</p>",
+        "id": 469667102,
+        "sender_full_name": "Ralph",
+        "timestamp": 1726146081
+    },
+    {
+        "content": "<p>so you're thinking of something that'd reduce <a href=\"https://github.com/badeend/wasi-sockets/blob/tls/TLS.md#minimal-client\">this example</a> to something like this?</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"c1\">// TCP setup:</span>\n<span class=\"kd\">let</span><span class=\"p\">(</span><span class=\"n\">tls_input</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">tls_output</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasi_tls</span><span class=\"p\">::</span><span class=\"n\">connect</span><span class=\"p\">(</span><span class=\"s\">\"example.com\"</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">.</span><span class=\"k\">await</span><span class=\"o\">?</span><span class=\"p\">;</span>\n\n<span class=\"c1\">// Usage:</span>\n<span class=\"n\">tls_output</span><span class=\"p\">.</span><span class=\"n\">blocking_write_and_flush</span><span class=\"p\">(</span><span class=\"s\">\"GET / HTTP/1.1</span><span class=\"se\">\\r\\n</span><span class=\"s\">Host: example.com</span><span class=\"se\">\\r\\n\\r\\n</span><span class=\"s\">\"</span><span class=\"p\">);</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">http_response</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">tls_input</span><span class=\"p\">.</span><span class=\"n\">blocking_read</span><span class=\"p\">();</span>\n\n<span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"n\">http_response</span><span class=\"p\">);</span>\n</code></pre></div>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/badeend/wasi-sockets/blob/tls/TLS.md#minimal-client\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/ae9246f3f632810949047d8ada7b6773d60beb88/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f616436623835353466633461393933366234386166653530373937373436383266323861373364653332616337643030353732643136666164656337663039612f62616465656e642f776173692d736f636b657473&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/badeend/wasi-sockets/blob/tls/TLS.md#minimal-client\" title=\"wasi-sockets/TLS.md at tls · badeend/wasi-sockets\">wasi-sockets/TLS.md at tls · badeend/wasi-sockets</a></div><div class=\"message_embed_description\">WASI API proposal for managing sockets. Contribute to badeend/wasi-sockets development by creating an account on GitHub.</div></div></div>",
+        "id": 469668616,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146369
+    },
+    {
+        "content": "<p>Could we encourage pool-per-client by defining a standard resource but <em>not</em> a standard interface? Consumers would need to define how the pool is exposed but it would take deliberate effort to share between components.<br>\n<em>edit: actually I'm not sure bindgen produces the same type for a resource in different interfaces, so maybe not all that useful</em></p>",
+        "id": 469669049,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726146436
+    },
+    {
+        "content": "<p>(i.e., let the import handle the DNS lookup, socket connection, and TLS handshake, so that that can all happen concurrently and preemptively)</p>",
+        "id": 469669164,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146470
+    },
+    {
+        "content": "<p>Now I'm thinking how to make that transparent to existing C# Socket &amp; SslStream APIs</p>",
+        "id": 469669392,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726146534
+    },
+    {
+        "content": "<p>yeah, I think we're in the same space of difficult-to-adopt abstractions</p>",
+        "id": 469669539,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146565
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"480579\">@Lann Martin</span> you'd ultimately still import an interface that would provide a function for acquiring the pool resource handle though, right? so it'd still be the most straightforward thing to always return the same handle</p>",
+        "id": 469670551,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146724
+    },
+    {
+        "content": "<p>the host could just hand out unbound handle/resource when wasi:sockets:connect and if that is followed by call to TLS transform, it could take it from different pool.</p>",
+        "id": 469670710,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726146765
+    },
+    {
+        "content": "<p>The problem is that it is <em>disastrous</em> to share a TLS connection pool with an untrusted component</p>",
+        "id": 469670735,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726146769
+    },
+    {
+        "content": "<p>but I just remember that there were sketches somewhere about shared and non-shared instance imports. We'd want a non-shared instance import here, I think</p>",
+        "id": 469670745,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146771
+    },
+    {
+        "content": "<p>indeed, yes</p>",
+        "id": 469670862,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146797
+    },
+    {
+        "content": "<p>but much in the same way as sharing an <code>outgoing-handler</code>, right?</p>",
+        "id": 469670995,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146837
+    },
+    {
+        "content": "<p>an \"optimistic pre-fetching pool\" (or whatever you want to call the pre-warmed connection approach) definitely seems like the best bang-for-buck</p>",
+        "id": 469671106,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726146847
+    },
+    {
+        "content": "<p>i.e., to the degree we have this issue for connection pools, we also have it for anything that can establish outgoing connections</p>",
+        "id": 469671244,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146874
+    },
+    {
+        "content": "<blockquote>\n<p>but much in the same way as sharing an <code>outgoing-handler</code>, right?</p>\n</blockquote>\n<p>Not really. HTTP is pretty rigorously stateless</p>",
+        "id": 469671295,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726146887
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"480579\">Lann Martin</span> <a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling/near/469670735\">said</a>:</p>\n<blockquote>\n<p>The problem is that it is <em>disastrous</em> to share a TLS connection pool with an untrusted component</p>\n</blockquote>\n<p>Those would be throw away, after the end of life of that resource. The host would consider it dirty and actually close the real connection. Is that not enough ?</p>",
+        "id": 469671652,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726146951
+    },
+    {
+        "content": "<p>what I mean is that a specific <code>outgoing-handler</code> provides specific capabilities, at least as long as the exporter applies some kind of restrictions to where requests can be sent to</p>",
+        "id": 469671770,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146962
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"471788\">@Pavel Šavara</span> Yeah sorry; we should call the \"pre-warmed connections\" idea something other than \"pooling\". I like that idea.</p>",
+        "id": 469671967,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726146985
+    },
+    {
+        "content": "<p>a naive userspace implementation of <code>outgoing-handler</code> in a persistent instance would share its allowlist with all importers</p>",
+        "id": 469672044,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726146996
+    },
+    {
+        "content": "<p>same as a naive userspace implementation of a connection pool would share the pool with all importers</p>",
+        "id": 469672223,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726147020
+    },
+    {
+        "content": "<p>I guess I'm just thinking of the obvious \"allow all\" case for both http and a tls pool. For HTTP, a reused connection has pretty well understood state(lessness), assuming the implementation doesn't allow returning e.g. websockets to the pool. A TLS socket pool has too much flexibility here; e.g. a malicious component could set up an HTTP proxy on a socket and then put it in the pool masquerading as a \"normal\" HTTPS connection to the proxy host.</p>",
+        "id": 469674522,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726147446
+    },
+    {
+        "content": "<p>I agree that that is a very bad scenario. It seems to me like it's ultimately one example of the more fundamental issue that the moment you allow yourself to be imported by multiple components you'd better ensure that you retain the right level of isolation between the state you provide them with</p>",
+        "id": 469676414,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726147748
+    },
+    {
+        "content": "<p>What are the <em>actual</em> real-world use cases we're thinking of here, other than HTTP &amp; SQL?</p>",
+        "id": 469676482,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726147767
+    },
+    {
+        "content": "<p>other databases, e.g. Redis, Mongo, etc.</p>",
+        "id": 469676671,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1726147798
+    },
+    {
+        "content": "<p>MQTT</p>",
+        "id": 469676780,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726147807
+    },
+    {
+        "content": "<p>I guess any protocols on top of TCP or UDP?</p>",
+        "id": 469676937,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726147836
+    },
+    {
+        "content": "<p>where not all of them are actual real-world use cases, but there are enough that I think it makes sense for us to treat them as unbounded</p>",
+        "id": 469677214,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726147906
+    },
+    {
+        "content": "<blockquote>\n<p>malicious component</p>\n</blockquote>\n<p>There's a continuum of \"how much I trust the other component\" from \"I don't trust it at all\" (in which case I probably shouldn't be using it) to \"I wrote it myself and trust it completely, and I have other reasons besides security to make it a separate component\" (e.g. different lifetimes, different languages, etc.).</p>",
+        "id": 469678221,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1726148133
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"480579\">@Lann Martin</span> the more I think about it, the more I really don't think connection pools are special. Fundamentally, a very reasonable approximation is Thou Shalt Not Mix Capabilities.</p>\n<p>I do think this poses very interesting problems for composition between long- and short-lived things, which I think we've only gotten away with ignoring so far because existing systems manage capabilities in the host pretty exclusively</p>",
+        "id": 469678472,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726148178
+    },
+    {
+        "content": "<p>as in, I don't even know if we'd have a mechanism by which a component that'd be imported by two other components would be able to tell apart which of those a call originated in</p>",
+        "id": 469678635,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726148231
+    },
+    {
+        "content": "<p>This is what unforgeable resources are for right? <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span></p>",
+        "id": 469678937,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726148290
+    },
+    {
+        "content": "<p>yeah, I just realize that's not the right question</p>",
+        "id": 469679003,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726148305
+    },
+    {
+        "content": "<p>better question: how do you ensure that a component importing you should get access to the same resource a previous instance of the same component definition did?</p>",
+        "id": 469679133,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726148346
+    },
+    {
+        "content": "<p>Say I have a single, long-lived, component <code>Pool</code>, imported by an arbitrary series of instances of both <code>A</code> and <code>B</code>. How can I tell calls from instances of <code>A</code> apart from those of instances of <code>B</code>, so I can establish isolated caches for each of the component definitions?</p>",
+        "id": 469679779,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726148483
+    },
+    {
+        "content": "<blockquote>\n<p>one important aspect here is that we've learned the hard way that even if we wanted to (and could) provide all the high-level interfaces, it'd not be enough: we'd not just have to provide all these interfaces, we'd also have to convince the world to change All The Code to make use of these interfaces instead of the implementations they already have in terms of a lower-level thing</p>\n</blockquote>\n<p>Everything discussed so far isn't POSIX (obviously), so \"All The Code\" will need to change anyway in some form or another. Right?</p>",
+        "id": 469680106,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726148548
+    },
+    {
+        "content": "<p>One possible answer could be \"you don't, because that's not a setup you get to have\". Instead, there could be one long-lived instance <code>Pool-A</code> imported by all instances of <code>A</code>, and another <code>Pool-B</code> imported by all instances of <code>B</code></p>",
+        "id": 469680358,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726148591
+    },
+    {
+        "content": "<blockquote>\n<p>Everything discussed so far isn't POSIX (obviously), so \"All The Code\" will need to change anyway in some form or another. Right?</p>\n</blockquote>\n<p>That was my intuition as well, but I don't think it holds, no: there's a huge difference between having to change an ecosystem's HTTP abstraction(s) and let everything on top work without modification, and having to change all the things on top individually</p>",
+        "id": 469680791,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726148674
+    },
+    {
+        "content": "<p>The only idea that comes to mind that would be compatible with existing code would be per-instance session management</p>",
+        "id": 469681220,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726148770
+    },
+    {
+        "content": "<p>as in, the thing we have now for sockets, and will have for TLS with Dave's proposal?</p>",
+        "id": 469681486,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726148835
+    },
+    {
+        "content": "<p>I agree that the required changes should be limited to the standard-library(-like) libraries, and should not impact each and every application</p>",
+        "id": 469681555,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726148854
+    },
+    {
+        "content": "<p>I guess it would have to be host magic that was aware of export call sites</p>",
+        "id": 469681838,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726148920
+    },
+    {
+        "content": "<p>or ~equivalently slice up composed components to give them wrapped copies of shared imports</p>",
+        "id": 469682004,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726148966
+    },
+    {
+        "content": "<p>yeah, I remember Luke sketching out something along the latter lines</p>",
+        "id": 469682157,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149003
+    },
+    {
+        "content": "<p>cybernetic component implants <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 469682301,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726149033
+    },
+    {
+        "content": "<p>Would it make sense to add a \"hint flag\" to the component model that tells the host \"instances of this (sub)component should be kept alive and reused if possible\", i.e. the app will work fine even if the hint is ignored, but it will work <em>better</em> if the instances are reused?  I believe we discussed this with <span class=\"user-mention\" data-user-id=\"253998\">@Luke Wagner</span> and others already, but I don't recall if we discussed the scenario where e.g. a component has three subcomponents, only one of which has the hint flag attached to it, meaning the other two are <em>not</em> expected to be reused (and in fact <em>shouldn't</em> be reused), but they may use the \"long lived\" one to cache state.</p>",
+        "id": 469682415,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1726149067
+    },
+    {
+        "content": "<p>with dynamic instantiation, you could imagine a component exporting an API that gives a fresh instance for an interface instance export, but provides that exported instance with imports that are shared internally. Then each of those short-lived instances could hold a session key</p>",
+        "id": 469682498,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149087
+    },
+    {
+        "content": "<p>Are you guys still discussing session \"pool\" ? Meaning that the session would not be throw-away ? And Joel means \"hint that I trust the pool\" ? I think I got lost.</p>",
+        "id": 469682815,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726149155
+    },
+    {
+        "content": "<p>My comment was regarding the general problem of caching for otherwise short-lived instances.  Could be data caching, connection caching, or whatever.</p>",
+        "id": 469683040,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1726149213
+    },
+    {
+        "content": "<p>You don't even need dynamic instantiation per-se, just preprocessing to split shared imports plus a convention for how the host maps those split imports to their components</p>",
+        "id": 469683056,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726149217
+    },
+    {
+        "content": "<p>I guess I'm not convinced that a pool is inherently more dangerous. And OTOH, prewarmed connections would require a completely different approach to establishing connections from what's proposed right now—one which would be harder to integrated into content toolchains</p>",
+        "id": 469683208,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149245
+    },
+    {
+        "content": "<p>Some prewarming strategies wouldn't require new interfaces; as a simple example you could immediately prewarm a connection upon opening a cold connection, optimistically assuming that it is likely to be used soon</p>",
+        "id": 469683554,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726149326
+    },
+    {
+        "content": "<p>And there could be configuration that for each IP the pre-warmer should keep 10 open un-used connections ready.</p>",
+        "id": 469683895,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726149407
+    },
+    {
+        "content": "<p>given that Dave's proposal has multiple discrete steps, are you suggesting the host (or more generally, the exporter) would effectively record the sequence of these steps and then rerun them optimistically because they're likely to be repeated in exactly the same way?</p>",
+        "id": 469684127,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149475
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"234973\">@Till Schneidereit</span> Earlier you gave a <code>client-connection-pool</code> example. Does this need to be specialized for any kind of transport (TCP and/or TLS, ..) or can it even be a generic duplex stream pool, like:</p>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>get-preopened-pool: func(name: string) -&gt; option&lt;io-pool&gt;;\n\ninterface io-pool {\n    open() -&gt; tuple&lt;input-stream, output-stream&gt;;\n    close(input-stream, output-stream);\n}\n</code></pre></div>",
+        "id": 469684262,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726149499
+    },
+    {
+        "content": "<p>ooh, that's a great question! I can't immediately see any reason why you'd not be able to generalize it.</p>\n<p>The one thing you'd lose is having to provide a proof that you'd be able to recreate the same configuration</p>",
+        "id": 469684535,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149581
+    },
+    {
+        "content": "<p>but maybe we could recreate even that</p>",
+        "id": 469684585,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149598
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"234973\">Till Schneidereit</span> <a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling.20or.20pre-warmed.20connections/near/469684127\">said</a>:</p>\n<blockquote>\n<p>given that Dave's proposal has multiple discrete steps, are you suggesting the host (or more generally, the exporter) would effectively record the sequence of these steps and then rerun them optimistically because they're likely to be repeated in exactly the same way?</p>\n</blockquote>\n<p>I assumed that wasi:TCP &amp; wasi:TLS are fused implementation. And that they know how to do that handshake, there are probably no application specific steps to replay, or are there ?</p>",
+        "id": 469684756,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726149629
+    },
+    {
+        "content": "<p>You could use secret tokens as pool keys <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span></p>",
+        "id": 469684815,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726149642
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"480579\">Lann Martin</span> <a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling.20or.20pre-warmed.20connections/near/469684815\">said</a>:</p>\n<blockquote>\n<p>You could use secret tokens as pool keys <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span></p>\n</blockquote>\n<p>I previously said \"anonymous\", meaning PK are out of scope.</p>",
+        "id": 469684976,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726149683
+    },
+    {
+        "content": "<p>yeah, and in fact establishing a TLS connection could return a key to use</p>",
+        "id": 469685014,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149692
+    },
+    {
+        "content": "<p>Well \"token\" is maybe the wrong term. You could for example derive the pool key from a TLS private key</p>",
+        "id": 469685349,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726149772
+    },
+    {
+        "content": "<p>does fingerprint of that PK become part of the cache-key then ?</p>",
+        "id": 469685378,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726149779
+    },
+    {
+        "content": "<p>oh, and you'd be able to derive the same key/hash/token by an operation taking the same imputs</p>",
+        "id": 469685423,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149791
+    },
+    {
+        "content": "<p>what Lann said <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 469685464,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149802
+    },
+    {
+        "content": "<p>In case this isn't obvious: <em>this requires very careful design; don't just hash the PK</em></p>",
+        "id": 469685750,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726149863
+    },
+    {
+        "content": "<blockquote>\n<p>I assumed that wasi:TCP &amp; wasi:TLS are fused implementation. And that they know how to do that handshake, there are probably no application specific steps to replay, or are there ?</p>\n</blockquote>\n<p>That's at least not how things are specified right now, and it gets us back to higher-level abstractions being harder to integrate into existing toolchains</p>",
+        "id": 469685756,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726149866
+    },
+    {
+        "content": "<p>hmm actually this is a good question for TLS in particular; do we actually need socket pools or do we just need session resumption?</p>",
+        "id": 469686329,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726150009
+    },
+    {
+        "content": "<p>TLS 1.3 has \"0-RTT\" session resumption, which just requires a secret resumption ticket iirc</p>",
+        "id": 469686511,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726150060
+    },
+    {
+        "content": "<p>You'd still eat the normal TCP startup but that's much faster than TLS</p>",
+        "id": 469686595,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726150082
+    },
+    {
+        "content": "<p>if we wanted to support a proof system for a general-purpose cache, we could do something like this:</p>\n<ul>\n<li>each operation that returns a connection (i.e. an IO stream pair) also returns a token</li>\n<li>there's an operation that allows you to provide the same inputs but instead of returning the connection and the token just returns the token</li>\n<li>each operation that transforms a connection into a different kind of connection (e.g. upgrades a socket connection to a TLS connection) also returns a token</li>\n<li>and finally, there's an equivalent operation that takes a token instead of a connection to transform, and returns a new token</li>\n</ul>\n<p>With these things, you'd be able to have a chain such as</p>\n<ol>\n<li>establish a socket connection, get connection and token</li>\n<li>upgrade to TLS, get encrypted connection and token</li>\n<li>use connection however you want</li>\n<li>reset connection however your use case requires</li>\n<li>store connection in pool (with the associated token being stored as part of the entry implicitly)</li>\n</ol>\n<p>And to retrieve a connection from the pool, you'd do this:</p>\n<ol>\n<li>call the function to get the token for the unencrypted connection</li>\n<li>call the function to get the \"upgraded token\"</li>\n<li>get a connection from the pool with the token</li>\n<li>[same as before]</li>\n<li>[same as before]</li>\n</ol>",
+        "id": 469687745,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726150374
+    },
+    {
+        "content": "<p>How would the new instance ask for connection from pool? What would give it the token ?</p>",
+        "id": 469688264,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726150521
+    },
+    {
+        "content": "<p>actually, ignore all the \"and token\" parts of the first list: those aren't needed</p>",
+        "id": 469688294,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726150531
+    },
+    {
+        "content": "<p>yeah, exactly</p>",
+        "id": 469688346,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726150544
+    },
+    {
+        "content": "<p>one sec, sketching out example code</p>",
+        "id": 469688378,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726150553
+    },
+    {
+        "content": "<p>for backward compatibility: trade the token to the host for a reserved ip/port that can be passed to existing client code</p>",
+        "id": 469688597,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726150612
+    },
+    {
+        "content": "<p>I'm a bit overwhelmed by all the discussion above. Could someone explain why we need \"tokens/private-keys/proof-system/etc..\" ?</p>",
+        "id": 469689477,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726150791
+    },
+    {
+        "content": "<p>It is essentially about \"authenticating\" that your instance has permission/capability to get a particular connection from the pool</p>",
+        "id": 469689663,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726150830
+    },
+    {
+        "content": "<p>the concern I'm trying to address is that you shouldn't be able to reuse a connection if you'd not be able to create a new one with the same properties. For example if you lost access to a client certificate, you shouldn't be able to reuse a connection that used that certificate</p>",
+        "id": 469689816,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726150867
+    },
+    {
+        "content": "<p>Hmm. In my example (<a href=\"#narrow/stream/219900-wasi/topic/Database.20connection.20pooling.20or.20pre-warmed.20connections/near/469684262\">https://bytecodealliance.zulipchat.com/#narrow/stream/219900-wasi/topic/Database.20connection.20pooling.20or.20pre-warmed.20connections/near/469684262</a>) there is no such thing as \"the\" pool. There is a set of preopened pools that you have access to. I.e. if a pool is preopened for your component instance, then you access to those streams. Similar to files.</p>\n<blockquote>\n<p>you shouldn't be able to reuse a connection if you'd not be able to create a new one with the same properties. For example if you lost access to a client certificate, you shouldn't be able to reuse a connection that used that certificate</p>\n</blockquote>\n<p>Continuing with my example; that could be the responsibility of the child component who is putting in the streams into the pool. By putting them in, they're also giving access to use the streams. Capability-style.</p>",
+        "id": 469690660,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726151057
+    },
+    {
+        "content": "<p>It then becomes a game of logically divvying up separate kind of streams (with different permissions / authority) into separate pools.</p>",
+        "id": 469690932,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726151127
+    },
+    {
+        "content": "<p>Yeah, \"private imports\" are a reasonable approach. I think the tooling just doesn't support them yet.</p>",
+        "id": 469691253,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1726151200
+    },
+    {
+        "content": "<p>I don't think that addresses the issue I'm trying to address</p>",
+        "id": 469691349,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151222
+    },
+    {
+        "content": "<p>the sequence of concern is</p>\n<ol>\n<li>client component instance <code>a</code> establishes a connection using a client certificate, and stores it in the pool</li>\n<li>access to the client certificate is revoked</li>\n<li>client component instance <code>b</code> retrieves connection from pool, despite not having access to the certificate anymore</li>\n</ol>",
+        "id": 469691845,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151333
+    },
+    {
+        "content": "<p>i.e., being able to put a connection into the pool isn't sufficient to ensure that it's also okay to later retrieve it from the pool</p>",
+        "id": 469692049,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151382
+    },
+    {
+        "content": "<p>could we put client certificates out of scope ?</p>",
+        "id": 469692304,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726151426
+    },
+    {
+        "content": "<p>here's the simple client example, modified with what I have in mind:</p>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>// TCP setup:\nfn from_pool() -&gt; result&lt;(io::incoming_stream, io::outgoing_stream)&gt; {\n    let ip_token = wasi_sockets::get_address_resolution_token(\"example.com\")?;\n    let connection_token = wasi_sockets::get_connection_token(ip_token, 443)?;\n    let tls_token = wasi_tls::get_client_connection_token(connection_token)?;\n    wasi::io_pool::get(tls_token)\n}\n\nlet (tls_input, tls_output)) = match from_pool() {\n    Ok(connection) =&gt; connection,\n    _ =&gt; {\n        // TCP setup:\n        let ip = wasi_sockets::resolve_addresses(\"example.com\").await?[0];\n        let tcp_client = wasi_sockets::TcpSocket::new();\n        let (tcp_input, tcp_output) = tcp_client.connect(ip, 443).await;\n\n        // TLS setup:\n        let (tls_input, tls_output) = wasi_tls::ClientConnection::new(tcp_input, tcp_output)\n            .connect(\"example.com\")?\n            .finish().await?;\n    }\n}\n\n// Usage:\ntls_output.blocking_write_and_flush(\"GET / HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n\");\nlet http_response = tls_input.blocking_read();\n\nprintln!(http_response);\n\n// Reset and prepare for reuse\n// [Do whatever is needed to reset the connection]\nwasi::io_pool::put(tls_input, tls_output);\n</code></pre></div>",
+        "id": 469692365,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151439
+    },
+    {
+        "content": "<p>the same issue applies to allowlists for outgoing connections, and to the ability to do DNS resolution</p>",
+        "id": 469692503,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151468
+    },
+    {
+        "content": "<blockquote>\n<p>access to the client certificate is revoked</p>\n</blockquote>\n<p>While an active connection is using it?</p>",
+        "id": 469693198,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726151634
+    },
+    {
+        "content": "<p>no, this would happen in-between instantiations of <code>a</code> and <code>b</code></p>",
+        "id": 469693510,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151703
+    },
+    {
+        "content": "<p>I shouldn't have used \"revoked\": I mean only the <em>access</em> to the certificate, not the certificate itself</p>",
+        "id": 469693813,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151782
+    },
+    {
+        "content": "<p>Yeah, but the physical connection is still alive in the meantime. For the native TLS implementation, it would still be considered \"in use\"</p>",
+        "id": 469693945,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1726151827
+    },
+    {
+        "content": "<p>right. All I'm trying to ensure is that if you're losing access to the capability required to create a new connection, you should also lose the ability to reuse an existing connection established with those capabilities</p>",
+        "id": 469694284,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151906
+    },
+    {
+        "content": "<p>if we want to do a TLS specific pool, that's easy to tie to the certificate. But I really like your idea of a more general IO pool, and I think this setup would enable it</p>",
+        "id": 469694497,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1726151955
+    },
+    {
+        "content": "<p><a href=\"https://github.com/dotnet/SqlClient/blob/main/src/Microsoft.Data.SqlClient/netcore/src/Microsoft/Data/SqlClient/SNI/SNITcpHandle.cs\">https://github.com/dotnet/SqlClient/blob/main/src/Microsoft.Data.SqlClient/netcore/src/Microsoft/Data/SqlClient/SNI/SNITcpHandle.cs</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dotnet/SqlClient/blob/main/src/Microsoft.Data.SqlClient/netcore/src/Microsoft/Data/SqlClient/SNI/SNITcpHandle.cs\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/acb005e1ffc1bba09a54f23235b875801a5b3ac6/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316231313933313238366563643065626361356335653930306532383963336563646636303762323363326633653831326466316237396133393834643836642f646f746e65742f53716c436c69656e74&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dotnet/SqlClient/blob/main/src/Microsoft.Data.SqlClient/netcore/src/Microsoft/Data/SqlClient/SNI/SNITcpHandle.cs\" title=\"SqlClient/src/Microsoft.Data.SqlClient/netcore/src/Microsoft/Data/SqlClient/SNI/SNITcpHandle.cs at main · dotnet/SqlClient\">SqlClient/src/Microsoft.Data.SqlClient/netcore/src/Microsoft/Data/SqlClient/SNI/SNITcpHandle.cs at main · dotnet/SqlClient</a></div><div class=\"message_embed_description\">Microsoft.Data.SqlClient provides database connectivity to SQL Server for .NET applications. - dotnet/SqlClient</div></div></div>",
+        "id": 469700973,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726153262
+    },
+    {
+        "content": "<p>that's SQL client connection code, which ideally would not need any modifications, if we were able to hide those \"caching tokens\" inside dotnet base class library. I don't know if that's possible.</p>",
+        "id": 469719039,
+        "sender_full_name": "Pavel Šavara",
+        "timestamp": 1726157292
+    },
+    {
+        "content": "<p>Chatting with Joel and Lann a bit more about this, my impression is that, while, in the abstract, I see the value of enabling TLS connections to be pooled by the host (just like HTTP already allows), given the pure semantics of TLS (with no baked-in knowledge that we're, e.g., talking to a database with a \"reset\" command), it doesn't seem like something we can safely do in general without putting too much trust in the guests.  Thus, I like the idea of using a long-lived instance that handles multiple requests while maintaining its own guest-implemented pool of long-lived TLS connections.</p>\n<p>The issue Joel mentioned above for the \"reuse hint\" is <a href=\"https://github.com/WebAssembly/component-model/issues/307\">C-M/#307</a> and my impression is that the reuse hint proposed in that issue is a perfect match for this use case and a good short-term \"Step 1\".</p>\n<p>As for a later \"Step 2\", it does seem like, as Joel suggested, we can recover the per-request isolation using the \"runtime instantiation\" feature (which I think should be the last significant feature to add after Preview 3 before a 1.0-rc).  With runtime instantiation, a long-lived root component could create 1 long-lived connection-pooling child instance, and then export a \"handle request\" function that internally uses runtime-instantiation to create a fresh request-handler child instance per request, with these dynamic children all importing the same connection-pooling instance.  What's nice is that this would all be under producer toolchain control, which I think is important because I expect there are many fine-grained policy choices to tweak how this works that we wouldn't want to bake once-and-for-all into the spec or host implementation.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/component-model/issues/307\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/94dd3e306685a29bde6315ebbc4b2e00e54ee6e2/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f363530643364366261316166343439653466623832626162313630363536386633343532373637396231643838303365306461346261656465346636393263622f576562417373656d626c792f636f6d706f6e656e742d6d6f64656c2f6973737565732f333037&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/component-model/issues/307\" title=\"Consider defining an &quot;instance reuse hint&quot; · Issue #307 · WebAssembly/component-model\">Consider defining an \"instance reuse hint\" · Issue #307 · WebAssembly/component-model</a></div><div class=\"message_embed_description\">There's an interesting question and discussion in wasi-http/#95 that, by the end, doesn't feel specific to \"HTTP\" at all and thus perhaps deserving of being addressed more generally in the Componen...</div></div></div>",
+        "id": 471113284,
+        "sender_full_name": "Luke Wagner",
+        "timestamp": 1726613443
+    }
+]

@@ -1,0 +1,318 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #1934 Share memory between linked modules · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html">wasmtime / issue #1934 Share memory between linked modules</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="250809442"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/250809442" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#250809442">(Aug 26 2021 at 17:29)</a>:</h4>
+<p>willygroup <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-906602975">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>Hi!<br>
+There are any progress on shared memory between linked modules?<br>
+I'm trying to create a "WasmMachine" that links an "sdk module" that contains some wrapper to host_functions and a secondary module that calls the sdk functions.</p>
+<p>I would like call from a the secondary wasm (sources in rust) the sdk functions passing just pointers to a shared linear memory.<br>
+Something like this (is basically the linker example):</p>
+<p>`<br>
+    let engine = Engine::default();<br>
+    let mut linker = Linker::new(&amp;engine);<br>
+    let mut store = Store::new(&amp;engine, ());</p>
+<div class="codehilite"><pre><span></span><code>let wasm_module = Module::from_file(&amp;engine, MODULE_WASM)?;
+let sdk_module = Module::from_file(&amp;engine, SDK_WASM)?;
+
+linker.func_wrap(&quot;host&quot;, &quot;log&quot;, host_log)?;
+
+// Memory from host
+// let mem = Memory::new(&amp;mut store, MemoryType::new(Limits::new(17, None)))?;
+// linker.define(&quot;env&quot;, &quot;memory&quot;, mem)?;
+
+let sdk_module = linker.instantiate(&amp;mut store, &amp;sdk_module)?;
+
+// Using the sdk-memory
+let mem = sdk_module
+    .get_memory(&amp;mut store, &quot;memory&quot;)
+    .expect(&quot;Expected &#39;memory&#39; not found&quot;);
+linker.define(&quot;env&quot;, &quot;memory&quot;, mem)?;
+
+linker.instance(&amp;mut store, &quot;wasm-sdk&quot;, sdk_module)?;
+
+let wasm_module = linker.instantiate(&amp;mut store, &amp;wasm_module)?;
+
+let add = wasm_module.get_typed_func::&lt;(i32, i32), i32, _&gt;(&amp;mut store, &quot;add&quot;)?;
+
+let res = add.call(&amp;mut store, (41, 1))?;
+
+println!(&quot;res_add: {}&quot;, res);`
+</code></pre></div>
+
+<p>I'm trying in two ways:</p>
+<ol>
+<li>
+<p>Compiling the wasm module with the flag <code>--import-memory"</code> and then creating a host memory like this:<br>
+<code>let mem = Memory::new(&amp;mut store, MemoryType::new(Limits::new(17, None)))?;</code></p>
+</li>
+<li>
+<p>Compiling just the secondary module with the flag <code>--import-memory"</code> and then export the memory from the sdk_module and using it for the secondary module.<br>
+<code>let mem = sdk_module
+            .get_memory(&amp;mut store, "memory")
+            .expect("Expected 'memory' not found");</code></p>
+</li>
+</ol>
+<ul>
+<li>Always  obtaining the error <code>Error: failed to get caller's exported memory</code> at  <code>add.call</code> <br>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="250810778"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/250810778" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#250810778">(Aug 26 2021 at 17:38)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-906608853">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>While I am not sure why wasmtime gives an error, even if it doesn't <code>--import-memory</code> is not enough to make this work. <code>--import-memory</code> only causes the wasm module to import an externally provided memory. It will still overwrite part of it with it's data segment. This is almost guaranteed to overwrite the part of the linear memory to which the exporting wasm module has written it's data segment, causing corruption. I am not sure if the LLVM toolchain has an option to move the location where the data segment is imported to ensure that it doesn't conflict between the wasm modules. In addition the heap allocator of each wasm module likely expects to be the only allocator operating on the linear memory which may cause both allocators to give the same part of the memory to callers in both wasm modules.</p>
+</blockquote>
+
+
+
+<a name="250859441"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/250859441" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#250859441">(Aug 27 2021 at 00:04)</a>:</h4>
+<p>alexcrichton edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-906602975">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>Hi!<br>
+There are any progress on shared memory between linked modules?<br>
+I'm trying to create a "WasmMachine" that links an "sdk module" that contains some wrapper to host_functions and a secondary module that calls the sdk functions.</p>
+<p>I would like call from a the secondary wasm (sources in rust) the sdk functions passing just pointers to a shared linear memory.<br>
+Something like this (is basically the linker example):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">engine</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Engine</span>::<span class="n">default</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">linker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Linker</span>::<span class="n">new</span><span class="p">(</span><span class="o">&amp;</span><span class="n">engine</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Store</span>::<span class="n">new</span><span class="p">(</span><span class="o">&amp;</span><span class="n">engine</span><span class="p">,</span><span class="w"> </span><span class="p">());</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">wasm_module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Module</span>::<span class="n">from_file</span><span class="p">(</span><span class="o">&amp;</span><span class="n">engine</span><span class="p">,</span><span class="w"> </span><span class="n">MODULE_WASM</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">sdk_module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Module</span>::<span class="n">from_file</span><span class="p">(</span><span class="o">&amp;</span><span class="n">engine</span><span class="p">,</span><span class="w"> </span><span class="n">SDK_WASM</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">linker</span><span class="p">.</span><span class="n">func_wrap</span><span class="p">(</span><span class="s">"host"</span><span class="p">,</span><span class="w"> </span><span class="s">"log"</span><span class="p">,</span><span class="w"> </span><span class="n">host_log</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Memory from host</span>
+<span class="w">    </span><span class="c1">// let mem = Memory::new(&amp;mut store, MemoryType::new(Limits::new(17, None)))?;</span>
+<span class="w">    </span><span class="c1">// linker.define("env", "memory", mem)?;</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">sdk_module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">linker</span><span class="p">.</span><span class="n">instantiate</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">sdk_module</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Using the sdk-memory</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sdk_module</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">get_memory</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="s">"memory"</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"Expected 'memory' not found"</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">linker</span><span class="p">.</span><span class="n">define</span><span class="p">(</span><span class="s">"env"</span><span class="p">,</span><span class="w"> </span><span class="s">"memory"</span><span class="p">,</span><span class="w"> </span><span class="n">mem</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">linker</span><span class="p">.</span><span class="n">instance</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="s">"wasm-sdk"</span><span class="p">,</span><span class="w"> </span><span class="n">sdk_module</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">wasm_module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">linker</span><span class="p">.</span><span class="n">instantiate</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">wasm_module</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">wasm_module</span><span class="p">.</span><span class="n">get_typed_func</span>::<span class="o">&lt;</span><span class="p">(</span><span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="kt">i32</span><span class="p">),</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">_</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="s">"add"</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="p">.</span><span class="n">call</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="mi">41</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">))</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="fm">println!</span><span class="p">(</span><span class="s">"res_add: {}"</span><span class="p">,</span><span class="w"> </span><span class="n">res</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+<p>I'm trying in two ways:</p>
+<ol>
+<li>
+<p>Compiling the wasm module with the flag <code>--import-memory"</code> and then creating a host memory like this:<br>
+<code>let mem = Memory::new(&amp;mut store, MemoryType::new(Limits::new(17, None)))?;</code></p>
+</li>
+<li>
+<p>Compiling just the secondary module with the flag <code>--import-memory"</code> and then export the memory from the sdk_module and using it for the secondary module.<br>
+<code>let mem = sdk_module
+            .get_memory(&amp;mut store, "memory")
+            .expect("Expected 'memory' not found");</code></p>
+</li>
+</ol>
+<ul>
+<li>Always  obtaining the error <code>Error: failed to get caller's exported memory</code> at  <code>add.call</code> <br>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="251189826"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/251189826" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#251189826">(Aug 30 2021 at 06:48)</a>:</h4>
+<p>willygroup <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-908078279">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>Thanks for the reply.<br>
+I managed to import the same memory for both modules and this looks "almost" to work if I don't mess too much with the memory allocation :D <br>
+There is no way to tell a module to use the allocator from another module?<br>
+Like this is not very useful linking modules for my project <span aria-label="disappointed" class="emoji emoji-1f61e" role="img" title="disappointed">:disappointed:</span> </p>
+</blockquote>
+
+
+
+<a name="251193779"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/251193779" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#251193779">(Aug 30 2021 at 07:37)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-908108581">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<blockquote>
+<p>There is no way to tell a module to use the allocator from another module?</p>
+</blockquote>
+<p>Maybe if you only link a single wasm module against the allocator and then let the other link against the allocator functions of the first? As for how to achieve this, I have no idea.</p>
+</blockquote>
+
+
+
+<a name="251352725"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/251352725" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#251352725">(Aug 31 2021 at 08:59)</a>:</h4>
+<p>davxy <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-909041679">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>Hi there. I'm interested as well :)</p>
+<p>Preamble: </p>
+<ul>
+<li>I have a two modules, A and B, and I like to use B as a shared library.</li>
+<li>A is tiny and contains only the code that implements the application business logic.</li>
+<li>B is huge and contains all the std library functions and utilities</li>
+</ul>
+<p>In particular, I'm trying to:</p>
+<ul>
+<li>
+<ol>
+<li>share the memory between two modules =&gt; DONE</li>
+</ol>
+</li>
+<li>
+<ol start="2">
+<li>call a function of module A from module B =&gt; DONE</li>
+</ol>
+</li>
+<li>
+<ol start="3">
+<li>prevent A from statically link the std library stuff, eg. allocator code =&gt; NOT DONE (how we can do that?)</li>
+</ol>
+</li>
+<li>
+<ol start="4">
+<li>prevent that an allocation in module A clash with an allocation in module B =&gt; NOT DOVE (I suppose that can be resolved by the point 3 by letting B using the allocator in A.</li>
+</ol>
+</li>
+</ul>
+<p>Any ideas?</p>
+<p>Thanks for you awesome work, David</p>
+</blockquote>
+
+
+
+<a name="251352799"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/251352799" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#251352799">(Aug 31 2021 at 09:00)</a>:</h4>
+<p>davxy edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-909041679">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>Hi there. I'm interested as well :)</p>
+<p>Preamble: </p>
+<ul>
+<li>I have two modules, A and B, and I like to use B as a shared library.</li>
+<li>A is tiny and contains only the code that implements the application business logic.</li>
+<li>B is huge and contains all the std library functions and utilities</li>
+</ul>
+<p>In particular, I'm trying to:</p>
+<ul>
+<li>
+<ol>
+<li>share the memory between two modules =&gt; DONE</li>
+</ol>
+</li>
+<li>
+<ol start="2">
+<li>call a function of module A from module B =&gt; DONE</li>
+</ol>
+</li>
+<li>
+<ol start="3">
+<li>prevent A from statically link the std library stuff, eg. allocator code =&gt; NOT DONE (how we can do that?)</li>
+</ol>
+</li>
+<li>
+<ol start="4">
+<li>prevent that an allocation in module A clash with an allocation in module B =&gt; NOT DOVE (I suppose that can be resolved by the point 3 by letting B using the allocator in A.</li>
+</ol>
+</li>
+</ul>
+<p>Any ideas?</p>
+<p>Thanks for you awesome work, David</p>
+</blockquote>
+
+
+
+<a name="251352847"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/251352847" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#251352847">(Aug 31 2021 at 09:00)</a>:</h4>
+<p>davxy edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-909041679">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>Hi there. I'm interested as well :)</p>
+<p>Preamble: </p>
+<ul>
+<li>I have two modules, A and B, and I like to use B as a shared library.</li>
+<li>A is tiny and contains only the code that implements the application business logic.</li>
+<li>B is huge and contains all the std library functions and utilities</li>
+</ul>
+<p>In particular, I'm trying to:</p>
+<ul>
+<li>
+<ol>
+<li>share the memory between two modules =&gt; DONE</li>
+</ol>
+</li>
+<li>
+<ol start="2">
+<li>call a function of module A from module B =&gt; DONE</li>
+</ol>
+</li>
+<li>
+<ol start="3">
+<li>prevent A from statically link the std library stuff, eg. allocator code =&gt; NOT DONE (how we can do that?)</li>
+</ol>
+</li>
+<li>
+<ol start="4">
+<li>prevent that an allocation in module A clash with an allocation in module B =&gt; NOT DONE (I suppose that can be resolved by the point 3 by letting B using the allocator in A.</li>
+</ol>
+</li>
+</ul>
+<p>Any ideas?</p>
+<p>Thanks for you awesome work, David</p>
+</blockquote>
+
+
+
+<a name="251353945"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/251353945" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#251353945">(Aug 31 2021 at 09:11)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-909050627">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>It seems that there is a tool convention for dynamic libraries&lt;sup&gt;[1]&lt;/sup&gt;, but it is a work in progress and requires either using emscripten, which only runs on the web, or parsing a "dylink" section when loading to determine which dynamic libraries to load and then some additional code to actually link them. [2] gives some more information on how to make it work. At the time of writing of that article there were a couple of bugs in LLVM and lld. I don't know if they are all fixed yet.</p>
+<p>[1]: <a href="https://github.com/WebAssembly/tool-conventions/blob/main/DynamicLinking.md">https://github.com/WebAssembly/tool-conventions/blob/main/DynamicLinking.md</a><br>
+[2]: <a href="https://iandouglasscott.com/2019/07/18/experimenting-with-webassembly-dynamic-linking-with-clang/">https://iandouglasscott.com/2019/07/18/experimenting-with-webassembly-dynamic-linking-with-clang/</a></p>
+</blockquote>
+
+
+
+<a name="281327216"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/281327216" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#281327216">(May 05 2022 at 16:54)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/1934#issuecomment-1118827944">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>I'm going to close this since this issue is quite old at this point and in general the problems here are toolchain-related rather than Wasmtime related. </p>
+</blockquote>
+
+
+
+<a name="281327217"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231934%20Share%20memory%20between%20linked%20modules/near/281327217" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231934.20Share.20memory.20between.20linked.20modules.html#281327217">(May 05 2022 at 16:54)</a>:</h4>
+<p>alexcrichton closed <a href="https://github.com/bytecodealliance/wasmtime/issues/1934">issue #1934</a>:</p>
+<blockquote>
+<p>I've tried to experiment with linking several wasm modules together (<a href="https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs">https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs</a>). It works but it seems the memory isn't "shared". For instance it is impossible to send a string between modules. Am I missing something? Thanks!</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

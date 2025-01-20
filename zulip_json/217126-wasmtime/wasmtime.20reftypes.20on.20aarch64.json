@@ -1,0 +1,218 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> , with the regalloc update (PR #2034), the enable-gc-tests-on-aarch64 PR <em>almost</em> passes, except for <code>gc_during_gc_from_many_table_gets</code>; the debug spew seems to indicate that it's not finding the stack canary</p>",
+        "id": 204113997,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594919653
+    },
+    {
+        "content": "<p>I'm thinking this may be an issue with the way that stackframes work on aarch64; in particular, the FP tuple may be at the <em>bottom</em> of an activation record rather than the top (i.e., we don't have the equivalent of <code>push rbp / mov rbp, rsp</code> at the top of every function like x86 does) so we may not actually step over the canary</p>",
+        "id": 204114170,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594919717
+    },
+    {
+        "content": "<p>thoughts? it's totally possible I'm missing the intended functionality here</p>",
+        "id": 204114243,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594919750
+    },
+    {
+        "content": "<p>Here's some debug spew (with my local addition for the backtrace loop):</p>\n<div class=\"codehilite\"><pre><span></span><code>[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] start GC\n[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] stack_canary = 4001586718\n[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 400027b2e0 sp 4001586190\n[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 40002763c0 sp 40015861f0\n[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 4000275c34 sp 40015862c0\n[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 400026a214 sp 40015862f0\n[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 40cc61e134 sp 4001586320\n[2020-07-16T17:08:59Z WARN  wasmtime_runtime::externref] did not find stack canary; skipping GC sweep\n[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] end GC\n</code></pre></div>",
+        "id": 204114458,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594919862
+    },
+    {
+        "content": "<p>context: the point of the stack canary is to ensure that we've walked every Wasm frame. If we didn't walk every Wasm frame, then when we sweep, we might reclaim objects that are still in use, leading to use-after-free. If we don't observe the stack canary, then we skip the sweep to avoid these issues</p>",
+        "id": 204114642,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594919943
+    },
+    {
+        "content": "<p>it's expected that (if all the frame management is working right) whenever we're in Wasm code, we should reach the canary, right?</p>",
+        "id": 204114739,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594919995
+    },
+    {
+        "content": "<p>yes, this is a workaround for .NET always emitting windows stack unwind info, even on linux/macos, and libunwind doesn't know how to handle that info, so it fails to keep walking</p>",
+        "id": 204114855,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920056
+    },
+    {
+        "content": "<p>so if someone calls into wasm, which calls into .NET, and then a GC is triggered, we miss all the frames older than the .NET frames</p>",
+        "id": 204114929,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920100
+    },
+    {
+        "content": "<p>I see, OK</p>",
+        "id": 204114945,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920110
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64/near/204114170\">said</a>:</p>\n<blockquote>\n<p>I'm thinking this may be an issue with the way that stackframes work on aarch64; in particular, the FP tuple may be at the <em>bottom</em> of an activation record rather than the top (i.e., we don't have the equivalent of <code>push rbp / mov rbp, rsp</code> at the top of every function like x86 does) so we may not actually step over the canary</p>\n</blockquote>\n<p>can you explain a little more here? I'm not sure I follow</p>",
+        "id": 204115004,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920130
+    },
+    {
+        "content": "<p>So basically, as far as I understand, <code>backtrace</code> should walk the stack by following the linked-list from <code>fp</code> (the frame pointer register); each entry has <code>fp</code> at offset 0 and <code>lr</code> (return address link register) at offset 8</p>",
+        "id": 204115076,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920184
+    },
+    {
+        "content": "<p>On aarch64, the stack management is somewhat flexible</p>",
+        "id": 204115146,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920215
+    },
+    {
+        "content": "<p>So some compilers (e.g. I just disassembled <code>/bin/ls</code> on our aarch64 box and found an example) allocate stack storage <em>above</em> this record</p>",
+        "id": 204115190,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920242
+    },
+    {
+        "content": "<p>On x86 it'd be the equivalent of <code>sub rsp, $MY_LOCALS_SIZE / push rbp / mov rbp, rsp</code></p>",
+        "id": 204115266,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920265
+    },
+    {
+        "content": "<p>So if one is hoping that the two <code>fp</code> values (which I assume is what <code>backtrace</code> returns for the \"stack pointer\"?) land on either side of some local stack storage, this might not happen if the very topmost frame is where it lives</p>",
+        "id": 204115325,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920307
+    },
+    {
+        "content": "<p>(What's not clear to me is whether the canary is in the very topmost frame: the unittest framework should call the <code>#[test]</code> function from somewhere else; but maybe the Rust code is compiled without frame pointers?)</p>",
+        "id": 204115390,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920354
+    },
+    {
+        "content": "<p>the canary is not in the topmost frame, but in the youngest frame before we enter the oldest wasm frame</p>",
+        "id": 204115478,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920388
+    },
+    {
+        "content": "<p>Hmm, OK, so perhaps the problem is just that the backtrace walk stops prematurely</p>",
+        "id": 204115504,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920403
+    },
+    {
+        "content": "<p>there could be older frames than the frame containing the canary, but they would all be non-wasm frames</p>",
+        "id": 204115551,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920426
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64/near/204115504\">said</a>:</p>\n<blockquote>\n<p>Hmm, OK, so perhaps the problem is just that the backtrace walk stops prematurely</p>\n</blockquote>\n<p>Yeah, sounds like this to me</p>",
+        "id": 204115594,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920449
+    },
+    {
+        "content": "<p>to double check: on aarch64 the stack grows down, right?</p>",
+        "id": 204115679,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920479
+    },
+    {
+        "content": "<p>The smoke-test passes now so it seems at least some of the time, this works</p>",
+        "id": 204115729,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920486
+    },
+    {
+        "content": "<p>Yes, that's right</p>",
+        "id": 204115730,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920488
+    },
+    {
+        "content": "<p>ok, good because basically all of this code assumes that :)</p>",
+        "id": 204115751,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920501
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> afaik stack walking doesn't work on aarch64 b/c we don't emit unwind tables?</p>",
+        "id": 204115783,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594920516
+    },
+    {
+        "content": "<p>I think all the other trap-related tests that rely on unwinding are ignored as well</p>",
+        "id": 204115794,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594920525
+    },
+    {
+        "content": "<p>Oh! Does <code>backtrace</code> want those too?</p>",
+        "id": 204115802,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920529
+    },
+    {
+        "content": "<p>OK, that's a big chunk of not-happening-today then :-)</p>",
+        "id": 204115817,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920541
+    },
+    {
+        "content": "<p>yeah lol that's ok</p>",
+        "id": 204115825,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594920547
+    },
+    {
+        "content": "<p>but yeah backtrace relies on libunwind which relies on dwarf unwind tables</p>",
+        "id": 204115846,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594920558
+    },
+    {
+        "content": "<p>and we only emit those on x86_64 right now</p>",
+        "id": 204115854,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594920564
+    },
+    {
+        "content": "<p>backtrace wraps <code>libunwind</code> which relies on DWARF/ehidx (or whatever its called)</p>",
+        "id": 204115859,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920566
+    },
+    {
+        "content": "<p>for the old backend</p>",
+        "id": 204115860,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594920566
+    },
+    {
+        "content": "<p>OK cool, well, more reason to get to those soon. In any case, I'm happy we're not throwing random segfaults</p>",
+        "id": 204115911,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920587
+    },
+    {
+        "content": "<p>Thanks!</p>",
+        "id": 204115925,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594920595
+    },
+    {
+        "content": "<p>/me is updating ubuntu; offline for a while</p>",
+        "id": 204116150,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1594920700
+    }
+]

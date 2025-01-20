@@ -1,0 +1,122 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #6970 Refactor prolog/epilog generation code · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html">wasmtime / PR #6970 Refactor prolog/epilog generation code</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="389476056"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236970%20Refactor%20prolog/epilog%20generation%20code/near/389476056" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html#389476056">(Sep 06 2023 at 16:36)</a>:</h4>
+<p>uweigand opened <a href="https://github.com/bytecodealliance/wasmtime/pull/6970">PR #6970</a> from <code>uweigand:refactor-prolog-epilog</code> to <code>bytecodealliance:main</code>:</p>
+<blockquote>
+<p>This patch refactors all of the ISA/ABI specific prolog/epilog generation code around the following two ideas:</p>
+<ol>
+<li>
+<p>Separate <em>planning</em> of the function's frame layout from the actual <em>implementation</em> within prolog / epilog code.</p>
+</li>
+<li>
+<p>No longer overload different purposes (middle-end register tracking, platform-specific details like authorization modes, and pop-stack-on-return) into a single return instruction.</p>
+</li>
+</ol>
+<p>As to 1., the new approach is based around a FrameLayout data structure, which collects all information needed to emit prolog and epilog code, specifically the list of clobbered registers, and the sizes of all areas of the function's stack frame.</p>
+<p>This data structure is now computed <em>once</em>, before any code is emitted, and stored in the Callee data structure.  ABIs need to implement this via a new compute_frame_layout callback, which gets all data from common code needed to make all decisions around stack layout in one place.</p>
+<p>The FrameLayout is then used going forward to answer all questions about frame sizes, and it is passed to all ABI routines involved in prolog / epilog code generation.  [ This removes a lot of duplicated calculation, e.g. the list of clobbered registers is now only computed once and re-used everywhere. ]</p>
+<p>This in turn allows to reduce the number of distinct callbacks ABIs need to implement, and simplifies common code logic around how and when to call them.  In particular, we now only have the following four routines, which are always called in this order:</p>
+<p>gen_prologue_frame_setup<br>
+gen_clobber_save</p>
+<p>gen_clobber_restore<br>
+gen_epilogue_frame_restore</p>
+<p>The main differences to before are:</p>
+<ul>
+<li>frame_setup/restore are now called unconditionally (the target ABI can look in the FrameLayout to detect the case where no frame setup is required and skip whatever it thinks appropriate in that case)</li>
+<li>there is no separate gen_prologue_start; if the target needs to do anything here, it can now just do it instead in gen_prologue_frame_setup</li>
+<li>common code no longer attempts to emit a return instruction; instead the target can do whatever is necessary/optimal in gen_epilogue_frame_restore</li>
+</ul>
+<p>[ In principle we could also just have a single gen_prologue and gen_epilogue callback - I didn't implement this because then all the stack checking / probing logic would have to be moved to target code as well. ]</p>
+<p>As to 2., currently targets are required to implement a single<br>
+"Ret" return instruction.   This is initially used during<br>
+register allocation to hold a list of return preg/vreg pairs.<br>
+During epilog emission, this is replaced by another copy of<br>
+the same "Ret" instruction that now carries various platform<br>
+specific data (e.g. authorization modes on aarch64), and is<br>
+also overloaded to handle the case where the ABI requires<br>
+that a number of bytes are popped during return.</p>
+<p>This is a bit unfortunate in that it blows up the size of the instruction data, and also forces targets (that do not have a "ret N" instruction like Intel) into duplicated and possible sub-optimal implementations of stack adjustment during low-level emission of the return instruction.</p>
+<p>The new approach separates these concerns.  Initially, common code emits a new "Rets" instruction that is completely parallel to the existing "Args", and is used only during register allocation holding the preg/vreg pairs.  That instruction -like now- is replaced during epilog emission - but unlike now the replacement is now completely up to the target, which can do whatever it needs in gen_epilogue_frame_restore.</p>
+<p>This would typically emit some platform-specific low-level "Ret" instruction instead of the regalloc "Rets".  It also allows non-Intel targets to just create a normal (or even optimized) stack adjustment sequence before its low-level "Ret".</p>
+<p>[ In particular, on riscv64 pop-stack-before-return currently emits two distinct stack adjustment instructions immediately after one another.  These could now be easily merged, but that's not yet done in this patch.  ]</p>
+<p>No functional change intended on any target.</p>
+<p>&lt;!--<br>
+Please make sure you include the following information:</p>
+<ul>
+<li>
+<p>If this work has been discussed elsewhere, please include a link to that<br>
+  conversation. If it was discussed in an issue, just mention "issue #...".</p>
+</li>
+<li>
+<p>Explain why this change is needed. If the details are in an issue already,<br>
+  this can be brief.</p>
+</li>
+</ul>
+<p>Our development process is documented in the Wasmtime book:<br>
+<a href="https://docs.wasmtime.dev/contributing-development-process.html">https://docs.wasmtime.dev/contributing-development-process.html</a></p>
+<p>Please ensure all communication follows the code of conduct:<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md">https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md</a><br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="389476060"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236970%20Refactor%20prolog/epilog%20generation%20code/near/389476060" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html#389476060">(Sep 06 2023 at 16:36)</a>:</h4>
+<p><strong>uweigand</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers">wasmtime-compiler-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6970">PR #6970</a>.</p>
+
+
+
+<a name="389476062"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236970%20Refactor%20prolog/epilog%20generation%20code/near/389476062" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html#389476062">(Sep 06 2023 at 16:36)</a>:</h4>
+<p><strong>uweigand</strong> requested <a href="https://github.com/abrown">abrown</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6970">PR #6970</a>.</p>
+
+
+
+<a name="390554417"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236970%20Refactor%20prolog/epilog%20generation%20code/near/390554417" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html#390554417">(Sep 12 2023 at 16:17)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/cfallin">cfallin</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6970">PR #6970</a>.</p>
+
+
+
+<a name="390564188"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236970%20Refactor%20prolog/epilog%20generation%20code/near/390564188" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html#390564188">(Sep 12 2023 at 17:19)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6970#pullrequestreview-1622759359">PR review</a>:</p>
+<blockquote>
+<p>This is excellent -- thank you very much for the simplification!</p>
+<p>I was curious initially why we couldn't just have one "pre" hook and one "post" hook -- i.e., why we need to separate the clobber-save/restore step -- but at least for the prologue, I guess the answer is that we insert the stack-check beforehand. For the epilogue the ABI code really does just invoke one hook then the other; but for symmetry it's kind of nice to keep the hooks paired. Does that match your thinking?</p>
+<p>In any case, this looks good to merge!</p>
+</blockquote>
+
+
+
+<a name="390573598"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236970%20Refactor%20prolog/epilog%20generation%20code/near/390573598" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html#390573598">(Sep 12 2023 at 18:21)</a>:</h4>
+<p>uweigand updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6970">PR #6970</a>.</p>
+
+
+
+<a name="390576307"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236970%20Refactor%20prolog/epilog%20generation%20code/near/390576307" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html#390576307">(Sep 12 2023 at 18:38)</a>:</h4>
+<p>cfallin has enabled auto merge for <a href="https://github.com/bytecodealliance/wasmtime/pull/6970">PR #6970</a>.</p>
+
+
+
+<a name="390585818"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236970%20Refactor%20prolog/epilog%20generation%20code/near/390585818" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236970.20Refactor.20prolog.2Fepilog.20generation.20code.html#390585818">(Sep 12 2023 at 19:48)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/6970">PR #6970</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

@@ -1,0 +1,338 @@
+[
+    {
+        "content": "<p>Can someone explain the general approach I would have to follow if I wanted to add a Trap to wasmtime that should/would be \"triggered\" by a runtime trap coming from ARM hardware extensions (this is not that important). I am interested in which sections in wasmtime I would have to add code. Thanks!</p>",
+        "id": 374377523,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689106483
+    },
+    {
+        "content": "<p>so the hardware extension would deliver a signal of some sort that you want to turn into a wasm trap?</p>\n<p>is this a fast path for an existing kind of check/trap that wasm already raises?</p>\n<p>You want the <code>traphandlers</code> module in the <code>wasmtime-runtime</code> crate:</p>\n<ul>\n<li><a href=\"https://github.com/bytecodealliance/wasmtime/blob/80e68c336ba53f75146f2cb3920338155a2c7430/crates/runtime/src/traphandlers.rs#L4\">https://github.com/bytecodealliance/wasmtime/blob/80e68c336ba53f75146f2cb3920338155a2c7430/crates/runtime/src/traphandlers.rs#L4</a></li>\n<li>and then this has platform specific bits, eg <a href=\"https://github.com/bytecodealliance/wasmtime/blob/80e68c336ba53f75146f2cb3920338155a2c7430/crates/runtime/src/traphandlers/unix.rs#L67\">https://github.com/bytecodealliance/wasmtime/blob/80e68c336ba53f75146f2cb3920338155a2c7430/crates/runtime/src/traphandlers/unix.rs#L67</a></li>\n</ul>",
+        "id": 374380299,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689107414
+    },
+    {
+        "content": "<p>Thanks for the help! It's regarding <a href=\"https://www.kernel.org/doc/html/v5.12/arm64/memory-tagging-extension.html\">https://www.kernel.org/doc/html/v5.12/arm64/memory-tagging-extension.html</a>, which we are trying to add support for in wasmtime (it's part of a larger stack, probably not something that could be merged into wasmtime itself for now, it's more of an experiment/research project). I think wasmtime already supports arm64's pointer authentication instructions at least for preventing ROP-oriented attacks. Do you know if a special trap handler for whatever signal/trap PAC instructions \"send\" to wasmtime exists already? Maybe that could help in my implementation</p>",
+        "id": 374381499,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689107814
+    },
+    {
+        "content": "<p>I don't think we have anything to handle, it just falls into the \"SIGSEGV turns into a wasm trap\" bucket probably</p>",
+        "id": 374381681,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1689107883
+    },
+    {
+        "content": "<p>(I'm assuming it sends SEGV but SIGBUS would do similar)</p>",
+        "id": 374381729,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1689107894
+    },
+    {
+        "content": "<p>Yep, right now our MTE is also just falling into the SIGSEGV bucket and it's being labeled as a memory out of bounds access</p>",
+        "id": 374387531,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689109909
+    },
+    {
+        "content": "<p>I am able to recognize when the MTE (hardware) trap occurs, by adding this code to <code>traphandlers/unix.rs</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">faulting_addr</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">signum</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">            </span><span class=\"n\">libc</span>::<span class=\"n\">SIGSEGV</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"n\">libc</span>::<span class=\"n\">SIGBUS</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">((</span><span class=\"o\">*</span><span class=\"n\">siginfo</span><span class=\"p\">).</span><span class=\"n\">si_addr</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">),</span>\n<span class=\"w\">            </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"nb\">None</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"p\">};</span>\n<span class=\"w\">        </span><span class=\"c1\">// end of previous code, beginning of my code</span>\n\n<span class=\"w\">        </span><span class=\"c1\">// Add MTE error handling</span>\n<span class=\"w\">        </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">signum</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"n\">libc</span>::<span class=\"n\">SIGSEGV</span><span class=\"w\"> </span><span class=\"o\">&amp;&amp;</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"n\">siginfo</span><span class=\"p\">).</span><span class=\"n\">si_code</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"n\">SEGV_MTESERR</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">            </span><span class=\"c1\">// raise_lib_trap(Trap::MemoryTaggingExtensionFault);</span>\n<span class=\"w\">            </span><span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"found mte bug\"</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"p\">}</span>\n</code></pre></div>\n<p>but I am not sure how to pass this information onto the the trap handler. I have extended <code>trap_encoding::Trap</code> and <code>TrapCode</code> for the MTE fault, but I'm not sure how to pass instances of these to the respective handler. Any ideas/help?</p>",
+        "id": 374640347,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689172124
+    },
+    {
+        "content": "<p>Ah you can see, I tried manually raising a lib trap, but that caused a seg fault, probably because the method is marked as highly unsafe and it doesn't \"clean up\" after itself, as stated in its documentation. So that is probably the wrong way to go.</p>",
+        "id": 374640782,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689172201
+    },
+    {
+        "content": "<p>Is the goal to get wasm opcodes that have a new <code>Trap</code> designation? If that's the case then that's done via other means, but yeah <code>raise_lib_trap</code> won't work in the signal handler</p>",
+        "id": 374660115,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689175725
+    },
+    {
+        "content": "<p>Cranelift emits metadata for all instructions in the form of \"if this instruction traps it's this trap opcode\", so it your goal is to get a new trap opcode then that's part of the compilation pipeline when generating the instruction that might trap</p>",
+        "id": 374660377,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689175768
+    },
+    {
+        "content": "<p>and that shouldn't actually need any handling in the signal handler itself</p>",
+        "id": 374660423,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689175777
+    },
+    {
+        "content": "<p>(e.g. it's already sigsegv and it'd be caught and recognized through normal conditions)</p>",
+        "id": 374660515,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689175791
+    },
+    {
+        "content": "<p>My goal is to somehow signal to the user of wasmtime that an mte fault occurred (note that mte already works as expected, it's just the error message that this is about), instead of wasmtime printing <code>wasm trap: out of bounds memory access</code>. Instead, I would like it to say something like \"an mte fault occured\". As I mentionned in my previous message, I have been able to identify the MTE trap in <code>traphandlers/unix.rs</code> with the <code>if signum == libc::SIGSEGV &amp;&amp; (*siginfo).si_code == SEGV_MTESERR {</code> line, but I'm not sure where I now need to add more code to get the user-facing error message I want. If I read your message correctly, do I have to add something to cranelift (as well)? Could you maybe point me to some locations where modifications would be necessary? Thanks for the help!</p>",
+        "id": 374663934,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689176365
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217126-wasmtime/topic/How.20to.20register.2Fhandle.20new.20hardware.20trap.3F/near/374381681\">said</a>:</p>\n<blockquote>\n<p>I don't think we have anything to handle, it just falls into the \"SIGSEGV turns into a wasm trap\" bucket probably</p>\n</blockquote>\n<p>FWIW, we pass unknown signals along to the next signal handler if we don't recognize it as originating from within wasm, we don't have an indiscriminate bucket per se.</p>",
+        "id": 374664082,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689176399
+    },
+    {
+        "content": "<p>How is this trap generated? For example what instruction generates it? </p>\n<p>If a single instruction can generate two kinds of traps then what you wrote in the signal handler will be required. If you're adding new instructions which only have one kind of trap, then this'll be done win Cranelift by registering traps at the right time during instruction emission</p>",
+        "id": 374664442,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689176457
+    },
+    {
+        "content": "<p>If threading things around is required you can follow the flow of <code>fault_addr</code> as it goes throughout the system and that could turn into something like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">TrapAux</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">Segv</span><span class=\"p\">(</span><span class=\"kt\">usize</span><span class=\"p\">),</span>\n<span class=\"w\">    </span><span class=\"n\">Mte</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"nb\">None</span><span class=\"p\">,</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>(or something like that)</p>",
+        "id": 374664764,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689176517
+    },
+    {
+        "content": "<p>That's the tricky part, the MTE traps aren't generated by just one specific instruction. MTE works by tagging memory regions and pointers, and trapping if some memory access is performed where the tag of the pointer doesn't match the tag of the region. So it could be loads, stores etc. From <a href=\"https://www.kernel.org/doc/html/v5.12/arm64/memory-tagging-extension.html\">https://www.kernel.org/doc/html/v5.12/arm64/memory-tagging-extension.html</a>, I found <code>The kernel raises a SIGSEGV synchronously, with .si_code = SEGV_MTESERR and .si_addr = &lt;fault-address&gt;. The memory access is not performed.</code>, so I assumed the way to handle the MTE trap was to watch for a SIGSEGV and compare the si_code, which I did in the code snippet above. So basically I am trying to handle this MTE trap, and display a new, custom Trap to the user. My though process was: In the <code>traphandlers/unix.rs</code>, I can identify the MTE trap, so now I want to somehow \"send\" a custom <code>Trap</code> type to the whatever handler handles this kind of stuff. Is this possible?</p>",
+        "id": 374675946,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689178616
+    },
+    {
+        "content": "<p>I thought the <code>runtime</code> was best suited to make my additions to the code, because the MTE trap only occurs at runtime, and can't be identified at compile time. Maybe I am wrong in that.</p>",
+        "id": 374676547,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689178735
+    },
+    {
+        "content": "<p>Ok that makes sense. In that case you'll want to, in the signal handling context as you are, determine that this is an MTE trap and then thread that through with the <code>faulting_addr</code> that's currently threaded everywhere.  Then <a href=\"https://github.com/bytecodealliance/wasmtime/blob/80e68c336ba53f75146f2cb3920338155a2c7430/crates/wasmtime/src/trap.rs#L106-L121\">here</a> you can process <code>faulting_addr</code> (which would be renamed to handle MTE stuff) in conjunction with the trap opcode. For example if the opcode says <code>Trap::MemoryOutOfBounds</code> but MTE was detected you'd change that to <code>Trap::YourNewCustomTrapCode</code> or something like that</p>",
+        "id": 374677397,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689178912
+    },
+    {
+        "content": "<p>the code I linked represents that a trap at a particular native code address was caught and the <code>faulting_addr</code> is sort of \"optional context\" form the original trap. That's then processed via cranelift-generated lookup tables to convert the pc to an opcode, and you'll be updating that to generate a new opcode</p>",
+        "id": 374677694,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689178970
+    },
+    {
+        "content": "<p>I guess the part I am unclear about is <code>then thread that through with the faulting_addr that's currently threaded everywhere</code>. What do you mean with this? What does \"threading\" mean in this context?</p>",
+        "id": 374678297,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689179084
+    },
+    {
+        "content": "<p>Another way to put all this I think is that we're already catching MTE traps and what's necessary next is to plumb the metadata around to classify the trap as an MTE-related trap rather than an out of bounds trap because, by default, all memory-related instructions assume that a signal must mean the access was out of bounds (which is no longer true with MTE)</p>",
+        "id": 374678335,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689179093
+    },
+    {
+        "content": "<p>wait but would these MTE traps get raised because a correctly implemented Wasm program attempted to do something it shouldn't do? (like access OOB memory for example) or would the trap get raised because of a bug in the runtime/compiler? If the latter then this should just hard kill wasmtime and we shouldn't generate custom Trap types and pass them around</p>\n<p>maybe I am misunderstanding something...</p>",
+        "id": 374678471,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689179134
+    },
+    {
+        "content": "<p>oh so right now we record on segfaults not only the address of the faulting instruction but the address that was faulted on (e.g. you loaded from 0x000f00 or something like that -- this \"context\" of the <code>faulting_addr</code> needs to make its way from the signal handler into the rest of Wasmtime, and you'll need to shepherd along the MTE information alongside this other information</p>",
+        "id": 374678542,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689179151
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> Ah, my bad for not clarifying earlier. The MTE-functionality we added is to increase memory safety of the wasm program we are executing with wasmtime. If we have a wasm program (that might have been compiled from unsafe C), then we want to use MTE to detect memory unsafe things like use-after-free or other memory-related bugs.</p>",
+        "id": 374679271,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689179305
+    },
+    {
+        "content": "<p>UAF within the Wasm guest?</p>",
+        "id": 374679375,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689179327
+    },
+    {
+        "content": "<p>Yes, or OOB like you mentionned</p>",
+        "id": 374680221,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689179499
+    },
+    {
+        "content": "<p>okay yeah then you'd want to recognize when you get an MTE signal that is indeed from within Wasm and not because some other part of the host is also using MTE (can look at the offending PC) and then do all the stuff that Alex has been saying</p>",
+        "id": 374680583,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689179577
+    },
+    {
+        "content": "<p>that part I think is already handled because wasmtime only catches signals for instructions which are reigstered as being able to trap</p>",
+        "id": 374680766,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689179617
+    },
+    {
+        "content": "<p>ah is that part generic over all signals? great!</p>",
+        "id": 374680843,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689179637
+    },
+    {
+        "content": "<p>yeah that's <a href=\"https://github.com/bytecodealliance/wasmtime/blob/80e68c336ba53f75146f2cb3920338155a2c7430/crates/runtime/src/traphandlers.rs#L464\">this check</a></p>",
+        "id": 374681030,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689179668
+    },
+    {
+        "content": "<p>which gets executed on all signals</p>",
+        "id": 374681046,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689179671
+    },
+    {
+        "content": "<p>perfect, sorry for the noise</p>",
+        "id": 374681119,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689179686
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> So, you're saying I should pass along (\"thread\") the MTE Trap as a <code>TrapReason::Jit</code> (I originally thought <code>TrapReason::Wasm</code> sounded more fitting, but not sure) by calling <code>info.set_jit_trap(pc, fp, faulting_addr);</code>, with the difference that I have to add my MTE information to that somehow (probably just adding a boolean argument)? Or do you mean I shouldn't change anything in <code>traphandlers/unix.rs</code> and just insert my MTE check in the <code>from_runtime_box</code> snippet you posted? Also, with opcode, you don't mean <code>(*siginfo).si_code</code>, which is what I need to check whether it's an MTE trap, right?</p>",
+        "id": 374685268,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689180619
+    },
+    {
+        "content": "<p>More-or-less, yes. You're right in that you're going to want to modify <code>TrapReason::Jit</code>. Currently that only has <code>faulting_addr: Option&lt;usize&gt;</code> and yeah you may want to add <code>is_mte_fault: bool</code> or something like that (sorry I don't know anything about MTE so I don't know what would be appropriate here). That would then make its way to <code>from_runtime_box</code> where you can convert a <code>MemoryOutOfBounds</code> trap into an MTE-specific trap depending on the state in <code>TrapReason::Jit</code>.</p>",
+        "id": 374686144,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689180798
+    },
+    {
+        "content": "<p>You'll need to inspect <code>si_code</code> to determine how to construct <code>TrapReason::Jit</code> still</p>",
+        "id": 374686185,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689180809
+    },
+    {
+        "content": "<p>Ok, that makes sense, thank you for the help and time! One more thing: I'm looking at <code>from_runtime_box</code> right now, and I don't see any mention of anything related to <code>MemoryOutOfBounds</code>. Which enum that contains <code>MemoryOutOfBounds</code> do you mean? I'm not sure how to return my MTE trap error message to the user here. Is that done by returning a type <code>Error</code> here?</p>",
+        "id": 374689148,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689181490
+    },
+    {
+        "content": "<p>The <code>code</code> variable has type <code>Trap</code> which is likely storing <code>Trap::MemoryOutOfBounds</code> today for your MTE traps. This <code>code</code> is what you'll want to change to something MTE-related. By default all memory accesses, if they fault, report \"memory out of bounds\", which is why that's the case today</p>",
+        "id": 374689693,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689181625
+    },
+    {
+        "content": "<p>Thanks a lot for your help! It's working as expected now!</p>",
+        "id": 374702305,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689184797
+    },
+    {
+        "content": "<p>Follow-up: I know wasmtime already uses ARM's Pointer Authentication (PAC) for preventing ROP-oriented attacks. Do you \"throw custom error messages\", like I implemented for MTE, for PAC?</p>",
+        "id": 374729544,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689192315
+    },
+    {
+        "content": "<p>Not currently no because if a PAC error trips that's a critical compiler error which should take down the entire process. It's a defense-in-depth mechanism as opposed to a feature given to content to detect issues in-content</p>",
+        "id": 374729832,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1689192393
+    },
+    {
+        "content": "<p>I don't quite understand. Wasmtime's PAC support is for wasm guests/programs that wasmtime executes, right? PAC is also a runtime error that wasmtime might encounter/have to handle, similar to MTE. Which process do you mean when you say \"taking down the process\"? Wasmtime itself or the wasm guest?</p>",
+        "id": 374736678,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689193204
+    },
+    {
+        "content": "<p>Since a wasm guest can only make calls and branches to safe targets, enforced during wasm validation, pointer authentication checks \"can't\" fail. If they fail anyway, that indicates we screwed up in the compiler, at which point all our safety guarantees are shot and we should fail really noisily. That's why Alex says the entire Wasmtime process should abort at that point.</p>",
+        "id": 374737472,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1689193483
+    },
+    {
+        "content": "<p>I am still slightly confused. Are pointer auth checks only done during compilation (or validation, though I'm not entirely sure what that is) in wasmtime? I don't understand why a PAC error/trap is a critical compiler error. In my understanding, the PAC instructions are for instance inserted to protect the return address. If this is somehow (some other vulnerability in the wasm code) overwritten by an attacker, then the PAC instruction would fail to authenticate the address, and, I think, crash/trap somehow. Are you saying the wasmtime process noisily aborts when encountering such PAC crashs/traps?</p>",
+        "id": 374739010,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689193896
+    },
+    {
+        "content": "<p>it means the compiler successfully produced code, but by having a PAC failure, we determined that code was incorrect at runtime</p>",
+        "id": 374739265,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689193976
+    },
+    {
+        "content": "<p>ie there was a miscompile / compiler bug</p>",
+        "id": 374739302,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689193989
+    },
+    {
+        "content": "<p>Does this have something to do with Linux sending a SIGILL signal instead of SIGSEGV?</p>",
+        "id": 374739387,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689194032
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"625009\">Fritz Rehde</span> <a href=\"#narrow/stream/217126-wasmtime/topic/How.20to.20register.2Fhandle.20new.20hardware.20trap.3F/near/374739010\">said</a>:</p>\n<blockquote>\n<p>If this is somehow (some other vulnerability in the wasm code) overwritten by an attacker, then the PAC instruction would fail to authenticate the address, and, I think, crash/trap somehow. Are you saying the wasmtime process noisily aborts when encountering such PAC crashs/traps?</p>\n</blockquote>\n<p>correct</p>\n<p>the return address could be wrong either because of an attacker trying to do ROP (by leveraging a compiler or runtime bug) or because of a general bug with our compiler and the code it generates (as discussed above)</p>",
+        "id": 374739537,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689194077
+    },
+    {
+        "content": "<p>A wasm guest should not be able to write anywhere that we have a pointer to code, such as writing to the native stack; if we allowed a stray write like that then we've already lost and the PAC failure is just detecting the bug sometime later.</p>",
+        "id": 374739702,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1689194098
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"625009\">Fritz Rehde</span> <a href=\"#narrow/stream/217126-wasmtime/topic/How.20to.20register.2Fhandle.20new.20hardware.20trap.3F/near/374739387\">said</a>:</p>\n<blockquote>\n<p>Does this have something to do with Linux sending a SIGILL signal instead of SIGSEGV?</p>\n</blockquote>\n<p>I personally have no idea why certain hardware features map to certain signals vs other signals. seems semi-arbitrary.</p>",
+        "id": 374739861,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1689194137
+    },
+    {
+        "content": "<p>Ok, thanks for the explanations. But how does it work in practice? Do you actually identify PAC errors/traps, and, when aborting wasmtime, provide some sort of error message to users? Or is such a PAC trap not identified by itself, and belongs to a larger group of traps/signals, that might all lead to aborting wasmtime?</p>",
+        "id": 374741004,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689194472
+    },
+    {
+        "content": "<p>The latter; we don't catch SIGSEGVs that do not map to expected points where wasm could semantically hit an error (e.g. out-of-bounds)</p>",
+        "id": 374741207,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1689194535
+    },
+    {
+        "content": "<p>so it will pass through and Linux will kill the process</p>",
+        "id": 374741225,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1689194542
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"625009\">@Fritz Rehde</span> to tie the above to some good search-phrases, Wasm has \"CFI\" (control-flow integrity); this is what implies the property that Jamey describes above, and makes PAC purely a defense-in-depth thing</p>",
+        "id": 374741425,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1689194623
+    },
+    {
+        "content": "<p>we are able to guarantee CFI even on platforms without PAC (because Wasm semantics require it)</p>",
+        "id": 374741456,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1689194636
+    },
+    {
+        "content": "<p>Ok, interesting.<br>\nSay I wanted to/have added pointer authentication for a different purpose into wasmtime as well, not just preventing ROP attacks like wasmtime currently does. In my case, I wouldn't exactly consider a situation where a PAC trap is encountered at runtime to be a fault in cranelift itself, I would consider it a bug in the wasm guest code, just like MTE prevents buffer overflows, use after frees, which I also consider wasm guest errors, not errors in the cranelift compiler. <br>\nIn this situation, if I possibly can, I would like to exit with an error similar to how I implemented with MTE. MTE was quite simple, I just had to compare a linux constant (<code>SEGV_MTESERR</code>) with the si_code. But I think/read online that identifying PAC traps/exceptions is more complicated. In my understanding, a PAC trap would cause a <code>SIGILL</code>, but that can mean many different problems, not necessarily a PAC error. However, I am not sure how I could continue from there. I read that PAC traps are asynchronous, meaning that by the time the signal handler receives the <code>SIGILL</code> signal, the program might have advanced beyond where the PAC error actually occured. So maybe an analysis to detect whether the encountered trap is a PAC trap is non-deterministic at best, and probably quite hard to implement.</p>",
+        "id": 374748300,
+        "sender_full_name": "Fritz Rehde",
+        "timestamp": 1689197117
+    }
+]

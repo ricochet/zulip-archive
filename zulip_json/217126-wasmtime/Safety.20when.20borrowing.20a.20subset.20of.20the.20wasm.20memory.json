@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>In our embedding, we're using our own bindgen-like macro to generate bindings for our wasm modules to call into the host. It often happens that the host will read function parameters from the wasm memory, then write a result somewhere else in the wasm memory. In some situations, the wasm memory is thus both mutably borrowed and immutably borrowed (think for instance: streaming results as they're computed in the wasm memory, instead of stashing them before writing all of them at once in the wasm memory result sub-region).</p>\n<p>We're trying to do this safely, but that basically having several mutable references to the underlying wasm memory, as these get/set happen at different places in the code. It seems hard to safely as this likely means that we'd need to implement some kind of dynamic checking ourselves to track which different subregions of the wasm memory are borrowed at the same time, and panic whenever a region written-to is borrowed more than once.</p>\n<p>Is this a problem others have encountered in practice, and if so, how have you dealt with it?</p>",
+        "id": 292772817,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1660144002
+    },
+    {
+        "content": "<p>Wiggle was designed to solve this problem</p>",
+        "id": 292772954,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1660144054
+    },
+    {
+        "content": "<p>It has a dynamic borrow checker</p>",
+        "id": 292773020,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1660144081
+    },
+    {
+        "content": "<p>It won’t panic, but rather return an error if the borrowing rules are broken, because the input pointers are untrusted (controlled by Wasm)</p>",
+        "id": 292773208,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1660144137
+    },
+    {
+        "content": "<p>If you are using interfaces that aren’t (or can’t be) defined with witx, you can steal the bits of wiggle that does this work, but it should be relatively easy to reuse the GuestPtr parts of the crate without using the proc macro code generator</p>",
+        "id": 292773554,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1660144251
+    },
+    {
+        "content": "<p>Thanks, will read more about it.<br>\nOk, so we could use wiggle, directly via rewriting our bindings with wit, or indirectly via integrating wiggle in our code base.</p>",
+        "id": 292773652,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1660144287
+    },
+    {
+        "content": "<p>Ah, here we go :-)</p>",
+        "id": 292773670,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1660144290
+    },
+    {
+        "content": "<p>Wiggle is witx, not wit</p>",
+        "id": 292776014,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1660144959
+    },
+    {
+        "content": "<p>But yeah</p>",
+        "id": 292776026,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1660144962
+    },
+    {
+        "content": "<p>(I say that because it’s at a dead end and we likely won’t do any more real work on it, unless it’s to make concessions for adapting legacy stuff to wit)</p>",
+        "id": 292776175,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1660145019
+    },
+    {
+        "content": "<p>its dead as in complete and proven in production and red team tests to be solid, not as in bad, though :)</p>",
+        "id": 292776410,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1660145095
+    },
+    {
+        "content": "<p>Ah interesting. Does wit have a similar mechanism built-in?</p>",
+        "id": 292787739,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1660148536
+    },
+    {
+        "content": "<p>The <code>wit-bindgen</code> generator currently is able to largely sidestep this since memory is never both simultaneously mutably and immutably borrowed, with the component model no one ever gets a mutable view into memroy and it's the glue that manages writing to memory which means this alias checking is all bypassed</p>",
+        "id": 292816208,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1660158614
+    },
+    {
+        "content": "<p>it does mean, however, that host APIs tend to look different</p>",
+        "id": 292816244,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1660158626
+    },
+    {
+        "content": "<p>one of the principles of the component model is that a component shouldn't be able to tell whether the other side of an interface is implemented by the host or by another component, and since components can't share memory with each other, the component model prohibits the kind of zero-copy optimization that Benjamin is doing—do I have that right?</p>",
+        "id": 292821142,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1660160645
+    },
+    {
+        "content": "<p>I believe so.</p>",
+        "id": 292821999,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1660160985
+    },
+    {
+        "content": "<p>Well it's somewhat subtle, while you're right about inter-component communication this I think has to do with host APIs which are very different. The <code>wit-bindgen</code> bindings do in fact give zero-copy views into strings/<code>list&lt;u8&gt;</code>/etc, it's just that you don't get mutable windows even with the component model since there's basically no safe way to do that.</p>",
+        "id": 292822544,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1660161204
+    },
+    {
+        "content": "<p>although I will say it doesn't prohibit it, per se, just leaves such machinations up to the embedder to come up with. there's no representation of an \"address\" in the value types (unlike with the witx attributes), but a number is just a number; the embedder could figure out what linear memory to interact with (unsafely); another component can't access the same memory unless imported (e.g. a \"shared everything libc\" scheme)</p>",
+        "id": 292822599,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1660161232
+    },
+    {
+        "content": "<p>Alternatively, with a stream type, hosts can read from and write to the buffers directly without special conventions.</p>",
+        "id": 292823243,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1660161464
+    },
+    {
+        "content": "<p>Actually, reading over the shared everything libc explainer again, I guess it's up to the adapter to see that the source and destination memories are the same and pass the lowered pointers straight though without a realloc/copy?</p>",
+        "id": 292824760,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1660162070
+    },
+    {
+        "content": "<p>for component-to-component (anyway, off topic for what Benjamin is talking about)</p>",
+        "id": 292824889,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1660162115
+    }
+]

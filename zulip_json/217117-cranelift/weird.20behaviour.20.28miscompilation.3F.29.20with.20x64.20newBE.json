@@ -1,0 +1,230 @@
+[
+    {
+        "content": "<p>See <a href=\"https://github.com/bytecodealliance/wasmtime/pull/2504#issuecomment-744327408\">https://github.com/bytecodealliance/wasmtime/pull/2504#issuecomment-744327408</a>. I get some really weird behaviour:</p>\n<p>Basically <code>66 0f 57 06 xorpd (%rsi),%xmm0</code> gives a SIGSEGV. This is despite the fact that reading from the address in <code>%rsi</code> using a debugger works fine. Lldb reports the accessed location as 0 for some reason. I also noticed that the preceding instruction <code>66 48 0f 6e c0 movq %rax,%xmm0</code> doesn't cause the value of <code>%rax</code> (<code>0x8000000000000000</code>) to be loaded into <code>%xmm0</code>. It stays 0. If I write a different value to <code>%xmm0</code> just before executing the <code>movq</code>, the value gets reset to 0 after executing it.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/2504#issuecomment-744327408\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/2504#issuecomment-744327408\" title=\"Draft: I128 support (partial) on x64. by cfallin · Pull Request #2504 · bytecodealliance/wasmtime\">Draft: I128 support (partial) on x64. by cfallin · Pull Request #2504 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This PR generalizes all of the MachInst framework to reason about SSA Values as being located in multiple registers (one, two or four, currently, in an efficient packed form). This is necessary in ...</div></div></div>",
+        "id": 219840960,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607952746
+    },
+    {
+        "content": "<p>For the record running it in qemu with user mode virtualization works fine.</p>",
+        "id": 219842065,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607953304
+    },
+    {
+        "content": "<p>Also when jumping over the first load instruction, the second load instruction doesn't cause a SIGSEGV, but the third does.</p>",
+        "id": 219842214,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607953383
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> is the value in <code>%rsi</code> 16-aligned?  I bet it's not</p>",
+        "id": 219852882,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1607958038
+    },
+    {
+        "content": "<p><code>0x7ffd802b5678</code>, nope it looks not. There is no way to specify the alignment of a stack slot though unfortunately.</p>",
+        "id": 219855879,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607959345
+    },
+    {
+        "content": "<p>I will try compiling with the aligned memflag removed.</p>",
+        "id": 219855947,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607959378
+    },
+    {
+        "content": "<p>As a random comment, all of those SSE load-op instructions require the memory address to be 16-aligned.  (I think.)</p>",
+        "id": 219856321,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1607959531
+    },
+    {
+        "content": "<p>Removing the aligned memflag doesn't have any effect on the compiled code.</p>",
+        "id": 219856524,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607959618
+    },
+    {
+        "content": "<p>Replacing <code>load.f64</code> with <code>load.i64</code> + <code>raw_bitcast.f64</code> fixed this SIGSEGV, but I now get another one.</p>",
+        "id": 219859894,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607961047
+    },
+    {
+        "content": "<p>This time it seems that there is a problem in the binemit code. The vcode contains<code>movq 0(%rsi), %xmm0</code>, but the disassembly contains <code>mov (%rsi), %rax</code></p>",
+        "id": 219860482,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607961287
+    },
+    {
+        "content": "<p><code>raw_bitcast</code> is lowered as a simple move which isn't correct for GPR-&gt;FPR moves.</p>",
+        "id": 219860630,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607961362
+    },
+    {
+        "content": "<p>I was able to work around the problem but now I get SIGFPE on <code>divb %dh</code>.</p>",
+        "id": 219877988,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607968641
+    },
+    {
+        "content": "<p>That would surely be a rerun of the 0x40 problem, no?</p>",
+        "id": 219879243,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1607969128
+    },
+    {
+        "content": "<p>That is possible. I will take a look at the vcode of that function.</p>",
+        "id": 219879457,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607969214
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">Inst</span><span class=\"w\"> </span><span class=\"mi\">484</span>:   <span class=\"nc\">div</span><span class=\"w\">     </span><span class=\"o\">%</span><span class=\"n\">sil</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 219879667,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607969326
+    },
+    {
+        "content": "<p>I think so.</p>",
+        "id": 219879689,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607969336
+    },
+    {
+        "content": "<p>This is with the newBE, right?  If so probably the easiest thing to do is to add case(s) to the relevant <code>emit_tests.rs</code> and then fiddle round with <code>emit.rs</code> so as to make it work.  It's gonna come down to passing a retain-redundant-rex-prefix flag to the low-level emit function (I forget the exact names).</p>",
+        "id": 219880193,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1607969555
+    },
+    {
+        "content": "<p>I am currently testing <code>rex_flags.always_emit()</code> when <code>size == 1</code> on div instructions.</p>",
+        "id": 219880298,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607969614
+    },
+    {
+        "content": "<p>That fixed all miscompilations.</p>",
+        "id": 219880556,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607969733
+    },
+    {
+        "content": "<p>We should audit that stuff (and add test cases).  Who knows how many more cases there are.</p>",
+        "id": 219882134,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1607970488
+    },
+    {
+        "content": "<p>I opened <a href=\"https://github.com/bytecodealliance/wasmtime/issues/2507\">https://github.com/bytecodealliance/wasmtime/issues/2507</a> and <a href=\"https://github.com/bytecodealliance/wasmtime/issues/2508\">https://github.com/bytecodealliance/wasmtime/issues/2508</a>.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/2507\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/2507\" title=\"Support unaligned float loads and stores in x64 newBE · Issue #2507 · bytecodealliance/wasmtime\">Support unaligned float loads and stores in x64 newBE · Issue #2507 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">GitHub is home to over 50 million developers working together to host and review code, manage projects, and build software together.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/2508\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/2508\" title=\"Cranelift: rex prefix sometimes incorrectly omitted for 8bit operations with x64 newBE · Issue #2508 · bytecodealliance/wasmtime\">Cranelift: rex prefix sometimes incorrectly omitted for 8bit operations with x64 newBE · Issue #2508 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">For example div %sil requires a rex prefix, otherwise it becomes divb %dh.</div></div></div>",
+        "id": 219882593,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1607970706
+    },
+    {
+        "content": "<p>@bjorn3 thanks for this debugging work! I agree with <span class=\"user-mention\" data-user-id=\"268444\">@Julian Seward</span> that we should be somewhat systematic about auditing behavior of \"narrow values\"; we have much more confidence in 32/64-bit types because those are exercised by Wasm but there are possibly other bugs in 8/16-bit handling</p>",
+        "id": 219884925,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1607971714
+    },
+    {
+        "content": "<p>I wonder if there could be a way to fuzz this -- perhaps compare against the CLIF interpreter...</p>",
+        "id": 219885004,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1607971753
+    },
+    {
+        "content": "<p>simple-raytracer compiled in debug mode works fine. In release mode it gives a panic however:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">thread</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"na\">main</span><span class=\"o\">'</span><span class=\"w\"> </span><span class=\"n\">panicked</span><span class=\"w\"> </span><span class=\"n\">at</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"na\">assertion</span><span class=\"w\"> </span><span class=\"n\">failed</span>: <span class=\"nc\">pending_bits</span><span class=\"w\"> </span><span class=\"o\">&lt;=</span><span class=\"w\"> </span><span class=\"mi\">8</span><span class=\"o\">'</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">home</span><span class=\"o\">/</span><span class=\"n\">bjorn</span><span class=\"o\">/</span><span class=\"p\">.</span><span class=\"n\">cargo</span><span class=\"o\">/</span><span class=\"n\">registry</span><span class=\"o\">/</span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">github</span><span class=\"p\">.</span><span class=\"n\">com</span><span class=\"o\">-</span><span class=\"mi\">1</span><span class=\"n\">ecc6299db9ec823</span><span class=\"o\">/</span><span class=\"n\">deflate</span><span class=\"o\">-</span><span class=\"mf\">0.7.19</span><span class=\"o\">/</span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">huffman_lengths</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">129</span>:<span class=\"mi\">5</span><span class=\"w\"></span>\n<span class=\"n\">stack</span><span class=\"w\"> </span><span class=\"n\">backtrace</span>:\n   <span class=\"mi\">0</span>: <span class=\"nc\">rust_begin_unwind</span><span class=\"w\"></span>\n<span class=\"w\">             </span><span class=\"n\">at</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">home</span><span class=\"o\">/</span><span class=\"n\">bjorn</span><span class=\"o\">/</span><span class=\"n\">Documenten</span><span class=\"o\">/</span><span class=\"n\">cg_clif</span><span class=\"o\">/</span><span class=\"n\">build_sysroot</span><span class=\"o\">/</span><span class=\"n\">sysroot_src</span><span class=\"o\">/</span><span class=\"n\">library</span><span class=\"o\">/</span><span class=\"n\">std</span><span class=\"o\">/</span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">panicking</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">568</span>:<span class=\"mi\">5</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">1</span>: <span class=\"nc\">core</span>::<span class=\"n\">panicking</span>::<span class=\"n\">panic_fmt</span><span class=\"w\"></span>\n<span class=\"w\">             </span><span class=\"n\">at</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">home</span><span class=\"o\">/</span><span class=\"n\">bjorn</span><span class=\"o\">/</span><span class=\"n\">Documenten</span><span class=\"o\">/</span><span class=\"n\">cg_clif</span><span class=\"o\">/</span><span class=\"n\">build_sysroot</span><span class=\"o\">/</span><span class=\"n\">sysroot_src</span><span class=\"o\">/</span><span class=\"n\">library</span><span class=\"o\">/</span><span class=\"n\">core</span><span class=\"o\">/</span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">panicking</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">92</span>:<span class=\"mi\">14</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">2</span>: <span class=\"nc\">core</span>::<span class=\"n\">panicking</span>::<span class=\"n\">panic</span><span class=\"w\"></span>\n<span class=\"w\">             </span><span class=\"n\">at</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">home</span><span class=\"o\">/</span><span class=\"n\">bjorn</span><span class=\"o\">/</span><span class=\"n\">Documenten</span><span class=\"o\">/</span><span class=\"n\">cg_clif</span><span class=\"o\">/</span><span class=\"n\">build_sysroot</span><span class=\"o\">/</span><span class=\"n\">sysroot_src</span><span class=\"o\">/</span><span class=\"n\">library</span><span class=\"o\">/</span><span class=\"n\">core</span><span class=\"o\">/</span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">panicking</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">275</span>:<span class=\"mi\">5</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">3</span>: <span class=\"nc\">deflate</span>::<span class=\"n\">huffman_lengths</span>::<span class=\"n\">stored_padding</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">4</span>: <span class=\"nc\">deflate</span>::<span class=\"n\">huffman_lengths</span>::<span class=\"n\">gen_huffman_lengths</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">5</span>: <span class=\"nc\">deflate</span>::<span class=\"n\">compress</span>::<span class=\"n\">compress_data_dynamic_n</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">6</span>: <span class=\"o\">&lt;</span><span class=\"n\">deflate</span>::<span class=\"n\">writer</span>::<span class=\"n\">ZlibEncoder</span><span class=\"o\">&lt;</span><span class=\"n\">W</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">io</span>::<span class=\"n\">Write</span><span class=\"o\">&gt;</span>::<span class=\"n\">write</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">7</span>: <span class=\"nc\">std</span>::<span class=\"n\">io</span>::<span class=\"n\">Write</span>::<span class=\"n\">write_all</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">8</span>: <span class=\"nc\">png</span>::<span class=\"n\">encoder</span>::<span class=\"n\">Writer</span><span class=\"o\">&lt;</span><span class=\"n\">W</span><span class=\"o\">&gt;</span>::<span class=\"n\">write_image_data</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"mi\">9</span>: <span class=\"nc\">image</span>::<span class=\"n\">png</span>::<span class=\"n\">PNGEncoder</span><span class=\"o\">&lt;</span><span class=\"n\">W</span><span class=\"o\">&gt;</span>::<span class=\"n\">encode</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">10</span>: <span class=\"nc\">image</span>::<span class=\"n\">dynimage</span>::<span class=\"n\">save_buffer_impl</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">11</span>: <span class=\"nc\">image</span>::<span class=\"n\">dynimage</span>::<span class=\"n\">save_buffer</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">12</span>: <span class=\"nc\">image</span>::<span class=\"n\">buffer</span>::<span class=\"n\">ImageBuffer</span><span class=\"o\">&lt;</span><span class=\"n\">P</span><span class=\"p\">,</span><span class=\"n\">Container</span><span class=\"o\">&gt;</span>::<span class=\"n\">save</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">13</span>: <span class=\"nc\">raytracer</span>::<span class=\"n\">scene</span>::<span class=\"n\">Scene</span>::<span class=\"n\">render</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">14</span>: <span class=\"nc\">main</span>::<span class=\"n\">main</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">15</span>: <span class=\"nc\">core</span>::<span class=\"n\">ops</span>::<span class=\"n\">function</span>::<span class=\"nb\">FnOnce</span>::<span class=\"n\">call_once</span><span class=\"w\"></span>\n<span class=\"n\">note</span>: <span class=\"nb\">Some</span> <span class=\"nc\">details</span><span class=\"w\"> </span><span class=\"n\">are</span><span class=\"w\"> </span><span class=\"n\">omitted</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">run</span><span class=\"w\"> </span><span class=\"n\">with</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">RUST_BACKTRACE</span><span class=\"o\">=</span><span class=\"n\">full</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"n\">verbose</span><span class=\"w\"> </span><span class=\"n\">backtrace</span><span class=\"p\">.</span><span class=\"w\"></span>\n</code></pre></div>\n<p>For cg_clif release mode consists of <code>set opt_level=speed_and_size</code> combined with an optimization in cg_clif that does basic store to load forwarding and dead store elimination.</p>",
+        "id": 221125318,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609238200
+    },
+    {
+        "content": "<p>It works as of the latest commit.</p>",
+        "id": 221208698,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609330858
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"err\">#</span><span class=\"mi\">1</span>: <span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">main</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">)</span>:      <span class=\"mf\">7.932</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">  </span><span class=\"mf\">0.017</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span>: <span class=\"mf\">7.925</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span>: <span class=\"mf\">0.006</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">)</span>:    <span class=\"mf\">7.911</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\">  </span><span class=\"mf\">7.958</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"mi\">10</span><span class=\"w\"> </span><span class=\"n\">runs</span><span class=\"w\"></span>\n\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"err\">#</span><span class=\"mi\">2</span>: <span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_llvm</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">)</span>:      <span class=\"mf\">8.037</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">  </span><span class=\"mf\">0.013</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span>: <span class=\"mf\">8.031</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span>: <span class=\"mf\">0.004</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">)</span>:    <span class=\"mf\">8.016</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\">  </span><span class=\"mf\">8.062</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"mi\">10</span><span class=\"w\"> </span><span class=\"n\">runs</span><span class=\"w\"></span>\n\n<span class=\"n\">Summary</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"o\">'</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">main</span><span class=\"o\">'</span><span class=\"w\"> </span><span class=\"n\">ran</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mf\">1.01</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"n\">times</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_llvm</span><span class=\"o\">'</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 221208927,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609331074
+    },
+    {
+        "content": "<p>Huh, wow... 1% faster than the LLVM build (or conservatively, \"approximately the same\", though the confidence intervals don't overlap)... how does this compare to the old backend?</p>",
+        "id": 221232770,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1609351630
+    },
+    {
+        "content": "<p>/me is recompiling cg_clif with the old backend</p>",
+        "id": 221233410,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609352152
+    },
+    {
+        "content": "<p>Looks like the base of your PR doesn't yet include <a href=\"https://github.com/bytecodealliance/wasmtime/pull/2496\">https://github.com/bytecodealliance/wasmtime/pull/2496</a>. I got a SIGSEGV. I will just use main.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/2496\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/2496\" title=\"Fix iconst.i8 0 miscompilation with opt_level=speed_and_size by bjorn3 · Pull Request #2496 · bytecodealliance/wasmtime\">Fix iconst.i8 0 miscompilation with opt_level=speed_and_size by bjorn3 · Pull Request #2496 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This fixes the cg_clif miscompilation I wrote about at https://bytecodealliance.zulipchat.com/#narrow/stream/217117-cranelift/topic/miscompilation.20with.20opt_level.3Dspeed_and_size/near/219461997...</div></div></div>",
+        "id": 221234409,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609352995
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"err\">#</span><span class=\"mi\">1</span>: <span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_clif_newbe_debug</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">)</span>:      <span class=\"mf\">8.048</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">  </span><span class=\"mf\">0.028</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span>: <span class=\"mf\">8.042</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span>: <span class=\"mf\">0.005</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">)</span>:    <span class=\"mf\">8.007</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\">  </span><span class=\"mf\">8.113</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"mi\">10</span><span class=\"w\"> </span><span class=\"n\">runs</span><span class=\"w\"></span>\n\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"err\">#</span><span class=\"mi\">2</span>: <span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_clif_newbe_release</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">)</span>:      <span class=\"mf\">7.940</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">  </span><span class=\"mf\">0.025</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span>: <span class=\"mf\">7.933</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span>: <span class=\"mf\">0.007</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">)</span>:    <span class=\"mf\">7.903</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\">  </span><span class=\"mf\">7.984</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"mi\">10</span><span class=\"w\"> </span><span class=\"n\">runs</span><span class=\"w\"></span>\n\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"err\">#</span><span class=\"mi\">3</span>: <span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_clif_oldbe_debug</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">)</span>:      <span class=\"mf\">9.331</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">  </span><span class=\"mf\">0.043</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span>: <span class=\"mf\">9.325</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span>: <span class=\"mf\">0.006</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">)</span>:    <span class=\"mf\">9.278</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\">  </span><span class=\"mf\">9.425</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"mi\">10</span><span class=\"w\"> </span><span class=\"n\">runs</span><span class=\"w\"></span>\n\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"err\">#</span><span class=\"mi\">4</span>: <span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_clif_oldbe_release</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">)</span>:      <span class=\"mf\">7.780</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">  </span><span class=\"mf\">0.013</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span>: <span class=\"mf\">7.777</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span>: <span class=\"mf\">0.002</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">)</span>:    <span class=\"mf\">7.756</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\">  </span><span class=\"mf\">7.794</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"mi\">10</span><span class=\"w\"> </span><span class=\"n\">runs</span><span class=\"w\"></span>\n\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"err\">#</span><span class=\"mi\">5</span>: <span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_llvm</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">)</span>:      <span class=\"mf\">8.056</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">  </span><span class=\"mf\">0.021</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span>: <span class=\"mf\">8.052</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span>: <span class=\"mf\">0.003</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">)</span>:    <span class=\"mf\">8.034</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\">  </span><span class=\"mf\">8.091</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\">    </span><span class=\"mi\">10</span><span class=\"w\"> </span><span class=\"n\">runs</span><span class=\"w\"></span>\n\n<span class=\"n\">Summary</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"o\">'</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_clif_oldbe_release</span><span class=\"o\">'</span><span class=\"w\"> </span><span class=\"n\">ran</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mf\">1.02</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"n\">times</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_clif_newbe_release</span><span class=\"o\">'</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mf\">1.03</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"n\">times</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_clif_newbe_debug</span><span class=\"o\">'</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mf\">1.04</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"n\">times</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_llvm</span><span class=\"o\">'</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mf\">1.20</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">0.01</span><span class=\"w\"> </span><span class=\"n\">times</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">raytracer_cg_clif_oldbe_debug</span><span class=\"o\">'</span><span class=\"w\"></span>\n</code></pre></div>\n<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> debug mode got faster with the newBE, release mode got slower.</p>",
+        "id": 221235312,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609353764
+    },
+    {
+        "content": "<p>@bjorn3 interesting, thanks very much for this data!</p>",
+        "id": 221235429,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1609353849
+    },
+    {
+        "content": "<p>I'm hoping to spend some time finding poor codegen issues in the near-ish future so hopefully we can improve the release-mode perf a bit</p>",
+        "id": 221235449,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1609353877
+    },
+    {
+        "content": "<p>Differential flamegraph between oldBE and newBE: <a href=\"/user_uploads/15107/O8-uMoUNlDKq1xUrovv51O4n/oldbe_newbe_release.diff.svg\">oldbe_newbe_release.diff.svg</a></p>",
+        "id": 221242985,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609359349
+    },
+    {
+        "content": "<p>One clear inefficiency I found is:</p>\n<div class=\"codehilite\" data-code-language=\"GAS\"><pre><span></span><code>       <span class=\"err\">│</span>   <span class=\"err\">000000000003</span><span class=\"nf\">c583</span> <span class=\"err\">&lt;</span><span class=\"no\">core</span><span class=\"p\">::</span><span class=\"no\">ptr</span><span class=\"p\">::</span><span class=\"no\">const_ptr</span><span class=\"p\">::</span><span class=\"err\">&lt;</span><span class=\"no\">impl</span> <span class=\"p\">*</span><span class=\"no\">const</span> <span class=\"no\">T</span><span class=\"err\">&gt;</span><span class=\"p\">::</span><span class=\"no\">guaranteed_eq</span><span class=\"err\">&gt;</span><span class=\"p\">:</span>\n       <span class=\"err\">│</span>   <span class=\"nf\">_ZN4core3ptr9const_ptr33_$LT$impl$u20$$BP$const$u20$T$GT$13guaranteed_eq17h8751da776ec0026eE</span><span class=\"p\">():</span>\n <span class=\"err\">32,04</span> <span class=\"err\">│</span>     <span class=\"nf\">push</span>   <span class=\"nv\">%rbp</span>\n  <span class=\"err\">3,32</span> <span class=\"err\">│</span>     <span class=\"nf\">mov</span>    <span class=\"nv\">%rsp</span><span class=\"p\">,</span><span class=\"nv\">%rbp</span>\n  <span class=\"err\">4,42</span> <span class=\"err\">│</span>     <span class=\"nf\">cmp</span>    <span class=\"nv\">%rsi</span><span class=\"p\">,</span><span class=\"nv\">%rdi</span>\n <span class=\"err\">39,78</span> <span class=\"err\">│</span>     <span class=\"nf\">sete</span>   <span class=\"nv\">%al</span>\n  <span class=\"err\">6,64</span> <span class=\"err\">│</span>     <span class=\"nf\">movzbl</span> <span class=\"nv\">%al</span><span class=\"p\">,</span><span class=\"nv\">%eax</span>\n <span class=\"err\">13,82</span> <span class=\"err\">│</span>     <span class=\"nf\">pop</span>    <span class=\"nv\">%rbp</span>\n       <span class=\"err\">│</span>   <span class=\"err\">←</span> <span class=\"nf\">retq</span>\n</code></pre></div>\n<p>becomes</p>\n<div class=\"codehilite\" data-code-language=\"GAS\"><pre><span></span><code>       <span class=\"err\">│</span>    <span class=\"err\">000000000022</span><span class=\"nf\">c5a0</span> <span class=\"err\">&lt;</span><span class=\"no\">core</span><span class=\"p\">::</span><span class=\"no\">ptr</span><span class=\"p\">::</span><span class=\"no\">const_ptr</span><span class=\"p\">::</span><span class=\"err\">&lt;</span><span class=\"no\">impl</span> <span class=\"p\">*</span><span class=\"no\">const</span> <span class=\"no\">T</span><span class=\"err\">&gt;</span><span class=\"p\">::</span><span class=\"no\">guaranteed_eq</span><span class=\"err\">&gt;</span><span class=\"p\">:</span>\n       <span class=\"err\">│</span>    <span class=\"nf\">_ZN4core3ptr9const_ptr33_$LT$impl$u20$$BP$const$u20$T$GT$13guaranteed_eq17h8751da776ec0026eE</span><span class=\"p\">():</span>\n <span class=\"err\">26,45</span> <span class=\"err\">│</span>      <span class=\"nf\">push</span>   <span class=\"nv\">%rbp</span>\n  <span class=\"err\">2,92</span> <span class=\"err\">│</span>      <span class=\"nf\">mov</span>    <span class=\"nv\">%rsp</span><span class=\"p\">,</span><span class=\"nv\">%rbp</span>\n       <span class=\"err\">│</span>      <span class=\"nf\">cmp</span>    <span class=\"nv\">%rsi</span><span class=\"p\">,</span><span class=\"nv\">%rdi</span>\n <span class=\"err\">31,49</span> <span class=\"err\">│</span>      <span class=\"nf\">sete</span>   <span class=\"nv\">%sil</span>\n  <span class=\"err\">2,47</span> <span class=\"err\">│</span>      <span class=\"nf\">movzbl</span> <span class=\"nv\">%sil</span><span class=\"p\">,</span><span class=\"nv\">%esi</span>\n       <span class=\"err\">│</span>      <span class=\"nf\">mov</span>    <span class=\"nv\">%rsi</span><span class=\"p\">,</span><span class=\"nv\">%rax</span>\n  <span class=\"err\">0,85</span> <span class=\"err\">│</span>      <span class=\"nf\">mov</span>    <span class=\"nv\">%rbp</span><span class=\"p\">,</span><span class=\"nv\">%rsp</span>\n <span class=\"err\">34,30</span> <span class=\"err\">│</span>      <span class=\"nf\">pop</span>    <span class=\"nv\">%rbp</span>\n  <span class=\"err\">1,52</span> <span class=\"err\">│</span>    <span class=\"err\">←</span> <span class=\"nf\">retq</span>\n</code></pre></div>\n<p>This is worse regalloc. The regalloc regression may also be (partially) responsible for the rest of the slowdown compared to oldBE.</p>",
+        "id": 221243769,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609360009
+    },
+    {
+        "content": "<p>In addition it does an unnecessary <code>mov %rbp, %rsp</code> even when <code>%rsp</code> wasn't modified in the current function at all.</p>",
+        "id": 221245567,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609361540
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> yeah I've seen similar; <span class=\"user-mention\" data-user-id=\"268444\">@Julian Seward</span> had said something earlier about limiting propagation of \"preferred registers\" in the move-coalescing to just one step, perhaps for regalloc efficiency reasons? Would be good to reconsider that</p>",
+        "id": 221258863,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1609374726
+    },
+    {
+        "content": "<p>I remember mentioning something about incomplete propagation of constraints (\"I prefer to be in real reg %r42\" etc) in the coalescer.  But that's a bug, not a design decision.  Maybe I misunderstand?</p>",
+        "id": 221276951,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1609403285
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"268444\">@Julian Seward</span> ah, perhaps I'm just assuming too much intentionality -- had figured there must be a reason for it :-) Agree that full propagation is correct -- hopefully the fix isn't too bad!</p>",
+        "id": 221278632,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1609405958
+    }
+]

@@ -1,0 +1,741 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #6039 Chaos mode MVP: Skip branch optimizat... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html">wasmtime / PR #6039 Chaos mode MVP: Skip branch optimizat...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="342469009"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342469009" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342469009">(Mar 17 2023 at 04:31)</a>:</h4>
+<p>remlse opened <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a> from <code>fuzz-skip-branch-opt</code> to <code>main</code>:</p>
+<blockquote>
+<p>This is a draft of the MVP for chaos mode (#4134).</p>
+<p>It extends the fuzz target <code>cranelift-icache</code> for now, by allowing it to run with the feature <code>chaos</code> enabled. This will pseudo-randomly toggle branch optimization in <code>MachBuffer</code> via the new chaos mode control plane in the crate <code>cranelift-chaos</code>.</p>
+<p>Quick command for the documentation:</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>cargo<span class="w"> </span>doc<span class="w"> </span>-p<span class="w"> </span>cranelift-chaos<span class="w"> </span>--document-private-items<span class="w"> </span>--open
+</code></pre></div>
+<p>Running the fuzz target with chaos mode enabled:</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>cargo<span class="w"> </span>fuzz<span class="w"> </span>run<span class="w"> </span>--no-default-features<span class="w"> </span>--features<span class="w"> </span>chaos<span class="w"> </span>cranelift-icache
+</code></pre></div>
+<p>Passing a reference counted chaos engine around is not that bad, the diff is less noisy than I would've expected. I'm still planning to make an equivalent POC with private, global, mutable state in the <code>cranelift-chaos</code> crate to get a better idea of the trade-offs.</p>
+<p>Note that because of this <a href="#narrow/stream/217117-cranelift/topic/fuzz.20target.20-.20cranelift-fuzzgen">zulip topic</a>, I didn't bump the version of <code>arbitrary</code> in this PR to keep those issues isolated. Once that's resolved, we think it's probably a good idea to update <code>arbitrary</code> while we're working with it.</p>
+<p>I've added a couple print statements during development, and it seems the branch optimization is more often carried out than skipped. I guess this is consistent with libfuzzer's goal of generating data in a way that code coverage is maximized.</p>
+<p>I also ran into a crash while running this fuzz target. The crash happens at <code>cranelift-icache.rs:220</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="n">expect_cache_hit</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">after_mutation_result_from_cache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">icache</span>::<span class="n">try_finish_recompile</span><span class="p">(</span><span class="o">&amp;</span><span class="n">func</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">serialized</span><span class="p">)</span>
+<span class="w">        </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"recompilation should always work for identity"</span><span class="p">);</span>
+<span class="w">    </span><span class="fm">assert_eq!</span><span class="p">(</span><span class="o">*</span><span class="n">after_mutation_result</span><span class="p">,</span><span class="w"> </span><span class="n">after_mutation_result_from_cache</span><span class="p">);</span><span class="w"> </span><span class="c1">// &lt;-- this assert fails</span>
+</code></pre></div>
+<p>Maybe someone has an intuition along the lines of: "Oh yes, of course that will fail when branch optimization is randomly skipped", or similar? In any case, I'll investigate to see if the panic is caused by my changes or something different.</p>
+<h2>Questions</h2>
+<ul>
+<li>[ ] I needed to use <code>Arc</code> and <code>Mutex</code> instead of <code>Rc</code> and <code>RefCell</code> in the control plane, because the compiler was complaining about the <code>Send</code> trait not being implemented. So if Cranelift runs in parallel, won't that interfere with our plans with the fuel parameter? If fuel from the chaos engine is requested in a different order every time, we won't be able to deterministically reproduce bugs and pinpoint their origin.</li>
+<li>[ ] Did I get the "paperwork" right?<br>
+    - version 0.95.0 like other cranelift crates<br>
+    - license<br>
+    - Cargo.toml<br>
+    - ... etc. ?</li>
+<li>[ ] There are a several <code>ChaosEngine::todo()</code>s in the wild. Is it ok to merge these in principle or should we find a different solution for adding the chaos engine everywhere incrementally?</li>
+</ul>
+<h2>Todos</h2>
+<ul>
+<li>[ ] Add appropriate explanations to the commit messages</li>
+<li>[ ] Investigate crash (<code>Base64: Av////////8AAAIAAAAAAAD5jIyMjAAKAAAAAPHx8fERDgcAAAAAAJkBAAAAAAAAKwBp/5r//wAAAAAAAAAHbS45azEAAAAACF0=</code>)</li>
+<li>[ ] Exend existing fuzzing documentation with an overview of chaos mode as well as how to run a target with chaos mode enabled (<code>cargo fuzz run --features chaos $TARGET</code>)<br>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="342822116"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342822116" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342822116">(Mar 18 2023 at 18:01)</a>:</h4>
+<p>iximeow submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1347101121">PR review</a>.</p>
+
+
+
+<a name="342822117"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342822117" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342822117">(Mar 18 2023 at 18:01)</a>:</h4>
+<p>iximeow created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1141081213">PR review comment</a>:</p>
+<blockquote>
+<div class="codehilite" data-code-language="suggestion"><pre><span></span><code>    /// # Panics
+</code></pre></div>
+<p>(hi, i was interested in the Unstructured conversation and noticed this)</p>
+</blockquote>
+
+
+
+<a name="342824116"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342824116" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342824116">(Mar 18 2023 at 18:18)</a>:</h4>
+<p>iximeow submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1347104871">PR review</a>.</p>
+
+
+
+<a name="342824117"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342824117" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342824117">(Mar 18 2023 at 18:18)</a>:</h4>
+<p>iximeow created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1141084460">PR review comment</a>:</p>
+<blockquote>
+<p>from a safety perspective, the other extremely important detail of this trick is that <code>ChaosEngineData</code> must also never move once references to <code>engine.data</code> are taken. so the "this must not move"-ness of <code>data</code> kind of percolates through to any enclosing type until it's somewhere that won't move (which works out here because <code>ChaosEngineData</code> ends up owned by an <code>Arc</code> where it oughtn't be moved out of.</p>
+<p>as an example that certainly won't come up here but would be Technically Possible, <code>Arc::new(some_chaos_engine.data.try_unwrap())</code> would yield a <code>ChaosEngineData</code> whose <code>unstructured</code> points to somewhere else, and would (hopefully! :D) fault on use.</p>
+</blockquote>
+
+
+
+<a name="342824227"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342824227" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342824227">(Mar 18 2023 at 18:19)</a>:</h4>
+<p>iximeow edited <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1141084460">PR review comment</a>.</p>
+
+
+
+<a name="342847450"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342847450" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342847450">(Mar 18 2023 at 22:43)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1347287031">PR review</a>.</p>
+
+
+
+<a name="342847451"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342847451" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342847451">(Mar 18 2023 at 22:43)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1141194452">PR review comment</a>:</p>
+<blockquote>
+<p>Thanks for pointing that out! Does it also apply if some type is heap allocated? I think the article I got this from used a <code>Box</code> to create a level of indirection. The idea being that if the <code>Box</code> itself is moved, the values on the heap won't. So any existing references into that heap allocation would still be valid. In this case, the <code>Vec</code> is supposed to serves the same purpose as the <code>Box</code> in the article.</p>
+<p>That being said, I just noticed that I got the order of the fields wrong, which the article warns against. <code>data</code> will be dropped before <code>unstructured</code>, which creates a dangling pointer and UB.(?) <em>oops</em> <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> I definitely prefer a safe solution as well.</p>
+</blockquote>
+
+
+
+<a name="342848828"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342848828" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342848828">(Mar 18 2023 at 22:56)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1347293785">PR review</a>.</p>
+
+
+
+<a name="342848829"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342848829" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342848829">(Mar 18 2023 at 22:56)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1141198181">PR review comment</a>:</p>
+<blockquote>
+<p>Aaand reading a bit further, I also forgot the thing about <code>AliasableBox</code> so you're definitely right, moving <code>data</code> would also be UB.</p>
+</blockquote>
+
+
+
+<a name="342851574"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342851574" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342851574">(Mar 18 2023 at 23:28)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a> from <code>fuzz-skip-branch-opt</code> to <code>main</code>.</p>
+
+
+
+<a name="342851663"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342851663" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342851663">(Mar 18 2023 at 23:29)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a> from <code>fuzz-skip-branch-opt</code> to <code>main</code>.</p>
+
+
+
+<a name="342851755"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342851755" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342851755">(Mar 18 2023 at 23:30)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1347310480">PR review</a>.</p>
+
+
+
+<a name="342851756"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342851756" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342851756">(Mar 18 2023 at 23:30)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1141208715">PR review comment</a>:</p>
+<blockquote>
+<p>Thanks! fixed it.</p>
+</blockquote>
+
+
+
+<a name="342853561"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342853561" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342853561">(Mar 18 2023 at 23:53)</a>:</h4>
+<p>iximeow submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1347320521">PR review</a>.</p>
+
+
+
+<a name="342853562"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342853562" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342853562">(Mar 18 2023 at 23:53)</a>:</h4>
+<p>iximeow created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1141215589">PR review comment</a>:</p>
+<blockquote>
+<p>yeah that's the part that makes the blog post's solution a little more robust to <code>move</code>s - a <code>&amp;AliasableBox&lt;ZipArchive&lt;File&gt;&gt;</code> could be made to dangle,  but with private internals you can ensure that wouldn't happen. anyway, hopefully threading a <code>&amp;mut ControlPlane</code> through the compiler as appropriate lets you avoid the whole construction, and double-hopefully the extra arguments don't affect compile time all that much :)</p>
+</blockquote>
+
+
+
+<a name="342903225"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342903225" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342903225">(Mar 19 2023 at 09:38)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a> from <code>fuzz-skip-branch-opt</code> to <code>main</code>.</p>
+
+
+
+<a name="342913425"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/342913425" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#342913425">(Mar 19 2023 at 11:01)</a>:</h4>
+<p>remlse edited <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a> from <code>fuzz-skip-branch-opt</code> to <code>main</code>:</p>
+<blockquote>
+<p>This is a draft of the MVP for chaos mode (#4134).</p>
+<p>It extends the fuzz target <code>cranelift-icache</code> for now, by allowing it to run with the feature <code>chaos</code> enabled. This will pseudo-randomly toggle branch optimization in <code>MachBuffer</code> via the new chaos mode control plane in the crate <code>cranelift-chaos</code>.</p>
+<p>Quick command for the documentation:</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>cargo<span class="w"> </span>doc<span class="w"> </span>-p<span class="w"> </span>cranelift-chaos<span class="w"> </span>--document-private-items<span class="w"> </span>--open
+</code></pre></div>
+<p>Running the fuzz target with chaos mode enabled:</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>cargo<span class="w"> </span>fuzz<span class="w"> </span>run<span class="w"> </span>--no-default-features<span class="w"> </span>--features<span class="w"> </span>chaos<span class="w"> </span>cranelift-icache
+</code></pre></div>
+<p>Passing a reference counted chaos engine around is not that bad, the diff is less noisy than I would've expected. I'm still planning to make an equivalent POC with private, global, mutable state in the <code>cranelift-chaos</code> crate to get a better idea of the trade-offs.</p>
+<p>Note that because of this <a href="#narrow/stream/217117-cranelift/topic/fuzz.20target.20-.20cranelift-fuzzgen">zulip topic</a>, I didn't bump the version of <code>arbitrary</code> in this PR to keep those issues isolated. Once that's resolved, we think it's probably a good idea to update <code>arbitrary</code> while we're working with it.</p>
+<p>I've added a couple print statements during development, and it seems the branch optimization is more often carried out than skipped. I guess this is consistent with libfuzzer's goal of generating data in a way that code coverage is maximized.</p>
+<p>I also ran into a crash while running this fuzz target. The crash happens at <code>cranelift-icache.rs:220</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="n">expect_cache_hit</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">after_mutation_result_from_cache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">icache</span>::<span class="n">try_finish_recompile</span><span class="p">(</span><span class="o">&amp;</span><span class="n">func</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">serialized</span><span class="p">)</span>
+<span class="w">        </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"recompilation should always work for identity"</span><span class="p">);</span>
+<span class="w">    </span><span class="fm">assert_eq!</span><span class="p">(</span><span class="o">*</span><span class="n">after_mutation_result</span><span class="p">,</span><span class="w"> </span><span class="n">after_mutation_result_from_cache</span><span class="p">);</span><span class="w"> </span><span class="c1">// &lt;-- this assert fails</span>
+</code></pre></div>
+<p>Maybe someone has an intuition along the lines of: "Oh yes, of course that will fail when branch optimization is randomly skipped", or similar? In any case, I'll investigate to see if the panic is caused by my changes or something different.</p>
+<h2>Questions</h2>
+<ul>
+<li>[x] I needed to use <code>Arc</code> and <code>Mutex</code> instead of <code>Rc</code> and <code>RefCell</code> in the control plane, because the compiler was complaining about the <code>Send</code> trait not being implemented. So if Cranelift runs in parallel, won't that interfere with our plans with the fuel parameter? If fuel from the chaos engine is requested in a different order every time, we won't be able to deterministically reproduce bugs and pinpoint their origin.<br>
+      -&gt; answer: <code>Arc</code> and <code>Mutex</code> must not be used.</li>
+<li>[ ] Did I get the "paperwork" right?<br>
+    - version 0.95.0 like other cranelift crates<br>
+    - license<br>
+    - Cargo.toml<br>
+    - ... etc. ?</li>
+<li>[ ] There are a several <code>ChaosEngine::todo()</code>s in the wild. Is it ok to merge these in principle or should we find a different solution for adding the chaos engine everywhere incrementally?</li>
+</ul>
+<h2>Todos</h2>
+<ul>
+<li>[ ] Add appropriate explanations to the commit messages</li>
+<li>[x] Investigate crash (<code>Base64: Av////////8AAAIAAAAAAAD5jIyMjAAKAAAAAPHx8fERDgcAAAAAAJkBAAAAAAAAKwBp/5r//wAAAAAAAAAHbS45azEAAAAACF0=</code>)<br>
+      -&gt; most likely due to usage of <code>Arc</code> and <code>Mutex</code></li>
+<li>[ ] Extend existing fuzzing documentation with an overview of chaos mode as well as how to run a target with chaos mode enabled (<code>cargo fuzz run --features chaos $TARGET</code>)<br>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="343689558"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/343689558" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#343689558">(Mar 22 2023 at 14:11)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a> from <code>fuzz-skip-branch-opt</code> to <code>main</code>.</p>
+
+
+
+<a name="344032794"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/344032794" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#344032794">(Mar 23 2023 at 16:23)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a> from <code>fuzz-skip-branch-opt</code> to <code>main</code>.</p>
+
+
+
+<a name="346008284"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008284" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008284">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1367246592">PR review</a>.</p>
+
+
+
+<a name="346008285"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008285" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008285">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1367246592">PR review</a>.</p>
+
+
+
+<a name="346008287"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008287" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008287">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1154674380">PR review comment</a>:</p>
+<blockquote>
+<p><code>ctrl_plane</code> can probably go inside the <code>state</code> (<code>EmitState</code>)?</p>
+<p>The issue with lifetimes that this would otherwise create (<code>&amp;mut ControlPlane</code> inside of the struct) can be resolved I think by <code>std::mem::move</code> to take ownership of the control plane temporarily in places where we emit.</p>
+</blockquote>
+
+
+
+<a name="346008289"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008289" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008289">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1154681680">PR review comment</a>:</p>
+<blockquote>
+<p>(remove debugging printlns before merging)</p>
+</blockquote>
+
+
+
+<a name="346008290"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008290" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008290">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1154683300">PR review comment</a>:</p>
+<blockquote>
+<p>outdated comment?</p>
+</blockquote>
+
+
+
+<a name="346008291"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008291" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008291">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1154678617">PR review comment</a>:</p>
+<blockquote>
+<p>I think it's probably better to pass in the control-plane state with each call to <code>compile</code>; the <code>CompilerContext</code> is otherwise not that semantically meaningful (meant to enable reuse).</p>
+</blockquote>
+
+
+
+<a name="346008293"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008293" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008293">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1154685071">PR review comment</a>:</p>
+<blockquote>
+<p>Let's remove this <code>is_noop</code> mechanism before merging.</p>
+</blockquote>
+
+
+
+<a name="346008294"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008294" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008294">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1154686502">PR review comment</a>:</p>
+<blockquote>
+<p>I think this body makes sense as the <code>Default</code> impl (an empty <code>ControlPlane</code> should have no affect on Cranelift's behavior as it is today -- this also implies how to use bools, i.e. <code>false</code> should make no change).</p>
+</blockquote>
+
+
+
+<a name="346008295"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346008295" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346008295">(Mar 31 2023 at 16:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1154689359">PR review comment</a>:</p>
+<blockquote>
+<p>I would return just <code>bool</code> (<code>use .unwrap_or(false)</code> on the <code>pop</code>).</p>
+</blockquote>
+
+
+
+<a name="346586211"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346586211" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346586211">(Apr 03 2023 at 14:27)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346596649"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346596649" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346596649">(Apr 03 2023 at 15:00)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346615261"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346615261" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346615261">(Apr 03 2023 at 16:07)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346616112"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346616112" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346616112">(Apr 03 2023 at 16:10)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1369362703">PR review</a>.</p>
+
+
+
+<a name="346616117"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346616117" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346616117">(Apr 03 2023 at 16:10)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1156171681">PR review comment</a>:</p>
+<blockquote>
+<p>Not sure if it's OK to export <code>MachInstEmitState</code>.</p>
+<p>I needed it <a href="https://github.com/bytecodealliance/wasmtime/pull/6039/files#diff-1d5a6cd7768a5e084e45059cb8cb76f3f18d279925918a68f169bb269b9ec84bR102">here</a>.</p>
+</blockquote>
+
+
+
+<a name="346616755"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346616755" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346616755">(Apr 03 2023 at 16:13)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1369366562">PR review</a>.</p>
+
+
+
+<a name="346616758"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346616758" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346616758">(Apr 03 2023 at 16:13)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1156174279">PR review comment</a>:</p>
+<blockquote>
+<p>I didn't combine these in a <code>Vec&lt;(Function, ControlPlane)&gt;</code>, because it makes the diff a little cleaner and in the manual arbitrary implementation it can still be controlled that the two vectors have the same size.</p>
+</blockquote>
+
+
+
+<a name="346618273"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346618273" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346618273">(Apr 03 2023 at 16:19)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1369375853">PR review</a>.</p>
+
+
+
+<a name="346618274"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346618274" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346618274">(Apr 03 2023 at 16:19)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1156180663">PR review comment</a>:</p>
+<blockquote>
+<p>If this is forgotten, the control plane would just silently be the default one for the rest of the compilation. I guess it should be fine, (for now) it seems like this is the only place where one has to remember to move the control plane back out of the emit state.</p>
+</blockquote>
+
+
+
+<a name="346636784"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346636784" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346636784">(Apr 03 2023 at 17:31)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346645160"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346645160" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346645160">(Apr 03 2023 at 18:08)</a>:</h4>
+<p><strong>remlse</strong> requested <a href="https://github.com/cfallin">cfallin</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346645731"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346645731" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346645731">(Apr 03 2023 at 18:11)</a>:</h4>
+<p>remlse edited <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>:</p>
+<blockquote>
+<p>This is a draft of the MVP for chaos mode (#4134).</p>
+<p>Edit: The implemented fuzz target changed to <code>cranelift-fuzzgen</code>.</p>
+<p>It extends the fuzz target <code>cranelift-icache</code> for now, by allowing it to run with the feature <code>chaos</code> enabled. This will pseudo-randomly toggle branch optimization in <code>MachBuffer</code> via the new chaos mode control plane in the crate <code>cranelift-chaos</code>.</p>
+<p>Quick command for the documentation:</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>cargo<span class="w"> </span>doc<span class="w"> </span>-p<span class="w"> </span>cranelift-chaos<span class="w"> </span>--document-private-items<span class="w"> </span>--open
+</code></pre></div>
+<p>Running the fuzz target with chaos mode enabled:</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>cargo<span class="w"> </span>fuzz<span class="w"> </span>run<span class="w"> </span>--no-default-features<span class="w"> </span>--features<span class="w"> </span>chaos<span class="w"> </span>cranelift-icache
+</code></pre></div>
+<p>Passing a reference counted chaos engine around is not that bad, the diff is less noisy than I would've expected. I'm still planning to make an equivalent POC with private, global, mutable state in the <code>cranelift-chaos</code> crate to get a better idea of the trade-offs.</p>
+<p>Note that because of this <a href="#narrow/stream/217117-cranelift/topic/fuzz.20target.20-.20cranelift-fuzzgen">zulip topic</a>, I didn't bump the version of <code>arbitrary</code> in this PR to keep those issues isolated. Once that's resolved, we think it's probably a good idea to update <code>arbitrary</code> while we're working with it.</p>
+<p>I've added a couple print statements during development, and it seems the branch optimization is more often carried out than skipped. I guess this is consistent with libfuzzer's goal of generating data in a way that code coverage is maximized.</p>
+<p>I also ran into a crash while running this fuzz target. The crash happens at <code>cranelift-icache.rs:220</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="n">expect_cache_hit</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">after_mutation_result_from_cache</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">icache</span>::<span class="n">try_finish_recompile</span><span class="p">(</span><span class="o">&amp;</span><span class="n">func</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">serialized</span><span class="p">)</span>
+<span class="w">        </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"recompilation should always work for identity"</span><span class="p">);</span>
+<span class="w">    </span><span class="fm">assert_eq!</span><span class="p">(</span><span class="o">*</span><span class="n">after_mutation_result</span><span class="p">,</span><span class="w"> </span><span class="n">after_mutation_result_from_cache</span><span class="p">);</span><span class="w"> </span><span class="c1">// &lt;-- this assert fails</span>
+</code></pre></div>
+<p>Maybe someone has an intuition along the lines of: "Oh yes, of course that will fail when branch optimization is randomly skipped", or similar? In any case, I'll investigate to see if the panic is caused by my changes or something different.</p>
+<h2>Questions</h2>
+<ul>
+<li>[x] I needed to use <code>Arc</code> and <code>Mutex</code> instead of <code>Rc</code> and <code>RefCell</code> in the control plane, because the compiler was complaining about the <code>Send</code> trait not being implemented. So if Cranelift runs in parallel, won't that interfere with our plans with the fuel parameter? If fuel from the chaos engine is requested in a different order every time, we won't be able to deterministically reproduce bugs and pinpoint their origin.<br>
+      -&gt; answer: <code>Arc</code> and <code>Mutex</code> must not be used.</li>
+<li>[ ] Did I get the "paperwork" right?<br>
+    - version 0.95.0 like other cranelift crates<br>
+    - license<br>
+    - Cargo.toml<br>
+    - ... etc. ?</li>
+<li>[x] There are a several <code>ChaosEngine::todo()</code>s in the wild. Is it ok to merge these in principle or should we find a different solution for adding the chaos engine everywhere incrementally? -&gt; these have been removed</li>
+</ul>
+<h2>Todos</h2>
+<ul>
+<li>[ ] Add appropriate explanations to the commit messages</li>
+<li>[x] Investigate crash (<code>Base64: Av////////8AAAIAAAAAAAD5jIyMjAAKAAAAAPHx8fERDgcAAAAAAJkBAAAAAAAAKwBp/5r//wAAAAAAAAAHbS45azEAAAAACF0=</code>)<br>
+      -&gt; most likely due to usage of <code>Arc</code> and <code>Mutex</code></li>
+<li>[ ] Extend existing fuzzing documentation with an overview of chaos mode as well as how to run a target with chaos mode enabled (<code>cargo fuzz run --features chaos $TARGET</code>)<br>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="346647550"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346647550" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346647550">(Apr 03 2023 at 18:20)</a>:</h4>
+<p><strong>remlse</strong> has marked <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a> as ready for review.</p>
+
+
+
+<a name="346647554"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346647554" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346647554">(Apr 03 2023 at 18:20)</a>:</h4>
+<p><strong>remlse</strong> requested <a href="https://github.com/elliottt">elliottt</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346647555"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346647555" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346647555">(Apr 03 2023 at 18:20)</a>:</h4>
+<p><strong>remlse</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-fuzz-reviewers">wasmtime-fuzz-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346647557"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346647557" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346647557">(Apr 03 2023 at 18:20)</a>:</h4>
+<p><strong>remlse</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers">wasmtime-compiler-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346647559"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346647559" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346647559">(Apr 03 2023 at 18:20)</a>:</h4>
+<p><strong>remlse</strong> requested <a href="https://github.com/pchickey">pchickey</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346647560"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346647560" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346647560">(Apr 03 2023 at 18:20)</a>:</h4>
+<p><strong>remlse</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers">wasmtime-core-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346647562"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346647562" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346647562">(Apr 03 2023 at 18:20)</a>:</h4>
+<p><strong>remlse</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-default-reviewers">wasmtime-default-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346931805"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346931805" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346931805">(Apr 04 2023 at 17:51)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1371487783">PR review</a>.</p>
+
+
+
+<a name="346931806"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346931806" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346931806">(Apr 04 2023 at 17:51)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1371487783">PR review</a>.</p>
+
+
+
+<a name="346931807"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346931807" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346931807">(Apr 04 2023 at 17:51)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1157583020">PR review comment</a>:</p>
+<blockquote>
+<p>One small tweak to the conditional-compilation strategy: I had been thinking that we could have the methods that produce decisions, like <code>get_decision</code> here, return a default value (<code>false</code> here) as a constant in the non-<code>chaos</code>-feature case; then the sites where we use these decisions, like in <code>MachBuffer</code>, don't require annotation with conditional compilation. What do you think?</p>
+</blockquote>
+
+
+
+<a name="346931808"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346931808" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346931808">(Apr 04 2023 at 17:51)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1157579077">PR review comment</a>:</p>
+<blockquote>
+<p>A few things:</p>
+<ul>
+<li>Usually a mut-accessor will be named like <code>fn ctrl_plane_mut(&amp;mut self) -&gt; ...</code></li>
+<li>Let's have a different one too, <code>fn take_ctrl_plane(self)</code>, that consumes the emit-state and gives us back the control-plane state</li>
+</ul>
+</blockquote>
+
+
+
+<a name="346931810"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346931810" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346931810">(Apr 04 2023 at 17:51)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1157579833">PR review comment</a>:</p>
+<blockquote>
+<p>Yeah, we may be able to find a better way here eventually, but I think this strikes a good balance for now.</p>
+</blockquote>
+
+
+
+<a name="346938910"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346938910" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346938910">(Apr 04 2023 at 18:26)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1371550058">PR review</a>.</p>
+
+
+
+<a name="346938912"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346938912" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346938912">(Apr 04 2023 at 18:26)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1157618462">PR review comment</a>:</p>
+<blockquote>
+<p>I'm thinking about the potential performance impact in release builds, but I guess it's safe to assume the compiler inlines a constant <code>false</code> and removes the resulting <code>if false {}</code>.</p>
+<p>In my view, it would be a nice aspect of the control plane that there is no way to (mis-)use it in regular builds. But I guess that every control plane API needs to have some default output value anyway... and that can probably always be inlined as well? And we can annotate these default-returning functions with <code>#[inline]</code>.</p>
+<p>What is the downside of conditional compilation at the call sites? It seemed like an easy way to be <em>really, really sure</em> nothing bad happens in release builds, but on second thought, it doesn't seem necessary.</p>
+</blockquote>
+
+
+
+<a name="346941515"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346941515" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346941515">(Apr 04 2023 at 18:37)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1371568530">PR review</a>.</p>
+
+
+
+<a name="346941516"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346941516" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346941516">(Apr 04 2023 at 18:37)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1157629801">PR review comment</a>:</p>
+<blockquote>
+<p>Indeed, we should be able to trust the branch-folding here.</p>
+<blockquote>
+<p>What is the downside of conditional compilation at the call sites? </p>
+</blockquote>
+<p>The main downside is that it spreads the implementation of a conditional decision across distributed points -- the alternative, where everything is wired to a single module where all conditional-compilation logic lies, makes it easier to make changes in the future. (Another example of this principle in action is the <code>memfd</code> pooling-allocator mechanism in Wasmtime: when I implemented this in #3697 last year I originally had feature-conditional code in many places, but Alex convinced me to centralize everything into two versions of one module and remove conditionals everywhere else. The result is far cleaner!)</p>
+</blockquote>
+
+
+
+<a name="346942537"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346942537" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346942537">(Apr 04 2023 at 18:42)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346942560"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346942560" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346942560">(Apr 04 2023 at 18:42)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1371576278">PR review</a>.</p>
+
+
+
+<a name="346942561"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346942561" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346942561">(Apr 04 2023 at 18:42)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1157634313">PR review comment</a>:</p>
+<blockquote>
+<blockquote>
+<p><code>fn take_ctrl_plane(self)</code></p>
+</blockquote>
+<p>I think that actually caught a mistake. I was taking the control plane out of the emission state inside a loop, where later loop iterations would use the state with a now-empty control plane.</p>
+</blockquote>
+
+
+
+<a name="346955557"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346955557" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346955557">(Apr 04 2023 at 19:50)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="346956383"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346956383" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346956383">(Apr 04 2023 at 19:55)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1371680714">PR review</a>.</p>
+
+
+
+<a name="346956384"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346956384" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346956384">(Apr 04 2023 at 19:55)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1157698019">PR review comment</a>:</p>
+<blockquote>
+<p>I'm assuming this goes for the <code>Arbitrary</code> implementation as well, so I removed the conditional compilation <a href="https://github.com/bytecodealliance/wasmtime/pull/6039/files#diff-7e77f700326e887cf8ef8327df2692daeb869db9116fb0c44eb80e3f18f1c987R221">here</a> too.</p>
+<p>The shim control plane's <a href="https://github.com/bytecodealliance/wasmtime/pull/6039/files#diff-39db0fd3f924e4c55e0925a710768bec6cca5922b2ea4d0a842dd2d057e670a9R15-R19"><code>Arbitrary</code> implementation</a> now returns the default without consuming any bytes.</p>
+</blockquote>
+
+
+
+<a name="346972785"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/346972785" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#346972785">(Apr 04 2023 at 21:28)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1371817265">PR review</a>.</p>
+
+
+
+<a name="347198500"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347198500" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347198500">(Apr 05 2023 at 16:23)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="347202938"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347202938" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347202938">(Apr 05 2023 at 16:41)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1373307537">PR review</a>.</p>
+
+
+
+<a name="347202940"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347202940" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347202940">(Apr 05 2023 at 16:41)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1158767443">PR review comment</a>:</p>
+<blockquote>
+<p>I don't think <code>define_function</code> should get this argument. If you need this fine control you should probably use <code>define_function_bytes</code> instead. This doesn't work with a module that serializes functions rather than immediately compiles them and it is confusing for most users of cranelift.</p>
+</blockquote>
+
+
+
+<a name="347210655"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347210655" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347210655">(Apr 05 2023 at 17:11)</a>:</h4>
+<p>remlse submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1373351794">PR review</a>.</p>
+
+
+
+<a name="347210656"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347210656" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347210656">(Apr 05 2023 at 17:11)</a>:</h4>
+<p>remlse created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1158797519">PR review comment</a>:</p>
+<blockquote>
+<p>I think <a href="https://github.com/bytecodealliance/wasmtime/pull/6039/files#diff-17f3fdc5172c9af53a3856f528d285db460761da8ab7be6a512bb01631cd6879R238">this is the place</a> we actually needed that argument. So that would have to be rewritten with <code>define_function_bytes</code>. The module there is a <code>JITModule</code> and its <code>define_function</code> and <code>define_function_bytes</code> methods are not trivial, so it's not obvious to me how to do that.</p>
+</blockquote>
+
+
+
+<a name="347211928"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347211928" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347211928">(Apr 05 2023 at 17:16)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1373358807">PR review</a>.</p>
+
+
+
+<a name="347211930"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347211930" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347211930">(Apr 05 2023 at 17:16)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1158802321">PR review comment</a>:</p>
+<blockquote>
+<p>cranelift-object implements <code>define_function</code> as <code> ctx.compile_and_emit(self.isa(), &amp;mut code, ctrl_plane)</code> followed by <code>define_function_bytes</code>. You could do the same in <code>TestFileCompiler</code>.</p>
+</blockquote>
+
+
+
+<a name="347212384"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347212384" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347212384">(Apr 05 2023 at 17:18)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1373361682">PR review</a>.</p>
+
+
+
+<a name="347212385"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347212385" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347212385">(Apr 05 2023 at 17:18)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1158804271">PR review comment</a>:</p>
+<blockquote>
+<p>@bjorn3 in general the approach we've been taking is to thread through the control-plane everywhere compilation can be invoked; conceptually it's now another input along with the CLIF. (It does have a <code>Default</code> implementation.) If there's a way to rename this variant to a third option, and then have a variant that uses a default control plane, we can perhaps do that. Would you be willing to do that in a followup PR?</p>
+</blockquote>
+
+
+
+<a name="347217834"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347217834" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347217834">(Apr 05 2023 at 17:44)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="347222507"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347222507" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347222507">(Apr 05 2023 at 18:06)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="347223312"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347223312" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347223312">(Apr 05 2023 at 18:10)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1158853417">PR review comment</a>:</p>
+<blockquote>
+<p>From a usability perspective having another method would work. But when serializing rather than compiling, a <code>ControlPlane</code> argument doesn't really make any sense as you can't serialize <code>ControlPlane</code>. (I have local changes to make a serializing <code>Module</code> which I want to upstream. I'm using it to allow using cranelift-interpreter in cg_clif with minimal changes to cg_clif.)</p>
+</blockquote>
+
+
+
+<a name="347223313"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347223313" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347223313">(Apr 05 2023 at 18:10)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1373438086">PR review</a>.</p>
+
+
+
+<a name="347227601"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347227601" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347227601">(Apr 05 2023 at 18:31)</a>:</h4>
+<p>remlse updated <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<a name="347238051"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347238051" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347238051">(Apr 05 2023 at 19:28)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1373551532">PR review</a>.</p>
+
+
+
+<a name="347238053"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347238053" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347238053">(Apr 05 2023 at 19:28)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1158929694">PR review comment</a>:</p>
+<blockquote>
+<p>I'm not sure I understand why serialization of modules implies the need to serialize a <code>ControlPlane</code> -- it is given as an argument, it isn't stored -- but please do create an issue or PR with a fix if you have one in mind. In the meantime I'll go ahead and merge this PR (which has been under review for a while and we have general consensus on).</p>
+</blockquote>
+
+
+
+<a name="347238885"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347238885" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347238885">(Apr 05 2023 at 19:33)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#pullrequestreview-1373557269">PR review</a>.</p>
+
+
+
+<a name="347238887"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347238887" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347238887">(Apr 05 2023 at 19:33)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/6039#discussion_r1158933401">PR review comment</a>:</p>
+<blockquote>
+<p>If the passed in <code>ControlPlane</code> should affect the eventual compilation of the function, it did need to be serialized. If not, there it doesn't really make much sense to pass in <code>ControlPlane</code>.</p>
+<blockquote>
+<p>In the meantime I'll go ahead and merge this PR (which has been under review for a while and we have general consensus on).</p>
+</blockquote>
+<p><span aria-label="+1" class="emoji emoji-1f44d" role="img" title="+1">:+1:</span></p>
+</blockquote>
+
+
+
+<a name="347244108"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%236039%20Chaos%20mode%20MVP%3A%20Skip%20branch%20optimizat.../near/347244108" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.236039.20Chaos.20mode.20MVP.3A.20Skip.20branch.20optimizat.2E.2E.2E.html#347244108">(Apr 05 2023 at 20:02)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/6039">PR #6039</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

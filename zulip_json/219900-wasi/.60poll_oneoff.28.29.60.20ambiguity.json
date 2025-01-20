@@ -1,0 +1,86 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> (and everyone else) I want to make you aware what we have uncovered an ambiguity in the <code>poll_oneoff()</code> definition. It is currently blocking our work on mio/tokio and so we'd like to resolve this ASAP. The full details are available here: <a href=\"https://github.com/tokio-rs/mio/pull/1580#issuecomment-1157797095\">https://github.com/tokio-rs/mio/pull/1580#issuecomment-1157797095</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/tokio-rs/mio/pull/1580#issuecomment-1157797095\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/9c8d85311d50685f6b6d293fbc1ef39b97e1bedc\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f646365366132343864353138346665323132646565323961663838306264316233306662396438653734623735373731633735653934333635373765396639362f746f6b696f2d72732f6d696f2f70756c6c2f31353830)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/tokio-rs/mio/pull/1580#issuecomment-1157797095\" title=\"fix(wasi): don't fail select() on empty subscriptions by haraldh · Pull Request #1580 · tokio-rs/mio\">fix(wasi): don't fail select() on empty subscriptions by haraldh · Pull Request #1580 · tokio-rs/mio</a></div><div class=\"message_embed_description\">return Ok(()) rather than Err(EINVAL)\nSigned-off-by: Harald Hoyer harald@profian.com</div></div></div>",
+        "id": 286370758,
+        "sender_full_name": "Nathaniel McCallum",
+        "timestamp": 1655393722
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"260875\">@Nathaniel McCallum</span> Thanks for raising this. I'll take a look.</p>",
+        "id": 286370971,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655393792
+    },
+    {
+        "content": "<p>My initial instinct is to say that we should return success immediately in that case. But I'm looking into a few more things.</p>",
+        "id": 286372285,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655394307
+    },
+    {
+        "content": "<p>The history here is that it used to have the block-infinitely behavior, but we removed that because WASI has no signals, so it's never useful to just block infinitely on an empty subscription list. But since poll is \"wait for any event\", the natural thing to do in an empty poll call is to wait indefinitely, <code>EINVAL</code> is returned, meaning \"that particular request isn't supported\".</p>",
+        "id": 286373456,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655394786
+    },
+    {
+        "content": "<p>Now I'm also considering saying that what Wasmtime is doing is correct, and that the proposed change in the PR is ok.</p>",
+        "id": 286383438,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655399332
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"260875\">@Nathaniel McCallum</span> Can you say more about what use case you have for calling <code>mio::Poll::poll</code> with no events?</p>",
+        "id": 286389993,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655402338
+    },
+    {
+        "content": "<p>Honestly no. Harald is currently on paternity leave.</p>",
+        "id": 286390132,
+        "sender_full_name": "Nathaniel McCallum",
+        "timestamp": 1655402398
+    },
+    {
+        "content": "<p>Having it return immediately isn't consistent with <code>mio::Poll::poll</code>'s documented behavior, or its behavior on other platforms. But having it hang is useless on a platform where it can never be woken up.</p>",
+        "id": 286390208,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655402418
+    },
+    {
+        "content": "<p>I've posted what I know in the github thread. There isn't an obvious answer here, so I expect we'll need to look further up the stack to see what the code that calls this needs it to do.</p>",
+        "id": 286394000,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655404177
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"484734\">@George Kulakowski</span> One subtle difference between mutexes deadlocking and poll_oneoff deadlocking is that with mutexes, the problem is typically a mundane logic error, while with poll_oneoff, passing in zero events seems to indicate a mismatch between what the application is expecting the platform to do and what the platform could actually do.</p>",
+        "id": 286399950,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655406845
+    },
+    {
+        "content": "<p>I know that</p>",
+        "id": 286400096,
+        "sender_full_name": "George Kulakowski",
+        "timestamp": 1655406931
+    },
+    {
+        "content": "<p>Ah, I likely misunderstood your post.</p>",
+        "id": 286400231,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1655406981
+    },
+    {
+        "content": "<p>Yeah, I realized belatedly for that reason it may not have been the best example. Analogies are tricky like that. typing more now</p>",
+        "id": 286400442,
+        "sender_full_name": "George Kulakowski",
+        "timestamp": 1655407105
+    },
+    {
+        "content": "<p>Putting here because putting on other people's github seems noisy</p>\n<p>I've realized that (as you pointed out) that a big difference between the poll and mutex examples I gave is that they typically stem from different kinds of errors rooted in different expectations, and that's a distraction from the point I was attempting to make. I should have said looping forever ;p So lemme expound.</p>\n<p>I agree that if I deploy some code which called wasi poll(on no events), I am going to want to some mechanism to tell me that my code can't make forward progress. This is a goal at the level of a human writing software, or a group of them: software engineers and devops.</p>\n<p>What's not a priori clear to me is that the best place for that is the spec'd semantics of wasi poll_oneoff.</p>\n<p>More subtly, I do believe there's often a lot of value in having straightforward semantics with no edge conditions in APIs like this. Having \"at least one of the events occurred\" as a postcondition of poll_oneoff is more powerful a tool to reason with than \"at least one of the events occured OR no events were provided\". I don't want other callers of poll_oneoff needing to assert that some particular postcondition (the \"no events were provided\" state) is unreachable.</p>\n<p>In the other direction, I don't see what the cost is of providing an interface that lets you block forever. How's it distinguishable from looping forever? That's similarly \"useless\". What's so bad about it being possible to express \"block forever\"?</p>\n<p>One answer to that comes back to the point about the lived experience of the people writing and deploying the software. And again I agree that their needs need addressing. I would argue that there's other ways to address it than specifying poll_oneoff(no events) to return immediately and handling that case in code.</p>\n<p>One point is that, generally, I imagine people will want to observe or detect lack of forward progress, and that this is the domain of the runtime and its diagnostics. I want to be told if I'm wedged for any reason. Can blocking indefinitely via poll_oneoff be reported via one of those mechanisms?</p>\n<p>Finally I acknowledge that maybe the ship has sailed on the semantics of poll_oneoff. I don't want to suggest relitigating that if it's not appropriate. I'll add that I certainly can't tell from the documentation that you intended to remove the block-indefinitely semantics, and that I clearly have a philosophy about this sort of thing that would have taken me to a different conclusion :)</p>\n<p>Most spicy part: One aspect of that philosophy: I keyed onto this discussion on the first place because of specific phrasing around the call to the API being \"useless\". My experience has been that attempting to detect that a particular call, or sequence of calls, to a low level system interface is \"useless\" or not is a bit fraught, not always the best investment on increasing the quality of the experience of your clients, and a bit of a slippery slope, compared to approaches that think about these experiences from the whole lifecycle of those people writing and shipping code onto your platform.</p>\n<p>(To explain to the admittedly strained mutex analogy, the mutex API itself may not report a deadlock condition, but instead the runtime may provide some other (maybe optional!) out-of-band mechanism to report on it, like some deadlock-detecting mode that I can explicitly turn on knowing that there's a performance cost or whatever, and that I may be informed via a trap or a log or something more indirect. Rather than rewriting all my locking code to check, at every single mutex lock guard, that no deadlock is possible. Doing it that way would be invasive and expensive.)</p>",
+        "id": 286407361,
+        "sender_full_name": "George Kulakowski",
+        "timestamp": 1655410460
+    }
+]

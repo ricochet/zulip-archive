@@ -1,0 +1,254 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> I think this is going to be a pretty meaty implementation so I figured I'd start a stream here and see where things go.</p>\n<p>One wrinkle I just found (irrespective of <code>*.wat</code> vs <code>*.rs</code> or w/e) -- how is <code>readlink</code> going to work? For example the preview1 API takes a buffer to fill in, but in the canonical ABI it would look more like <code>path_readlink: func(fd: fd) -&gt; result&lt;string, errno&gt;</code>. The difference here is that the <code>cabi_realloc</code> call to allocate space for the string will not necessarily fit within the buffer provided, meaning that if the buffer is too small I'm not sure what the shim module can do because it's too late to learn that and there's nowhere else to return the string.</p>",
+        "id": 300437364,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663961394
+    },
+    {
+        "content": "<p>one option would be to fail the allocation in the <code>cabi_realloc</code> implementation, but that would trap and destroy the module which sounds bad</p>",
+        "id": 300437449,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663961419
+    },
+    {
+        "content": "<p>the only other option I can think of though is to fit the return value on the stack page and then return <code>E2BIG</code> or w/e to the original caller, but there's no guarantee that the value can fit on the stack page, which further might lead to a trap</p>",
+        "id": 300437587,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663961469
+    },
+    {
+        "content": "<p>oh you know the best solution might be something like <code>path_readlink_compat: func(fd: fd, max: u32) -&gt; result&lt;string, errno&gt;</code></p>",
+        "id": 300437643,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663961494
+    },
+    {
+        "content": "<p>where the host simply returns <code>E2BIG</code> if the size is larger than <code>max</code></p>",
+        "id": 300437664,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663961511
+    },
+    {
+        "content": "<p>For <code>readlink</code>, users will typically either use a buffer of size <code>libc::PATH_MAX</code>, which is 4096 in wasi-libc so it'll almost always be big enough, or they'll use a smaller buffer and be prepared for a <code>ENAMETOOLONG</code> error</p>",
+        "id": 300444158,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663964309
+    },
+    {
+        "content": "<p>Or oh, <code>readlink</code>'s way of indicating that the name is truncated is to return a number of bytes which is equal to the provided buffer size.</p>",
+        "id": 300444455,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663964420
+    },
+    {
+        "content": "<p>this is part of the adapter though, where if the new function is <code>readlink: func(fd) -&gt; string</code> then the return value is communicated by calling malloc which the embedder assumes has the right size</p>",
+        "id": 300445470,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663964783
+    },
+    {
+        "content": "<p>this means that we can't naively \"polyfill\" preview1 readlink with something that is <code>-&gt; string</code> because the buffer provided to preview1's readlink originally may not be large enough</p>",
+        "id": 300445555,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663964814
+    },
+    {
+        "content": "<p>Ok, my first cut at generating a wat for this is here: <a href=\"https://github.com/sunfishcode/preview1.wasm/blob/main/pregenerated/preview1.wat\">https://github.com/sunfishcode/preview1.wasm/blob/main/pregenerated/preview1.wat</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/sunfishcode/preview1.wasm/blob/main/pregenerated/preview1.wat\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/9112b8471eb523afdf20a5e3369d8f2b81e164a3\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f636262643233396234353165376530336362313439393838353636643330653166643238396238666564393564313134306136636562613530316630623836342f73756e66697368636f64652f70726576696577312e7761736d)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/sunfishcode/preview1.wasm/blob/main/pregenerated/preview1.wat\" title=\"preview1.wasm/preview1.wat at main · sunfishcode/preview1.wasm\">preview1.wasm/preview1.wat at main · sunfishcode/preview1.wasm</a></div><div class=\"message_embed_description\">Experimental experiments. Contribute to sunfishcode/preview1.wasm development by creating an account on GitHub.</div></div></div>",
+        "id": 300449613,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663966513
+    },
+    {
+        "content": "<p>the code is here: <a href=\"https://github.com/sunfishcode/preview1.wasm/blob/main\">https://github.com/sunfishcode/preview1.wasm/blob/main</a></p>",
+        "id": 300449628,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663966522
+    },
+    {
+        "content": "<p>As we discussed, it needs some fixing up, but it shows the idea here. I've implemented <code>random_get</code>, where the wit API returns <code>list&lt;u8&gt;</code>, so far.</p>",
+        "id": 300449832,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663966627
+    },
+    {
+        "content": "<p>hm this is using <code>dlmalloc</code> though which I think we want to remove</p>",
+        "id": 300450953,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663967202
+    },
+    {
+        "content": "<p>Yeah, though it's convenient for now, because it's a real malloc.</p>",
+        "id": 300450986,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663967220
+    },
+    {
+        "content": "<p>I added an implementation of path_readlink to preview1.c, to show how it works</p>",
+        "id": 300451046,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663967264
+    },
+    {
+        "content": "<p>this works with a full-blown <code>malloc</code> yeah but I think we want to avoid that</p>",
+        "id": 300451351,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663967397
+    },
+    {
+        "content": "<p><code>__wasm_init_memory </code> also looks problematic</p>",
+        "id": 300451530,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663967477
+    },
+    {
+        "content": "<p>but that's probably just there b/c of dlmalloc</p>",
+        "id": 300451543,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663967484
+    },
+    {
+        "content": "<p>weird, that __wasm_init_memory is just doing a memory.fill to zero out memory which should already be zeroed</p>",
+        "id": 300451832,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663967610
+    },
+    {
+        "content": "<p>the fact that it's present though is worrisome, because it may mean <code>.rodata</code>/<code>.data</code> is in play which we can't have</p>",
+        "id": 300452558,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663967926
+    },
+    {
+        "content": "<p>(which is one of the reasons I initially didn't want to use a high  level language)</p>",
+        "id": 300452575,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663967934
+    },
+    {
+        "content": "<p>Ah, it does use static memory, for things like <code>RET_AREA</code> at least</p>",
+        "id": 300452784,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663968007
+    },
+    {
+        "content": "<p>oh, dlmalloc has some static state too</p>",
+        "id": 300453402,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663968287
+    },
+    {
+        "content": "<p>this is what I meant by writing this would almost be an entirely different dialect of C</p>",
+        "id": 300453567,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663968368
+    },
+    {
+        "content": "<p>and there's no static assurances that you're not \"doing the wrong thing\"</p>",
+        "id": 300453580,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663968381
+    },
+    {
+        "content": "<p>and when the wrong thing is done it's not obvious always what did it</p>",
+        "id": 300453587,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663968389
+    },
+    {
+        "content": "<p>If I stub out malloc and hack <code>RET_AREA</code>, there's no <code>__wasm_init_memory</code></p>",
+        "id": 300453681,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663968458
+    },
+    {
+        "content": "<p>agreed yeah</p>",
+        "id": 300453792,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663968504
+    },
+    {
+        "content": "<p>but you will need access to custom wasm globals</p>",
+        "id": 300453808,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663968513
+    },
+    {
+        "content": "<p>to get the pointers provided to preview1 functions into the cabi_realloc function</p>",
+        "id": 300453826,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663968523
+    },
+    {
+        "content": "<p>yeah, there should be a way to do that, let me check</p>",
+        "id": 300453841,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663968541
+    },
+    {
+        "content": "<p>IIRC inline asm should give you a way to shove it in</p>",
+        "id": 300453879,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1663968568
+    },
+    {
+        "content": "<p>To be sure, I agree this thing is in a special dialect of C and it's tricky. But it might still be better than writing all the bindings in raw wat</p>",
+        "id": 300453895,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663968580
+    },
+    {
+        "content": "<p>I've now added code to create wasm globals, and added a minimal malloc implementation that uses them.</p>",
+        "id": 300460525,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663972191
+    },
+    {
+        "content": "<p>And <a href=\"https://github.com/bytecodealliance/wit-bindgen/pull/326\">https://github.com/bytecodealliance/wit-bindgen/pull/326</a> is a PR to move RET_AREA out of static memory.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wit-bindgen/pull/326\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/fb08d6aef2777fba022688cd8a4071e3a481b19a\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f643866353232336339356631656265646330303436316137663332666637613733376461303030346466343461663439663864313639303063666236356361652f62797465636f6465616c6c69616e63652f7769742d62696e6467656e2f70756c6c2f333236)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wit-bindgen/pull/326\" title=\"Move `RET_AREA` variables onto the stack. by sunfishcode · Pull Request #326 · bytecodealliance/wit-bindgen\">Move `RET_AREA` variables onto the stack. by sunfishcode · Pull Request #326 · bytecodealliance/wit-bindgen</a></div><div class=\"message_embed_description\">Move RET_AREA variables out of static memory and onto the stack.\n\n\nThis ensures that the bindings are reentrant, which will be needed when the wasi-threads proposal makes threads available in wasm....</div></div></div>",
+        "id": 300464578,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663974921
+    },
+    {
+        "content": "<p>With those changes, we no longer have a __wasm_init_memory.</p>",
+        "id": 300464725,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1663975051
+    },
+    {
+        "content": "<p>looking at the <code>malloc</code> changes here again, what I was originally imagining is that when you called <code>fd_read</code>, for example, the <code>malloc</code> return value would be the pointer passed to <code>fd_read</code> (similarly for <code>path_readlink</code> or things like that). That way we don't have to worry about <code>free</code> and things like that and we're basically leveraging the fact that we know, statically, the order that <code>cabi_realloc</code> will be called in and with what sizes</p>",
+        "id": 300862883,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1664212507
+    },
+    {
+        "content": "<p>also, if you're up for it, I'd personally prefer if we could get this in Rust instead of C since that'll likely be much easier to maintain over time</p>",
+        "id": 300863178,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1664212598
+    },
+    {
+        "content": "<p>the final thing I think is that we'll need to figure out the update to the <code>$__stack_pointer</code> global, probably via a post-processing pass</p>",
+        "id": 300863254,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1664212628
+    },
+    {
+        "content": "<p>Rust doesn't have quite as many features exposed, like address_space(1) to create and access wasm globals, or -mexec-model=reactor. And Rust is more opinionated about how linking works. But I'll look into it.</p>",
+        "id": 300910356,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1664231694
+    },
+    {
+        "content": "<p>That's true, but I would still much rather have this in Rust. Otherwise once we make this only one person will basically be able to modify it and this seems like it's going to be a generally useful ability to have. Ideally this would be a forcing function to motivate the addition of wasm globals or more flags to Rust, since the further C drifts from Rust's support of wasm the worse things get in general</p>",
+        "id": 301023248,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1664290401
+    },
+    {
+        "content": "<p>ok I've just finished up the portion of this that will be in <code>wit-component</code> which takes as input a set of preview1 functions and the preview1.wasm module and then spits out a new wasm module which is the \"minimal\" module to satisfy the set of preview1 functions required. Basically it takes the input wasm, asserts the shape is as expected, deletes a few exports, then runs a \"gc\" pass, and then outputs the final module.</p>\n<p>The module is only mutated by adding a <code>start</code> function which calls <code>memory.grow (i32.const 1)</code> and sets the return value to the <code>preview1.wasm</code>'s stack pointer so it's got stack space</p>",
+        "id": 301315579,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1664394965
+    }
+]

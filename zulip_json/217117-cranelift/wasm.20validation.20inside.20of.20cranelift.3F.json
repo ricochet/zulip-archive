@@ -1,0 +1,368 @@
+[
+    {
+        "content": "<p>I've got a question for folks who manage cranelift-in-spidermonkey, currently cranelift does no validation of the input wasm module assuming that the embedder does the actual validation (e.g. wasmtime calls <code>wasmparser::validate</code> and presumably spidermonkey validates elsewhere). I think though this may not be tenable too much further into the future.</p>",
+        "id": 203747476,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594662997
+    },
+    {
+        "content": "<p>One example is that <code>ref.is_null</code> no longer encodes its type in the instruction, so to figure out whether you're testing <code>externref</code> or <code>funcref</code> you need to look at the type stack</p>",
+        "id": 203747533,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594663025
+    },
+    {
+        "content": "<p>wasmtime gets away with this by using a different representation so we can look at the type of the cranelift value, but there may be instructions in the future which need non-local information about how to codegen something</p>",
+        "id": 203747596,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594663052
+    },
+    {
+        "content": "<p>Additionally validation has a nontrivial cost in wasmtime right now because we simply \"run it up front\" and throw away all the results, so for Wasmtime specifically it'd be best actually if the module was validated during translation (this would also make validation parallel, which it currently isn't in wasmtime)</p>",
+        "id": 203747726,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594663102
+    },
+    {
+        "content": "<p>so all of that to ask, what would folks think about adding validation interleaved with cranelift-wasm's translation?</p>",
+        "id": 203747749,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594663117
+    },
+    {
+        "content": "<p>Is this a cost specifically avoided in the spidermonkey integration? For example do we need to make validation a compile time or runtime switch for cranelift? Or would spidermonkey be ok if cranelift double-validated</p>",
+        "id": 203747823,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594663150
+    },
+    {
+        "content": "<p>as in, if cranelift validated what spidermonkey has already validated</p>",
+        "id": 203747862,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594663166
+    },
+    {
+        "content": "<p>AFAICT, the wasm module has already been parsed by other bits of SM's wasm frontend by the time that Cranelift is invoked to compile functions; there are a bunch of shims to move the types/signatures over that I haven't internalized. So validation that happens during wasm parsing in Cranelift would be an extra cost; but intuitively it seems to me that it might not be <em>too much</em> extra cost if the work is essentially shared by parsing and validation</p>",
+        "id": 203749822,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594663971
+    },
+    {
+        "content": "<p>My instinct at first, at least, is to say that it's better for CL to remain simple, rather than trying to make all validation conditional. If it's too much latency later, we can definitely come back and refactor. But <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> probably has better thoughts on this! (AFAIK he's out today and tomorrow)</p>",
+        "id": 203749918,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594664024
+    },
+    {
+        "content": "<p>That's a good point that I'm also not familiar with the spidermonkey integration, I'm assuming it just hands a blob of bytes to cranelift but I could be wrong</p>",
+        "id": 203749956,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594664040
+    },
+    {
+        "content": "<p>And yeah doing this conditionally would be tricky, mainly because I'm not sure how to conditionalize the translation phase where we actually need the type information</p>",
+        "id": 203750080,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594664085
+    },
+    {
+        "content": "<p>well, eventually would probably need the type information, today we're getting by ok</p>",
+        "id": 203750096,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594664098
+    },
+    {
+        "content": "<p>Yup, so here's the loop that drives function compilations -- uses a <code>Decoder</code> which is a SM-side wasm parser: <a href=\"https://searchfox.org/mozilla-central/source/js/src/wasm/WasmCraneliftCompile.cpp#476\">https://searchfox.org/mozilla-central/source/js/src/wasm/WasmCraneliftCompile.cpp#476</a> .</p>",
+        "id": 203750423,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594664234
+    },
+    {
+        "content": "<p>I'd need to read/think a bit more before saying what would make the most sense long-term... we definitely still need to parse for baseline compilation, before Cranelift is involved... but for now it seems parsing costs would be dwarfed by the other compilation stages so it doesn't seem like a big issue to me!</p>",
+        "id": 203750721,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594664368
+    },
+    {
+        "content": "<p>oh ok nice, I'll dig into that function</p>",
+        "id": 203750773,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594664399
+    },
+    {
+        "content": "<p>if cranelift-wasm changes in ways that spidermonkey doesn't even touch that's presumably A-OK heh</p>",
+        "id": 203750834,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594664414
+    },
+    {
+        "content": "<p>yup, for sure</p>",
+        "id": 203750846,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1594664425
+    },
+    {
+        "content": "<p>Right now this is conceptually what's happening:</p>\n<ul>\n<li>spidermonkey starts with the module validation, that is, everything before the function bodies section,</li>\n<li>when Ion or wasm baseline are used for compilation, the function's body is validated as we compile it, by iterating over the wasm bytes (so we validate byte by byte)</li>\n<li>when Cranelift is used for compilation, we first validate the whole function's body, and only if it's valid we send it to cranelift (otherwise report an error)</li>\n</ul>",
+        "id": 203938731,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1594809703
+    },
+    {
+        "content": "<p>My thought is that ideally, we'd have a way to provide cranelift-wasm with module-level information (type section info, etc.), while cranelift-wasm would do the function validation.</p>",
+        "id": 203938792,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1594809728
+    },
+    {
+        "content": "<p>(Spidermonkey's Wasm.validate is super fast, but that's still an extra 100ms overhead for very large modules that only Cranelift has)</p>",
+        "id": 203938825,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1594809758
+    },
+    {
+        "content": "<p>(also Cranelift-in-SM does validate function's bodies in parallel, so the cost is a bit amortized)</p>",
+        "id": 203938858,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1594809795
+    },
+    {
+        "content": "<p>That actually sounds perfect, and sounds like my conclusions reading code yesterday were indeed correct! I'll see if I can work on wasmparser to enable this (wasmparser basically already has support so it should be easy)</p>",
+        "id": 203956969,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1594820803
+    },
+    {
+        "content": "<p>Ok a late follow-up but I've now implemented this at <a href=\"https://github.com/bytecodealliance/wasmtime/pull/2059\">https://github.com/bytecodealliance/wasmtime/pull/2059</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/2059\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/2059\" title=\"Validate modules while translating by alexcrichton · Pull Request #2059 · bytecodealliance/wasmtime\">Validate modules while translating by alexcrichton · Pull Request #2059 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This commit is a change to cranelift-wasm to validate each function body\nas it is translated. Additionally top-level module translation functions\nwill perform module validation. This commit builds ...</div></div></div>",
+        "id": 204611518,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595371545
+    },
+    {
+        "content": "<p>/me will review first tomorrow</p>",
+        "id": 204611614,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1595371587
+    },
+    {
+        "content": "<p>that PR now forcibly validates all wasm functions fed to cranelift-wasm, so this will affect Gecko (if that lands as-is). I'd definitely want folks familiar with the spidermonkey integration of Cranelift to take a look!</p>",
+        "id": 204611620,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595371591
+    },
+    {
+        "content": "<p>the knobs are now there for validation to be  entirely deferred to cranelift (spidermonkey can provide its own hooks to learn about the module's other types), but that may not be sufficient. If so just let me know!</p>",
+        "id": 204611691,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595371638
+    },
+    {
+        "content": "<p>Looks great! I'll be happy to integrate and test it in spidermonkey when the time comes !</p>",
+        "id": 204640301,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595405926
+    },
+    {
+        "content": "<p>Thanks for working on this!</p>",
+        "id": 204640482,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595406116
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> hi! let me know if you want to chat about <a href=\"https://github.com/bytecodealliance/wasmtime/pull/2059\">https://github.com/bytecodealliance/wasmtime/pull/2059</a>, maybe I'm missing a way to properly use a primitive type as the <code>Self::Type</code> in this case!</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/2059\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/2059\" title=\"Validate modules while translating by alexcrichton · Pull Request #2059 · bytecodealliance/wasmtime\">Validate modules while translating by alexcrichton · Pull Request #2059 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This commit is a change to cranelift-wasm to validate each function body\nas it is translated. Additionally top-level module translation functions\nwill perform module validation. This commit builds ...</div></div></div>",
+        "id": 204915926,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595597926
+    },
+    {
+        "content": "<p>Oh i actually had another question about this: right now, Baldrdash will request module-level information lazily, so it'd make sense that we'd now implement a cache for this information, that we'd fill in incrementally as we compile the function (and share this information with other function compilations, since at this point the module-level info is immutable). Since the traits mention <code>&amp;self</code> and not <code>&amp;mut self</code>, I'd need to use interior mutability (RefCell) to be able to build up the cache information; are there other better ways that would avoid the dynamic RefCell checks on borrows?</p>",
+        "id": 204918865,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595599427
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> hey back now, thanks for taking a look! Is <code>Self::Type</code> the only thing you had an issue with?</p>",
+        "id": 205239436,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945195
+    },
+    {
+        "content": "<p>If so I think I might just remove that trait and return <code>wasmparser::Type</code> instead since I'm not sure having an associated type for <code>Type</code> is all that worth it (all you can do is get <code>wasmparser::Type</code> anyway)</p>",
+        "id": 205239507,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945225
+    },
+    {
+        "content": "<p>also self vs mut self, but it's probably more open to discussion (and i can solve it locally with a RefCell iiuc, with an additional dynamic cost unfortunately)</p>",
+        "id": 205239588,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595945266
+    },
+    {
+        "content": "<p>oh? what was needing mutability for your implementation?</p>",
+        "id": 205239892,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945385
+    },
+    {
+        "content": "<p>er right sorry I see now</p>",
+        "id": 205240071,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945435
+    },
+    {
+        "content": "<p>this would probably use a <code>OnceCell</code> rather than a <code>RefCell</code></p>",
+        "id": 205240098,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945445
+    },
+    {
+        "content": "<p>since you'll want to get a long-lived borrow out of it</p>",
+        "id": 205240114,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945450
+    },
+    {
+        "content": "<p>but that should work to lazily initialize these pieces</p>",
+        "id": 205240145,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945459
+    },
+    {
+        "content": "<p>FWIW supporting both APIs would be somewhat tricky, but possible</p>",
+        "id": 205240318,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945524
+    },
+    {
+        "content": "<p>I'd prefer though if we could find something that works from the get-go</p>",
+        "id": 205240342,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945533
+    },
+    {
+        "content": "<p>/me looks at OnceCell</p>",
+        "id": 205240469,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595945615
+    },
+    {
+        "content": "<p>oh and to clarify, by that I <a href=\"https://docs.rs/once_cell/1.4.0/once_cell/unsync/struct.OnceCell.html\">mean this type</a></p>",
+        "id": 205240576,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945663
+    },
+    {
+        "content": "<p>Ok! Is the <code>OnceCell::get_mut</code> method cheaper to call than a <code>RefCell::borrow_mut</code> ? (I imagine yes, but not sure)</p>",
+        "id": 205240880,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595945811
+    },
+    {
+        "content": "<p>nah it's basically the same cost AFAIK</p>",
+        "id": 205240956,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945851
+    },
+    {
+        "content": "<p>it's a boolean check of a flag basically</p>",
+        "id": 205240964,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595945856
+    },
+    {
+        "content": "<p>Ok! Since the cache is filled up as the trait methods are called, i'm not sure it's going to need a long-lived borrow, but yeah, both would work. So it's not a strong requirement for Spidermonkey.</p>",
+        "id": 205241473,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595946074
+    },
+    {
+        "content": "<p>Thanks for checking this! having just return <code>wasmparser::Type</code> would indeed be ideal</p>",
+        "id": 205241488,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595946084
+    },
+    {
+        "content": "<p>ok, I'll make that change</p>",
+        "id": 205242167,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595946416
+    },
+    {
+        "content": "<p>Will this allow returning some kind of references, though?</p>",
+        "id": 205242432,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595946519
+    },
+    {
+        "content": "<p>if you're returning <code>wasmparser::Type</code> it'll just be a <code>Type</code></p>",
+        "id": 205243048,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595946784
+    },
+    {
+        "content": "<p>no need for references</p>",
+        "id": 205243054,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595946787
+    },
+    {
+        "content": "<p>ah right, i was wondering if this would be future proof since the GC type proposal might introduced structured types that won't be primitive types</p>",
+        "id": 205243220,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595946895
+    },
+    {
+        "content": "<p>but that might be irrelevant at this poitn</p>",
+        "id": 205243226,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595946901
+    },
+    {
+        "content": "<p>yeah I'm not sure how that will play out myself</p>",
+        "id": 205243520,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595947048
+    },
+    {
+        "content": "<p>I figured we can probably wait to see what happens there</p>",
+        "id": 205243524,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595947053
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> <a href=\"https://github.com/bytecodealliance/wasm-tools/pull/68\">https://github.com/bytecodealliance/wasm-tools/pull/68</a> is what I'm thinking for your issues</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasm-tools/pull/68\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasm-tools/pull/68\" title=\"Simplify the `WasmModuleResources` trait by alexcrichton · Pull Request #68 · bytecodealliance/wasm-tools\">Simplify the `WasmModuleResources` trait by alexcrichton · Pull Request #68 · bytecodealliance/wasm-tools</a></div><div class=\"message_embed_description\">Don&#39;t have separate traits for tables/memories/globals when the\nwasmparser Copy types by value work for now. This may need to be\nextended later but we can presumably cross that bridge when we g...</div></div></div>",
+        "id": 205259355,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595954143
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> thanks! I'm worried about the reverting for TableType and other non-primitive types, though; this will require straight conversions from spidermonkey's types to wasmparser's types everywhere, or creating the converted types and caching them...</p>",
+        "id": 205259779,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595954358
+    },
+    {
+        "content": "<p>I think it should be cheap to do though? They're basically just <code>Copy</code> containers of types</p>",
+        "id": 205259824,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595954383
+    },
+    {
+        "content": "<p>and wasmparser validation would do the conversion anyway basically regardless</p>",
+        "id": 205259853,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595954398
+    },
+    {
+        "content": "<p>(and with monomorphization it should all go away in terms of overhead)</p>",
+        "id": 205259907,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595954409
+    },
+    {
+        "content": "<p>Sounds good to me! If it's an issue, profiles will tell us anyways :-)</p>",
+        "id": 205260114,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1595954522
+    }
+]

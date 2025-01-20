@@ -1,0 +1,189 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #2576 x64 bugfix: prevent load-op fusion of... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html">wasmtime / PR #2576 x64 bugfix: prevent load-op fusion of...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="222513304"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222513304" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222513304">(Jan 12 2021 at 23:58)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/2576">PR #2576</a> from <code>cmp-load-bug</code> to <code>main</code>:</p>
+<blockquote>
+<p>On x64, the new backend generates <code>cmp</code> instructions at their use-sites<br>
+when possible (when the icmp that generates a boolean is known) so that<br>
+the condition flows directly through flags rather than a materialized<br>
+boolean. E.g., both <code>bint</code> (boolean to int) and <code>select</code> (conditional<br>
+select) instruction lowerings invoke <code>emit_cmp()</code> to do so.</p>
+<p>Load-op fusion in <code>emit_cmp()</code> nominally allowed <code>cmp</code> to use its <code>cmp
+reg, mem</code> form.</p>
+<p>However, the mergeable-load condition (load has only single use) was not<br>
+adequately checked. Consider the sequence:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">    </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">icmp</span><span class="w"> </span><span class="n">eq</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v2</span><span class="w"></span>
+<span class="w">    </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bint</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v3</span><span class="w"></span>
+<span class="w">    </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">select</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v3</span><span class="p">,</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+</code></pre></div>
+<p>The load <code>v2</code> is only used in the <code>icmp</code> at <code>v3</code>. However, the cmp will<br>
+be separately codegen'd twice, once for the <code>bint</code> and once for the<br>
+<code>select</code>.</p>
+<p>Prior to this fix, the above example would result in the load at <code>v2</code><br>
+sinking to the <code>cmp</code> just above the <code>select</code>; we then emit another <code>cmp</code><br>
+for the <code>bint</code>, but the load has already been used once so we do not<br>
+allow merging. We thus (i) expect the register for <code>v2</code> to contain the<br>
+loaded value, but (ii) skip the codegen for the load because it has been<br>
+sunk. This results in a regalloc error (unexpected livein) as the<br>
+unfilled register is upward-exposed to the entry point.</p>
+<p>Because of this, we need to accept only the reg, reg form in<br>
+<code>emit_cmp()</code> (and the FP equivalent). We could get marginally better<br>
+code by tracking whether the <code>cmp</code> we are emitting comes from an<br>
+<code>icmp</code>/<code>fcmp</code> with only one use; but IMHO simplicity is a better rule<br>
+here when subtle interactions occur.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="222513305"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222513305" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222513305">(Jan 12 2021 at 23:58)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> and <a href="https://github.com/abrown">abrown</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2576">PR #2576</a>.</p>
+
+
+
+<a name="222513306"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222513306" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222513306">(Jan 12 2021 at 23:58)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> and <a href="https://github.com/abrown">abrown</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2576">PR #2576</a>.</p>
+
+
+
+<a name="222617862"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222617862" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222617862">(Jan 13 2021 at 17:39)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2576#pullrequestreview-567466492">PR Review</a>.</p>
+
+
+
+<a name="222617864"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222617864" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222617864">(Jan 13 2021 at 17:39)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/2576#discussion_r556709322">PR Review Comment</a>:</p>
+<blockquote>
+<p>Maybe a comment saying something like "see comment above <code>let rhs = put_input_in_reg(...)</code> in <code>emit_cmp</code> for why we force RHS into a register" because this is a bit subtle?</p>
+</blockquote>
+
+
+
+<a name="222617865"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222617865" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222617865">(Jan 13 2021 at 17:39)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2576#pullrequestreview-567466492">PR Review</a>.</p>
+
+
+
+<a name="222619184"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222619184" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222619184">(Jan 13 2021 at 17:49)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2576">PR #2576</a> from <code>cmp-load-bug</code> to <code>main</code>:</p>
+<blockquote>
+<p>On x64, the new backend generates <code>cmp</code> instructions at their use-sites<br>
+when possible (when the icmp that generates a boolean is known) so that<br>
+the condition flows directly through flags rather than a materialized<br>
+boolean. E.g., both <code>bint</code> (boolean to int) and <code>select</code> (conditional<br>
+select) instruction lowerings invoke <code>emit_cmp()</code> to do so.</p>
+<p>Load-op fusion in <code>emit_cmp()</code> nominally allowed <code>cmp</code> to use its <code>cmp
+reg, mem</code> form.</p>
+<p>However, the mergeable-load condition (load has only single use) was not<br>
+adequately checked. Consider the sequence:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">    </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">icmp</span><span class="w"> </span><span class="n">eq</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v2</span><span class="w"></span>
+<span class="w">    </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bint</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v3</span><span class="w"></span>
+<span class="w">    </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">select</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v3</span><span class="p">,</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+</code></pre></div>
+<p>The load <code>v2</code> is only used in the <code>icmp</code> at <code>v3</code>. However, the cmp will<br>
+be separately codegen'd twice, once for the <code>bint</code> and once for the<br>
+<code>select</code>.</p>
+<p>Prior to this fix, the above example would result in the load at <code>v2</code><br>
+sinking to the <code>cmp</code> just above the <code>select</code>; we then emit another <code>cmp</code><br>
+for the <code>bint</code>, but the load has already been used once so we do not<br>
+allow merging. We thus (i) expect the register for <code>v2</code> to contain the<br>
+loaded value, but (ii) skip the codegen for the load because it has been<br>
+sunk. This results in a regalloc error (unexpected livein) as the<br>
+unfilled register is upward-exposed to the entry point.</p>
+<p>Because of this, we need to accept only the reg, reg form in<br>
+<code>emit_cmp()</code> (and the FP equivalent). We could get marginally better<br>
+code by tracking whether the <code>cmp</code> we are emitting comes from an<br>
+<code>icmp</code>/<code>fcmp</code> with only one use; but IMHO simplicity is a better rule<br>
+here when subtle interactions occur.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="222619191"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222619191" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222619191">(Jan 13 2021 at 17:49)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2576#pullrequestreview-567474871">PR Review</a>.</p>
+
+
+
+<a name="222619192"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222619192" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222619192">(Jan 13 2021 at 17:49)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2576#discussion_r556715815">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done, thanks!</p>
+</blockquote>
+
+
+
+<a name="222625177"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232576%20x64%20bugfix%3A%20prevent%20load-op%20fusion%20of.../near/222625177" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232576.20x64.20bugfix.3A.20prevent.20load-op.20fusion.20of.2E.2E.2E.html#222625177">(Jan 13 2021 at 18:33)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/2576">PR #2576</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

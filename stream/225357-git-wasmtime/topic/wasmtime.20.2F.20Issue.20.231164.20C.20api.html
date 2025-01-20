@@ -1,0 +1,147 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / Issue #1164 C api · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231164.20C.20api.html">wasmtime / Issue #1164 C api</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="199976857"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231164%20C%20api/near/199976857" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231164.20C.20api.html#199976857">(Jun 06 2020 at 14:13)</a>:</h4>
+<p>carlokok <a href="https://github.com/bytecodealliance/wasmtime/issues/1164#issuecomment-640067293">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1164">Issue #1164</a>:</p>
+<blockquote>
+<p>If it's of any interest to anyone, I wrote a C api that allows this.</p>
+<p>api: <a href="https://gist.github.com/carlokok/d0d079dba76ee253a1571d58f2e791fb">https://gist.github.com/carlokok/d0d079dba76ee253a1571d58f2e791fb</a></p>
+<div class="codehilite"><pre><span></span><code>#include &lt;cranelift.h&gt;
+#include &lt;stdio.h&gt;
+
+void cb1(uintptr_t userdata, const char* err, const char* fn) {
+  printf(&quot;Error %s: %s\n&quot;, fn, err);
+}
+
+void cb2(uintptr_t userdata, const char* err, const char* fn) {
+  printf(&quot;Message %s: %s\n&quot;, fn, err);
+}
+
+void cb(uintptr_t userdata, FunctionData* fd)
+{
+  BlockCode entry = cranelift_create_block(fd);
+  BlockCode larger = cranelift_create_block(fd);
+  BlockCode exit = cranelift_create_block(fd);
+
+  cranelift_append_block_params_for_function_params(fd, entry);
+
+  cranelift_switch_to_block(fd, entry);
+
+  ValueCode res[2];
+  cranelift_block_params(fd, entry, res);
+
+  VariableCode a = cranelift_declare_var(fd, TypeI32);
+  cranelift_def_var(fd, a, res[0]);
+
+  VariableCode b = cranelift_declare_var(fd, TypeI32);
+  cranelift_def_var(fd, b, res[1]);
+
+  VariableCode retvar = cranelift_declare_var(fd, TypeI32);
+  cranelift_def_var(fd, retvar, cranelift_iconst(fd, TypeI32, 0));
+
+  cranelift_ins_br_icmp(fd, CraneliftIntCCSignedLessThan, a, b, larger, 0, NULL);
+
+  cranelift_def_var(fd, retvar, cranelift_use_var(fd, a));
+
+  cranelift_ins_jump(fd, exit, 0, NULL);
+
+  cranelift_switch_to_block(fd, larger);
+
+  cranelift_def_var(fd, retvar, cranelift_use_var(fd, b));
+
+  cranelift_ins_jump(fd, exit, 0, NULL);
+
+  cranelift_switch_to_block(fd, exit);
+
+  ValueCode retval = cranelift_use_var(fd, retvar);
+  cranelift_return(fd, 1, &amp;retval);
+
+  cranelift_seal_all_blocks(fd);
+
+
+}
+
+void cbp(uintptr_t ud, char* data)
+{
+  printf(&quot;\n%s\n&quot;, data);
+}
+
+int main()
+{
+  ModuleData* mod = cranelift_module_new(&quot;x86_64-pc-windows&quot;, &quot;is_pic,enable_simd,enable_atomics,enable_verifier&quot;, &quot;mymodule&quot;, 0, cb1, cb2);
+
+  cranelift_signature_builder_add_param(mod, TypeI32);
+  cranelift_signature_builder_add_param(mod, TypeI32);
+  cranelift_signature_builder_add_result(mod, TypeI32);
+  cranelift_build_function(mod, 0, cb);
+  cranelift_function_to_string(mod, 0, cbp);
+  uint32_t id;
+  cranelift_declare_function(mod, &quot;max&quot;, Export, &amp;id);
+  cranelift_define_function(mod, id);
+
+  uint32_t id2;
+  uint8_t c[4] = { 1,2,3,4 };
+  cranelift_set_data_value(mod, c, 4);
+  cranelift_define_data(mod, &quot;testdata_w&quot;, Export, Writable, 0, &amp;id2);
+  cranelift_assign_data_to_global(mod, id2);
+  cranelift_clear_data(mod);
+
+  cranelift_set_data_value(mod, c, 4);
+  cranelift_define_data(mod, &quot;testdata_r&quot;, Export, None, 0, &amp;id2);
+  cranelift_assign_data_to_global(mod, id2);
+  cranelift_clear_data(mod);
+
+  cranelift_set_data_value(mod, c, 4);
+  cranelift_define_data(mod, &quot;testdata_w2&quot;, Export, Writable, 0, &amp;id2);
+  cranelift_set_data_section(mod, &quot;SEG&quot;, &quot;SEC&quot;);
+  cranelift_assign_data_to_global(mod, id2);
+  //  cranelift_clear_data(mod);
+
+  cranelift_module_emit_object(mod, &quot;c:\\projects\\test.o&quot;);
+  cranelift_module_delete(mod);
+}
+</code></pre></div>
+
+
+</blockquote>
+
+
+
+<a name="199978118"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231164%20C%20api/near/199978118" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231164.20C.20api.html#199978118">(Jun 06 2020 at 14:43)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/1164#issuecomment-640071813">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1164">Issue #1164</a>:</p>
+<blockquote>
+<p>I think <code>cranelift_block_params</code> should take the expected param count as argument to prevent accidental out-of-bounds memory accesses.</p>
+</blockquote>
+
+
+
+<a name="199978183"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231164%20C%20api/near/199978183" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231164.20C.20api.html#199978183">(Jun 06 2020 at 14:44)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/1164#issuecomment-640071987">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1164">Issue #1164</a>:</p>
+<blockquote>
+<p>It would also be nice if <code>cranelift-codegen-meta</code> automatically generated all <code>cranelift_ins_*</code> functions.</p>
+</blockquote>
+
+
+
+<a name="199978338"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231164%20C%20api/near/199978338" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231164.20C.20api.html#199978338">(Jun 06 2020 at 14:47)</a>:</h4>
+<p>carlokok <a href="https://github.com/bytecodealliance/wasmtime/issues/1164#issuecomment-640072469">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1164">Issue #1164</a>:</p>
+<blockquote>
+<p>agreed :) but if there's no interest or if the interfaces don't want to be tied down then I won't bother. Also this was my very first foray into Rust.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

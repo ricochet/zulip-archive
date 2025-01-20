@@ -1,0 +1,38 @@
+[
+    {
+        "content": "<p>After many testing and profiling, my conclusion is that calling a no-op exported function would take ~23ns (Intel 8474C). And calling an exported function of <code>alloc(0)</code> would take 40ns.  Would this be an expected overhead? In that case, if the computation I need WASM to do is super fast  (at 100ns scale), but it requires some wasm calls to alloc input buffer and drop output buffer, then I think the function call overhead is non-negligible?</p>",
+        "id": 471944412,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726927759
+    },
+    {
+        "content": "<p>I also don't understand yet what are those traphandlers doing inside the host code, and what are <code>array_to_wasm_trampoline</code> doing inside the wasm generated code. Based on my profiling I think those take up the 23ns per call. Really appreciate it if anyone can answer</p>",
+        "id": 471944573,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726927877
+    },
+    {
+        "content": "<p>If you are using the Rust api, you can use <code>func.typed()</code> to get a <code>TypedFunc</code> from a <code>Func</code> (or use <code>instance.get_typed_func()</code> to get a <code>TypedFunc</code> directly) Calling a <code>TypedFunc</code> should be a bit faster than calling a <code>Func</code> due to not needing to type check the arguments and being able to generate a trampoline which directly places all arguments in the right register without going through an array on the stack.</p>",
+        "id": 471946353,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1726929115
+    },
+    {
+        "content": "<p>Thanks, I am using <code>instance.get_typed_func()</code> to get <code>TypedFunc</code>. So that type check may not contribute to the overhead.</p>",
+        "id": 471947005,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726929564
+    },
+    {
+        "content": "<p>Yes on the order of 20ns is the expected overhead at this time. Pushing that number down further would require some various optimizations we've discussed in the past but are nontrivial to do and so they haven't been done yet. </p>\n<p>What you're seeing with traphandlers is one of the main points of possible optimization. Notably Wasmtime calls into C which calls <code>setjmp</code> because setjmp isn't safe to call from Rust. This then calls back out into Rust which forces a whole bunch of stuff to not get inlined by default. I've never measured with with cross-language-LTO which should improve the situation here. The ideal here though is related to the next bit...</p>\n<p>The <code>array_to_wasm_trampoline</code> function call you're seeing is how Wasmtime enters Cranelift code. Wasm code has a custom ABI that isn't compatible with anything in Rust or C (to support tail calls and additionally be flexibly defined irrespective of the host) meaning that to call WebAssembly Wasmtime goes through a trampoline. This trampoline is resopnsible for reading arguments off the stack, calling wasm with the appropriate ABI, and then storing the results back to the stack. </p>\n<p>Perhaps the biggest win we could do for performance would be to get <code>setjmp</code> out of the picture. That can in theory be done by moving it directly into <code>array_to_wasm_trampoline</code>, basically making Cranelift responsible for the setjmp. That would require a fair bit of design and work in Cranelift, however. If we were to do that it would remove the C entirely and much more could be inlined.</p>\n<p>The next biggest win after that I'm not sure since I've always assumed that's the lowest hanging fruit. We might be able to shift more responsibilities to the tramopline as well to speed things up but it really depends.</p>\n<hr>\n<p>I can also say though that while we've tried to optimize this as much as possible in the past we've generally never had a use case that requires low-overhead function calls. That's meant that some of these meatier optimizations have been tough to prioritize relative to other things to do. If you're use case requires function calls to be faster though I'd love to work with you to help identify the hot spots and, if you're willing, help you craft PRs to optimize things. That being said the main change I think will speed things up, calling <code>setjmp</code> in Cranelift, is likely a very nontrivial thing to take on and may not be a good starter PR</p>",
+        "id": 471951026,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1726932597
+    },
+    {
+        "content": "<p>Thank you for the detailed explanation. I think right now in my use case the overhead can be amortized by reusing wasm memory that stores input data (so that we don't need calls to the exported alloc and dealloc for each computation), or increasing the data size for one call. I will get back if I found those tricks do not work and need to optimize wasmtime like you proposed.</p>",
+        "id": 471997894,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726974014
+    }
+]

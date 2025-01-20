@@ -1,0 +1,103 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / Issue #2640 Runtime stats for Wasmtime · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232640.20Runtime.20stats.20for.20Wasmtime.html">wasmtime / Issue #2640 Runtime stats for Wasmtime</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="225370803"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232640%20Runtime%20stats%20for%20Wasmtime/near/225370803" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232640.20Runtime.20stats.20for.20Wasmtime.html#225370803">(Feb 05 2021 at 23:17)</a>:</h4>
+<p>acfoltzer opened <a href="https://github.com/bytecodealliance/wasmtime/issues/2640">Issue #2640</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>To use Wasmtime in production, we will need to gather statistics from the runtime to feed into monitoring systems.</p>
+<p>We have inserted some metrics in a private fork of Lucet in order to support our current production use, and while this has proven useful, we would like to have first-class, open source support for such things in Wasmtime.</p>
+<h4>Benefit</h4>
+<p>The ability to monitor the runtime performance and load of Wasmtime is a requirement for it to be used in many production environments.</p>
+<h4>Implementation</h4>
+<p>I'll describe the stats we gather from Lucet. I'm less sure how best to fit them into the Wasmtime API, but I have described the kind of callback interface I would like to provide as a client of Wasmtime.</p>
+<p>The ones in bold are ones that we've found very important for monitoring platform health and performance. The others would be nice to have, but less critical. This list also shouldn't rule out other opportunities for stat gathering, this is solely what we've found useful in Lucet.</p>
+<h5>Counters</h5>
+<p>Sometimes we just need to count how many times something has happened. For Lucet, this is a handful of internal error conditions that we are able to handle without presenting an error to the end user, but want to keep track of internally nonetheless. There is certainly room for more of these:</p>
+<ul>
+<li><strong>Number of retries needed on <code>userfaultfd</code> operations due to <code>ENOENT</code> errors</strong></li>
+<li><strong>Number of <code>EEXIST</code> errors that the <code>userfaultfd</code> fault handler saw and tracked</strong></li>
+<li><strong>Number of times the <code>userfaultfd</code> fault handler got a read event on its file descriptor, but was not able to read an event.</strong></li>
+</ul>
+<p>This would be a simple callback per event:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">record_event</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Bump a counter</span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<h5>Gauges and timers</h5>
+<p>For measuring operations with distinct start and end points, we use gauges and timing histograms. A gauge is a number that, if incremented, usually has a corresponding decrement at some point in the future. A timer adds a timing component to this, so that the time between the beginning and end of an operation can be measured. These could be implemented with a callback that returns an RAII-style guard:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">start_operation</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Guard</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Increment gauge</span>
+<span class="w">    </span><span class="c1">// Create `Guard` with initial timestamp</span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">struct</span> <span class="nc">Guard</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Guard</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">finish</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// The operation finished normally, so record timing information</span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="nb">Drop</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Guard</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">drop</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Decrement gauge</span>
+<span class="w">        </span><span class="c1">// Optionally record timing information</span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>Using the drop for the gauge provides some assurance that the gauge remains accurate even if an error occurs between the start and end of an operation. For the timing information, though, we do not necessarily want the timing of errors to be recorded, so having an explicit <code>finish</code> method lets us know that the operation was successful.</p>
+<p>In Lucet we currently use gauges and timers to measure:</p>
+<ul>
+<li><strong>Evaluating a future on behalf of a Wasm program (similarly to <a href="https://github.com/bytecodealliance/rfcs/pull/2">RFC 2</a>)</strong></li>
+<li><strong>Instantiating a module (setting up memory protections, copying in initial heap values)</strong></li>
+<li><strong>Freeing an instance (resetting memory protections, freeing other resources)</strong></li>
+<li>Expanding a Wasm heap on behalf of an instance</li>
+<li>Acquiring an instance slot from a memory region</li>
+<li>Returning a freed instance slot to a region</li>
+</ul>
+<h4>Alternatives</h4>
+<p>Most of the stats we gather for production are taken from outside the boundaries of the Lucet runtime API. To the extent that these operations can be exposed as discrete steps that the library client could measure them, we do not need to add invasive stats interfaces. The stats described here are the ones where in Lucet a significant API refactoring would be required to expose as discrete measurable operations, and would potentially be undesirable for safety or ergonomics.</p>
+<p>Instead of a callback-based approach, we could maintain stats internally within Wasmtime and let them be queried by the embedding application. This would put more of a maintenance and design burden on Wasmtime, however, and would limit the flexibility of the client's stat-gathering interfaces.</p>
+</blockquote>
+
+
+
+<a name="225371371"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232640%20Runtime%20stats%20for%20Wasmtime/near/225371371" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232640.20Runtime.20stats.20for.20Wasmtime.html#225371371">(Feb 05 2021 at 23:25)</a>:</h4>
+<p>peterhuene <a href="https://github.com/bytecodealliance/wasmtime/issues/2640#issuecomment-774342066">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2640">Issue #2640</a>:</p>
+<blockquote>
+<p>Have we looked at the <a href="https://github.com/metrics-rs/metrics">metrics crate</a> as a possible way to generically instrument <code>wasmtime</code> and <code>wasmtime-runtime</code>?</p>
+</blockquote>
+
+
+
+<a name="225371449"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232640%20Runtime%20stats%20for%20Wasmtime/near/225371449" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232640.20Runtime.20stats.20for.20Wasmtime.html#225371449">(Feb 05 2021 at 23:27)</a>:</h4>
+<p>acfoltzer <a href="https://github.com/bytecodealliance/wasmtime/issues/2640#issuecomment-774342454">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2640">Issue #2640</a>:</p>
+<blockquote>
+<p>I did not know about that crate! That looks very interesting indeed</p>
+</blockquote>
+
+
+
+<a name="225371708"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232640%20Runtime%20stats%20for%20Wasmtime/near/225371708" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232640.20Runtime.20stats.20for.20Wasmtime.html#225371708">(Feb 05 2021 at 23:30)</a>:</h4>
+<p>acfoltzer <a href="https://github.com/bytecodealliance/wasmtime/issues/2640#issuecomment-774343724">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2640">Issue #2640</a>:</p>
+<blockquote>
+<p>It looks like <code>metrics</code> ticks many of the boxes for the requirements we have, but it doesn't appear to have an RAII interface for gauges. In practice we have found that to be _very_ useful to avoid missing decrements due to surprise control flow. Maybe they'd be open to an upstream contribution, though?</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

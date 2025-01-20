@@ -1,0 +1,157 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #3249 Cranelift: simplify opcode set by ... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html">wasmtime / issue #3249 Cranelift: simplify opcode set by ...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="250807695"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/250807695" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#250807695">(Aug 26 2021 at 17:16)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>In #3233 we discussed various simplifications we could perform to reduce the number of CLIF opcodes that exist. In general, we should strive for simplicity -- fewer opcodes mean less cost for every consumer of the IR -- as long as simplifications don't impose other overheads, such as unnecessary expansion and pattern-matching.</p>
+<p>The "flags"-related opcodes, such as <code>ifcmp</code> / <code>ffcmp</code>, <code>brif</code> / <code>brff</code>, <code>trapif</code> / <code>trapff</code>, and those that communicate carry/borrow flags via the full flags value, seem to be good candidates for removal. This is for at least a few reasons:</p>
+<ul>
+<li>A flag value behaves differently than most others in the IR, and as such, imposes complexity cost. For example, only one flag value may be live at a time. This constraint, enforced by the validator, is meant to allow the flags value to be directly lowered onto a machine's CPU flags register, but our backends no longer work this way. For another example, a flag value cannot be stored/loaded to/from memory.</li>
+<li>The flags do not have a well-defined value but rather serve as a sort of opaque connection between producer (e.g., a compare) and consumer (e.g., a branch). For example, a bitcast/raw-bitcast from a flag value to an integer is undefined (and disallowed by the validator).</li>
+<li>There is redundancy in the instruction set, as some conditions can <em>also</em> be materialized as bools. For example, we have both <code>iadd_carry</code>, which produces the carry flag as a bool, and <code>iadd_ifcout</code>, which produces a flags value with the carry embedded in it.</li>
+</ul>
+<p>With better pattern-matching in the backends (both as they stand today and potentially with a DSL to help as proposed in <a href="https://github.com/bytecodealliance/rfcs/issues/15">bytecodealliance/rfcs#15</a>), it is less important for the CLIF to directly correspond to machine code; we can pattern-match a producer and consumer (e.g. a compare and a branch) that communicate via a <code>b1</code> (bool) just as well as we can those that communicate via opaque flags values.</p>
+<p>Thus, we should look into removing all uses of "flags" values, instead consuming the flags where they are produced to generate a bool condition as appropriate.</p>
+<p>One downside of this approach is that we cannot directly express reuse of flags for more than one condition (e.g. <code>ifcmp</code> then multiple <code>trueif</code>s with multiple flag conditions). Potentially we could instead pattern-match on multiple compare instructions with the same arguments and merge them instead, so e.g. <code>icmp ge v0, v1</code> and <code>icmp eq v0, v1</code> become a comopare-setcc-setcc three-instruction sequence.</p>
+<p>cc @abrown @afonso360 @bjorn3 from earlier discussion</p>
+</blockquote>
+
+
+
+<a name="250809964"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/250809964" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#250809964">(Aug 26 2021 at 17:32)</a>:</h4>
+<p>sunfishcode <a href="https://github.com/bytecodealliance/wasmtime/issues/3249#issuecomment-906604881">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>A consideration here is that there's only one flags register and it's expensive to store and load, at least on x86. With a special flags type, it's easy for things like gvn and licm to "do the right thing" and avoid breaking up compare+branch patterns and inducing flags spills/reloads which are usually much more expensive than computing them redundantly. And, the constraints on the flags type, that at most one value be live at a time, and that it not be live across instructions which might clobber it, mean that the backend doesn't need code for spilling and restoring flags values.<br>
+</p>
+</blockquote>
+
+
+
+<a name="250811696"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/250811696" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#250811696">(Aug 26 2021 at 17:44)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/3249#issuecomment-906613037">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>That's a good point! The approach that we use today is to recompute the compare wherever we need it; so the compare always comes just before its use in the final machine code, by construction and without spills/reloads. I think we see the equivalent of this problem though when we do the pattern-matching, in that if we can't look back far enough (if the compare has been hoisted way up) then we just error out -- so actually, we are relying on the validator's single-flags-live constraint for that too, now that I think about it (with the constraint in place we can never hit the panic).</p>
+<p>I was about to propose all-in-one ("compare+branch") instructions -- actually I think we already have bricmp, but we'd want the same for <code>trueif</code>, <code>selectif</code>, <code>trapif</code>, ... -- but then this gives us an unfortunate O(n^2) explosion of all producers * all consumers. Essentially the single-flags-live constraint is a way of joining the two halves in a way that they're factored, but can't stray too far away.</p>
+<p>Needs more thought...</p>
+</blockquote>
+
+
+
+<a name="250812337"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/250812337" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#250812337">(Aug 26 2021 at 17:49)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/3249#issuecomment-906616084">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>A bit of refinement of the above: if we can't look back far enough to see a <em>bool</em> condition, the worst that happens is that we materialize it (<code>setcc</code> on x86, <code>cset</code> on aarch64) and then use that later. The panic-if-we-can't-look-back-far-enough case specifically is for matching flags producers with consumers (e.g. <code>ifcmp</code> + <code>brif</code>).</p>
+<p>So I could see a design where we (i) standardize on bools, (ii) have some notion of "cheap to recompute, expensive to keep value live" that inhibits LICM / GVN on <code>icmp</code>, <code>fcmp</code>, <code>iadd_carry</code>, and friends, and (iii) hit the happy path most of the time in matching the bool producer to consumer. This seems like an OK compromise between IR semantics/simplicity and performance. Thoughts?</p>
+</blockquote>
+
+
+
+<a name="250819579"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/250819579" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#250819579">(Aug 26 2021 at 18:40)</a>:</h4>
+<p>sunfishcode <a href="https://github.com/bytecodealliance/wasmtime/issues/3249#issuecomment-906651027">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>At a high level, that sounds reasonable to me :-).</p>
+</blockquote>
+
+
+
+<a name="251553195"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/251553195" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#251553195">(Sep 01 2021 at 12:59)</a>:</h4>
+<p>sparker-arm <a href="https://github.com/bytecodealliance/wasmtime/issues/3249#issuecomment-910259729">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>+1 to standardizing on bools, as they're not hard to materialize into a register and it makes the IR much cleaner. Also, with existing nodes for min/max and saturating arithmetic, I think that a lot of important cases where the producer and consumer could be, unfortunately, separated have been negated.</p>
+</blockquote>
+
+
+
+<a name="254145821"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/254145821" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#254145821">(Sep 21 2021 at 02:08)</a>:</h4>
+<p>chc4 <a href="https://github.com/bytecodealliance/wasmtime/issues/3249#issuecomment-923526364">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>I'm writing a dynamic recompilation engine targetting Cranelift. For part of that, it requires tracking processor flags for proper lifting, so that e.g. <code>add x, y; jz ...</code> works correctly. This is technically representational in Cranelift (though doesn't currently work, see <a href="https://github.com/bytecodealliance/wasmtime/issues/2860#issuecomment-922574641">https://github.com/bytecodealliance/wasmtime/issues/2860#issuecomment-922574641</a>), but wouldn't map to the proposed reduced instruction set; the explicit carry-out B1 is only the CF flag, and so doesn't allow a way for me to directly wire other processor flags (ZF, OF, PF) from producers to consumers.</p>
+</blockquote>
+
+
+
+<a name="254152397"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/254152397" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#254152397">(Sep 21 2021 at 03:58)</a>:</h4>
+<p>chc4 edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/3249#issuecomment-923526364">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>I'm writing a dynamic recompilation engine targetting Cranelift. For part of that, it requires tracking processor flags for proper lifting, so that e.g. <code>add x, y; jz ...</code> works correctly. This is technically representational in Cranelift (though doesn't currently work, see <a href="https://github.com/bytecodealliance/wasmtime/issues/2860#issuecomment-922574641">https://github.com/bytecodealliance/wasmtime/issues/2860#issuecomment-922574641</a>), but wouldn't map to the proposed reduced instruction set; the explicit carry-out B1 is only the CF flag, and so doesn't allow a way for me to directly wire other processor flags (ZF, OF, PF) from producers to consumers.</p>
+<p>B1 flags may work here if I can just emit "manual" processor flags recomputation, that are removed by Cranelift in cases where the values can be pulled from an internal live iflags value at selection time; some kind of <code>zf(val)</code> /<code>cf(x, y)</code> intrinsic might be better for that, so that the flag recomputation is a clear candidate for live range inclusion?</p>
+</blockquote>
+
+
+
+<a name="255810070"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/255810070" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#255810070">(Oct 01 2021 at 21:28)</a>:</h4>
+<p>akirilov-arm labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>In #3233 we discussed various simplifications we could perform to reduce the number of CLIF opcodes that exist. In general, we should strive for simplicity -- fewer opcodes mean less cost for every consumer of the IR -- as long as simplifications don't impose other overheads, such as unnecessary expansion and pattern-matching.</p>
+<p>The "flags"-related opcodes, such as <code>ifcmp</code> / <code>ffcmp</code>, <code>brif</code> / <code>brff</code>, <code>trapif</code> / <code>trapff</code>, and those that communicate carry/borrow flags via the full flags value, seem to be good candidates for removal. This is for at least a few reasons:</p>
+<ul>
+<li>A flag value behaves differently than most others in the IR, and as such, imposes complexity cost. For example, only one flag value may be live at a time. This constraint, enforced by the validator, is meant to allow the flags value to be directly lowered onto a machine's CPU flags register, but our backends no longer work this way. For another example, a flag value cannot be stored/loaded to/from memory.</li>
+<li>The flags do not have a well-defined value but rather serve as a sort of opaque connection between producer (e.g., a compare) and consumer (e.g., a branch). For example, a bitcast/raw-bitcast from a flag value to an integer is undefined (and disallowed by the validator).</li>
+<li>There is redundancy in the instruction set, as some conditions can <em>also</em> be materialized as bools. For example, we have both <code>iadd_carry</code>, which produces the carry flag as a bool, and <code>iadd_ifcout</code>, which produces a flags value with the carry embedded in it.</li>
+</ul>
+<p>With better pattern-matching in the backends (both as they stand today and potentially with a DSL to help as proposed in <a href="https://github.com/bytecodealliance/rfcs/issues/15">bytecodealliance/rfcs#15</a>), it is less important for the CLIF to directly correspond to machine code; we can pattern-match a producer and consumer (e.g. a compare and a branch) that communicate via a <code>b1</code> (bool) just as well as we can those that communicate via opaque flags values.</p>
+<p>Thus, we should look into removing all uses of "flags" values, instead consuming the flags where they are produced to generate a bool condition as appropriate.</p>
+<p>One downside of this approach is that we cannot directly express reuse of flags for more than one condition (e.g. <code>ifcmp</code> then multiple <code>trueif</code>s with multiple flag conditions). Potentially we could instead pattern-match on multiple compare instructions with the same arguments and merge them instead, so e.g. <code>icmp ge v0, v1</code> and <code>icmp eq v0, v1</code> become a comopare-setcc-setcc three-instruction sequence.</p>
+<p>cc @abrown @afonso360 @bjorn3 from earlier discussion</p>
+</blockquote>
+
+
+
+<a name="281211608"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/281211608" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#281211608">(May 04 2022 at 19:59)</a>:</h4>
+<p>cfallin labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>In #3233 we discussed various simplifications we could perform to reduce the number of CLIF opcodes that exist. In general, we should strive for simplicity -- fewer opcodes mean less cost for every consumer of the IR -- as long as simplifications don't impose other overheads, such as unnecessary expansion and pattern-matching.</p>
+<p>The "flags"-related opcodes, such as <code>ifcmp</code> / <code>ffcmp</code>, <code>brif</code> / <code>brff</code>, <code>trapif</code> / <code>trapff</code>, and those that communicate carry/borrow flags via the full flags value, seem to be good candidates for removal. This is for at least a few reasons:</p>
+<ul>
+<li>A flag value behaves differently than most others in the IR, and as such, imposes complexity cost. For example, only one flag value may be live at a time. This constraint, enforced by the validator, is meant to allow the flags value to be directly lowered onto a machine's CPU flags register, but our backends no longer work this way. For another example, a flag value cannot be stored/loaded to/from memory.</li>
+<li>The flags do not have a well-defined value but rather serve as a sort of opaque connection between producer (e.g., a compare) and consumer (e.g., a branch). For example, a bitcast/raw-bitcast from a flag value to an integer is undefined (and disallowed by the validator).</li>
+<li>There is redundancy in the instruction set, as some conditions can <em>also</em> be materialized as bools. For example, we have both <code>iadd_carry</code>, which produces the carry flag as a bool, and <code>iadd_ifcout</code>, which produces a flags value with the carry embedded in it.</li>
+</ul>
+<p>With better pattern-matching in the backends (both as they stand today and potentially with a DSL to help as proposed in <a href="https://github.com/bytecodealliance/rfcs/issues/15">bytecodealliance/rfcs#15</a>), it is less important for the CLIF to directly correspond to machine code; we can pattern-match a producer and consumer (e.g. a compare and a branch) that communicate via a <code>b1</code> (bool) just as well as we can those that communicate via opaque flags values.</p>
+<p>Thus, we should look into removing all uses of "flags" values, instead consuming the flags where they are produced to generate a bool condition as appropriate.</p>
+<p>One downside of this approach is that we cannot directly express reuse of flags for more than one condition (e.g. <code>ifcmp</code> then multiple <code>trueif</code>s with multiple flag conditions). Potentially we could instead pattern-match on multiple compare instructions with the same arguments and merge them instead, so e.g. <code>icmp ge v0, v1</code> and <code>icmp eq v0, v1</code> become a comopare-setcc-setcc three-instruction sequence.</p>
+<p>cc @abrown @afonso360 @bjorn3 from earlier discussion</p>
+</blockquote>
+
+
+
+<a name="281211614"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233249%20Cranelift%3A%20simplify%20opcode%20set%20by%20.../near/281211614" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233249.20Cranelift.3A.20simplify.20opcode.20set.20by.20.2E.2E.2E.html#281211614">(May 04 2022 at 19:59)</a>:</h4>
+<p>cfallin labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/3249">issue #3249</a>:</p>
+<blockquote>
+<p>In #3233 we discussed various simplifications we could perform to reduce the number of CLIF opcodes that exist. In general, we should strive for simplicity -- fewer opcodes mean less cost for every consumer of the IR -- as long as simplifications don't impose other overheads, such as unnecessary expansion and pattern-matching.</p>
+<p>The "flags"-related opcodes, such as <code>ifcmp</code> / <code>ffcmp</code>, <code>brif</code> / <code>brff</code>, <code>trapif</code> / <code>trapff</code>, and those that communicate carry/borrow flags via the full flags value, seem to be good candidates for removal. This is for at least a few reasons:</p>
+<ul>
+<li>A flag value behaves differently than most others in the IR, and as such, imposes complexity cost. For example, only one flag value may be live at a time. This constraint, enforced by the validator, is meant to allow the flags value to be directly lowered onto a machine's CPU flags register, but our backends no longer work this way. For another example, a flag value cannot be stored/loaded to/from memory.</li>
+<li>The flags do not have a well-defined value but rather serve as a sort of opaque connection between producer (e.g., a compare) and consumer (e.g., a branch). For example, a bitcast/raw-bitcast from a flag value to an integer is undefined (and disallowed by the validator).</li>
+<li>There is redundancy in the instruction set, as some conditions can <em>also</em> be materialized as bools. For example, we have both <code>iadd_carry</code>, which produces the carry flag as a bool, and <code>iadd_ifcout</code>, which produces a flags value with the carry embedded in it.</li>
+</ul>
+<p>With better pattern-matching in the backends (both as they stand today and potentially with a DSL to help as proposed in <a href="https://github.com/bytecodealliance/rfcs/issues/15">bytecodealliance/rfcs#15</a>), it is less important for the CLIF to directly correspond to machine code; we can pattern-match a producer and consumer (e.g. a compare and a branch) that communicate via a <code>b1</code> (bool) just as well as we can those that communicate via opaque flags values.</p>
+<p>Thus, we should look into removing all uses of "flags" values, instead consuming the flags where they are produced to generate a bool condition as appropriate.</p>
+<p>One downside of this approach is that we cannot directly express reuse of flags for more than one condition (e.g. <code>ifcmp</code> then multiple <code>trueif</code>s with multiple flag conditions). Potentially we could instead pattern-match on multiple compare instructions with the same arguments and merge them instead, so e.g. <code>icmp ge v0, v1</code> and <code>icmp eq v0, v1</code> become a comopare-setcc-setcc three-instruction sequence.</p>
+<p>cc @abrown @afonso360 @bjorn3 from earlier discussion</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

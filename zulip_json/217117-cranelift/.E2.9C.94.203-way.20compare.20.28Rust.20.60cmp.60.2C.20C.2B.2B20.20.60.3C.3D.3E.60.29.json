@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>I've been looking at how Rust emits <code>Ord::cmp</code> for primitives, and I think I can turn some of that exploration into a nice Cranelift PR, thanks to ISLE.  Basically, Rust ends up with lots of code that could benefit from roughly</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">(</span><span class=\"n\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">simplify</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">icmp</span><span class=\"w\"> </span><span class=\"n\">ty</span><span class=\"w\"> </span><span class=\"n\">eq</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">spaceship</span><span class=\"w\"> </span><span class=\"n\">ty</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">)))</span>\n<span class=\"w\">  </span><span class=\"p\">(</span><span class=\"n\">icmp</span><span class=\"w\"> </span><span class=\"n\">ty</span><span class=\"w\"> </span><span class=\"n\">eq</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">))</span>\n</code></pre></div>\n<p>(And similarly for <code>(a &lt;=&gt; b) == 1</code> and <code>(a &lt;=&gt; b) &gt; 0</code> and such.)</p>\n<p>I wanted to check in for approach feedback before just showing up with something, though :)</p>\n<ol>\n<li>\n<p>Would (an) instruction(s) for this be reasonable?  It needs signed and unsigned versions, so my first thought was to propose a new IntCC, but that looks like it's probably a horrible idea, since <a href=\"https://github.com/bytecodealliance/wasmtime/blob/cd97c9f14713d81de5453fb9861319e78a761432/cranelift/codegen/src/opts/icmp.isle#L36-L43\">various things</a> assume that <code>icmp</code> returns <code>{0, 1}</code>, and updating all those places doesn't seem like a net win.  Strawman: add <code>scmp3</code> and <code>ucmp3</code> instructions that work over integer types and return <code>{-1, 0, 1}</code> in <code>I8</code>.</p>\n</li>\n<li>\n<p>Alternatively, would it be better to start with making this a ISLE-only thing?  I don't really know what's possible, but having it just be something that a <code>simplify</code> rule can generate, rather than a \"real\" instruction, would probably be fine.  This wants to have a couple dozen <code>simplify</code> patterns to normalize all the equivalent ways it can be written -- Rust and Clang use different ones today, for example -- whether or not there's an instruction to emit for it.</p>\n</li>\n<li>\n<p>Is there a way to add a fallback-like <code>lower</code> rule so this can still emit something reasonable without me needing to become an expert in all the instruction sets?</p>\n</li>\n</ol>\n<p>Do also let me know if I'm thinking about this all wrong; I'm very much a noob here <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 404501312,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1701125109
+    },
+    {
+        "content": "<p>Do you have examples of codegen you're trying to achieve? E.g. snippets of corresponding Rust-to-x86 or something like that? That might help inform how best to model this in CLIF. Depending on the instructions needed if they're fancy enough a new CLIF instruction is probably the way to go, but if it's \"just a new pattern\" of existing clif instructions then your (2) route is probably the way to go (with rules per-backend as-opposed to in the middle-end optimizer where <code>simplify</code> comes from)</p>\n<p>For (3) the way things work right now is that ISLE rules have priorities and they may or not match a term. Given a term (e.g. what you're lowering) you can think of it as first finding all matching rules and then using the highest priority rule to execute the lowering. This means that a fallback can be implemented by having a less-general low-priority rule. For example there's a rule that lowers <code>icmp</code> but probably isn't hit because there's another rule for <code>(br (icmp ...))</code> (e.g. branch-on-comparison). It's there though if it's needed.</p>",
+        "id": 404511461,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701130857
+    },
+    {
+        "content": "<p>Well today it's <a href=\"https://rust.godbolt.org/z/1sv8vcr61\">a dozen MIR statements across multiple blocks</a> for a single <code>u32::cmp</code>, which is part of the problem, but I'm <a href=\"https://github.com/rust-lang/rust/pull/118310/files#diff-16dd4b93d4e08697ce843f5035afbc732813c40c0f0f8f50c6844834a2be7c98R51-R56\">working on changing that</a>.</p>\n<p>I guess I could treat <code>(sub (icmp gt x y) (icmp lt x y))</code> as the canonical form?  So simplify other <code>select</code>-based patterns into that one, and write the simplifications against that as a canonical form.  That probably makes sense as a starting point as lower-impact than an instruction, and it'd be easy enough to change that to an instruction later if it turns out to be better.</p>\n<p>Then that's pretty good on riscv already (<code>sltu</code>+<code>sltu</code>+<code>sub</code>), and I could special-case x86 (<code>cmp</code>+<code>seta</code>+<code>sbb</code> for unsigned) and aarch64 (<code>cmp</code>+<code>cset</code>+<code>csinv</code>) if the existing flags patterns don't catch it.</p>\n<p>Do you have docs for the expected canonical forms in simplifications I should follow or add to?  &lt;<a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/opts/README.md\">https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/src/opts/README.md</a>&gt; didn't mention anything.  (I'm thinking of things like how LLVM canonicalizes <code>a &lt;= C</code> into <code>a &lt; (C+1)</code> and such, to then not have to handle other IntCCs in other simplification rules.)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://rust.godbolt.org/z/1sv8vcr61\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/4bf336f7597f851df0732b12f8d4b7b383508ec8\\/68747470733a2f2f6769746875622e636f6d2f636f6d70696c65722d6578706c6f7265722f696e6672612f626c6f622f6d61696e2f6c6f676f2f66617669636f6e2e706e673f7261773d74727565)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://rust.godbolt.org/z/1sv8vcr61\" title=\"Compiler Explorer - Rust (rustc nightly)\">Compiler Explorer - Rust (rustc nightly)</a></div><div class=\"message_embed_description\">#![no_std]\n\ntype T = u32;\n#[no_mangle]\npub fn demo(x: T, y: T) -&gt; i8 {\n    Ord::cmp(&amp;x, &amp;y) as _\n}\n</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-lang/rust/pull/118310/files#diff-16dd4b93d4e08697ce843f5035afbc732813c40c0f0f8f50c6844834a2be7c98R51-R56\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/b5f0ca563b66bb6cd9d19439f616c5cfabce8d77\\/68747470733a2f2f617661746172732e67697468756275736572636f6e74656e742e636f6d2f752f31383532363238383f733d34303026763d34)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-lang/rust/pull/118310/files#diff-16dd4b93d4e08697ce843f5035afbc732813c40c0f0f8f50c6844834a2be7c98R51-R56\" title=\"Add `Ord::cmp` for primitives as a `BinOp` in MIR by scottmcm · Pull Request #118310 · rust-lang/rust\">Add `Ord::cmp` for primitives as a `BinOp` in MIR by scottmcm · Pull Request #118310 · rust-lang/rust</a></div><div class=\"message_embed_description\">There are dozens of reasonable ways to implement Ord::cmp for integers using comparison, bit-ops, and branches.  Those differences are irrelevant at the rust level, however, so we can make things b...</div></div></div>",
+        "id": 404516605,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1701133133
+    },
+    {
+        "content": "<p>ah ok in that case using sub(icmp, icmp) sounds reasonable to me - one perhaps important note is that pattern matching in Cranelift with ISLE doesn't always work well when values span basic blocks, so cutting down the MIR to get this to trigger will probably be required. </p>\n<p>That being said, a bit of extra background is that the egraph passes in the <code>opts</code> folder are all optional. Without optimizations for example Cranelift doesn't execute anything there. This means that Cranelift backends can't rely on a canonical form as-produced by the egraph-based optimizations, so as long as the egraph optimizations produce valid CLIF you're good to go, backends should be able to handle everything thrown at them at this time (otherwise that's a bug)</p>\n<p>So one thing you can do is that if rustc produces a \"messy basic block\" then you can rely on egraph optimizations to clean up a good chunk of it before it reaches backends (when optimizations are enabled).</p>",
+        "id": 404519375,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701134363
+    },
+    {
+        "content": "<p>So given all that I'd probably (a) try to get rustc to get into a single basic block, (b) edit egraph optimizations as necessary to produce \"ideal clif\" for your use case, and then (c) add extra lowering rules to this backend for this pattern to generate the code you'd expect</p>",
+        "id": 404519429,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701134398
+    },
+    {
+        "content": "<p>alternatively, if you're extra ambitious, one thing missing in Cranelift right now is an optimization pass that works with basic blocks. For example Cranelift doesn't merge basic blocks or do anything like jump threading, and that'd remove the need for (a), but I suspect it'd also require more investment than updating rustc</p>",
+        "id": 404519558,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701134461
+    },
+    {
+        "content": "<p>Sounds good!  Thanks for the advice.</p>\n<p>CFG simplification in Cranelift does sound like a fun project, but I have way too many pies in the oven already to take on something that size <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span>  For a specific thing in libcore, just changing rustc to not be so verbose is <em>way</em> easier, yeah.</p>",
+        "id": 404523013,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1701136241
+    },
+    {
+        "content": "<p>Thanks for tracking down the merge queue problem this hit, <span class=\"user-mention silent\" data-user-id=\"253994\">Alex Crichton</span>!  I'm so relieved that it wasn't some subtle problem in one of my patterns <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>\n<p>EDIT: Oh, apparently I can't resolve this topic.  Dunno what the policy here is; feel free to leave it alone or resolve as you see fit.</p>",
+        "id": 406597825,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1701973392
+    },
+    {
+        "content": "<p>nah yeah just blowing the stack by accident with soem new rules</p>",
+        "id": 406598834,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701973798
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"234973\">Till Schneidereit</span> has marked this topic as resolved.</p>",
+        "id": 406601962,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1701974967
+    }
+]

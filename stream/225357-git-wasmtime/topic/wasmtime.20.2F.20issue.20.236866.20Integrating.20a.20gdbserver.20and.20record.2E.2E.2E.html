@@ -1,0 +1,125 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #6866 Integrating a gdbserver and record... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html">wasmtime / issue #6866 Integrating a gdbserver and record...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="386259250"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386259250" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386259250">(Aug 20 2023 at 20:59)</a>:</h4>
+<p>DrRuhe opened <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<ul>
+<li>let wasmtime expose a gdbserver</li>
+<li>Also allow record/replay out-of-the-box to support reversible debugging.</li>
+</ul>
+<h4>Implementation</h4>
+<p>I have some ideas on how this might be doable, but I am not familiar enough with wasmtime to make an accurate assessment.</p>
+<ul>
+<li>adding a gdbserver could be done via <a href="https://docs.rs/gdbstub/0.6.6/gdbstub/">gdbstub</a> </li>
+<li>recording would require storing the results from wasi calls and reinstating the runtime state on replay.</li>
+</ul>
+<p>I would be interested in implementing this, however, due to the complexity of such a feature paired with the deep understanding required for successful implementation, I would need guidance/mentoring. </p>
+<h4>Benefit</h4>
+<ul>
+<li>the current debugging has the wasmtime runtime "in the way" of the debugger. </li>
+<li>recording in the wasm-runtime level allows for optimizations not possible when using <code>rr record wasmtime run ...</code> </li>
+<li>adding reversible debugging capability to wasmtime would also indirectly add the capability to every language that can compile to wasm</li>
+</ul>
+<h4>Alternatives</h4>
+<p>Improve the rr-records-wasmtime-running-wasm story directly.<br>
+</p>
+</blockquote>
+
+
+
+<a name="386436427"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386436427" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386436427">(Aug 21 2023 at 16:51)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/6866#issuecomment-1686686172">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<p>@DrRuhe thanks for writing this up and registering interest -- we've definitely talked about this idea internally before, though I can't find any related issues on file at the moment; now we do!</p>
+<p>Personally I think this would be a hugely compelling use-case for Wasm's determinism, and very useful. The main trick is in what to record. In particular, one needs to understand the semantics of hostcalls and their memory side-effects. Consider the WASI <code>fd_read</code> call: it provides pointers in which the runtime is to place the data it reads; a recording for later replay would need to record that memory update as well, and replay it at the right time.</p>
+<p>(A lot of this thinking was done in the context of a "multiprocess wasmtime", which is something else a few of us have discussed: if the hostcall implementation lives in a separate process than the guest code, one has all of the same problems in capturing the precise memory reads/writes, in that case to marshal across the boundary.)</p>
+<p>There are at least three ways of doing this that I can think of:</p>
+<ul>
+<li>Require annotations on imports, and disallow direct access to an exported memory otherwise. The annotations would need to be in some sort of DSL: "writes memory at ptr <code>arg0</code> up to length <code>arg1</code>", with more complex variants for e.g. <code>iovec</code>s.</li>
+<li>Use some sort of virtual-memory tricks to capture a hostcall's updates to guest memory. (<code>mprotect</code> the whole memory read-only on a call out to another module or the host; any pagefault from a write allows the page to be written but then copies the whole page into the recording trace before return to guest.) Would work, but very slow.</li>
+<li>Use another mechanism for calls across modules / into the host that doesn't require raw access to shared memory from handwritten code.</li>
+</ul>
+<p>The last option is the most compelling given the future use of the component model: the IDL (WIT) describes calls with pure value semantics (pass this buffer in, return that buffer) and this would allow us to accurately capture everything in the recording without any additional code in the hostcall implementation. For that reason, it probably makes sense to wait until e.g. WASI is imported via component-level APIs, and then build this recording feature for modules that don't export their memory otherwise.</p>
+<p>(Completely separate discussion: true parallelism and the resulting nondeterminism. Probably we'd have to disallow <code>wasi-threads</code> in modules being recorded, or else use something like token-passing on synchronization edges (like <a href="https://dl.acm.org/doi/10.1145/1508244.1508255">this work</a>) for full determinism.)</p>
+</blockquote>
+
+
+
+<a name="386436990"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386436990" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386436990">(Aug 21 2023 at 16:55)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/6866#issuecomment-1686691224">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<p>Ah, and actually there's a fourth way that @tekknolagi came up with, and told me about: one could do a Wasm-to-Wasm transform that rewrites a module to have <em>two</em> memories for every original memory (or at least the exported ones); every store writes to both the original and "shadow", while every load loads from both and compares. If they differ, emit a recording-trace record and then update the shadow. (Basically we're tracking what state the replay would have, and emitting diffs from it.) This allows for arbitrary external updates to happen to the memory, at the cost of 2x memory overhead and slowdown on every load/store. I do very much like its generality and the fact it would work without runtime involvement, though. @tekknolagi may or may not be building this at some point, I'm not sure; Max, please do let us know if you do!</p>
+</blockquote>
+
+
+
+<a name="386447759"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386447759" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386447759">(Aug 21 2023 at 18:06)</a>:</h4>
+<p>tekknolagi <a href="https://github.com/bytecodealliance/wasmtime/issues/6866#issuecomment-1686793669">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<p>This is not currently under development---there are some other projects I am working on right now---but may happen later! I'll add you to the list of interested parties :P </p>
+</blockquote>
+
+
+
+<a name="386448016"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386448016" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386448016">(Aug 21 2023 at 18:08)</a>:</h4>
+<p>tekknolagi <a href="https://github.com/bytecodealliance/wasmtime/issues/6866#issuecomment-1686795824">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<p>Also sorry to be nitpicky, but I did not come up with it. I don't remember whose idea it was in the email thread, but not mine</p>
+</blockquote>
+
+
+
+<a name="386451993"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386451993" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386451993">(Aug 21 2023 at 18:35)</a>:</h4>
+<p>cfallin edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6866#issuecomment-1686691224">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<p>Ah, and actually there's a fourth way that @tekknolagi &lt;strike&gt;came up with, and&lt;/strike&gt; told me about: one could do a Wasm-to-Wasm transform that rewrites a module to have <em>two</em> memories for every original memory (or at least the exported ones); every store writes to both the original and "shadow", while every load loads from both and compares. If they differ, emit a recording-trace record and then update the shadow. (Basically we're tracking what state the replay would have, and emitting diffs from it.) This allows for arbitrary external updates to happen to the memory, at the cost of 2x memory overhead and slowdown on every load/store. I do very much like its generality and the fact it would work without runtime involvement, though. @tekknolagi may or may not be building this at some point, I'm not sure; Max, please do let us know if you do!</p>
+</blockquote>
+
+
+
+<a name="386464180"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386464180" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386464180">(Aug 21 2023 at 20:03)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/6866#issuecomment-1686963870">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<p>FYI, there is a forthcoming RFC for Wasmtime's debugging story and how incremental milestones along the way from where we are now to where we want to end up eventually. It will touch on core dumps, live debugging, record and replay, debugging protocols and servers, and all that stuff. Will try and remember to cross post here when it is ready, but it probably doesn't hurt to watch the RFCs repo if you're particularly interested.</p>
+</blockquote>
+
+
+
+<a name="386464291"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386464291" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386464291">(Aug 21 2023 at 20:04)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/6866#issuecomment-1686965071">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<p>There is also the SIG-debugging group, if you are interested in participating in the design and implementation of Wasmtime's debugging story.</p>
+<p><a href="https://github.com/bytecodealliance/meetings/tree/main/SIG-Debugging">https://github.com/bytecodealliance/meetings/tree/main/SIG-Debugging</a></p>
+</blockquote>
+
+
+
+<a name="386950530"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236866%20Integrating%20a%20gdbserver%20and%20record.../near/386950530" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236866.20Integrating.20a.20gdbserver.20and.20record.2E.2E.2E.html#386950530">(Aug 23 2023 at 21:07)</a>:</h4>
+<p>DrRuhe <a href="https://github.com/bytecodealliance/wasmtime/issues/6866#issuecomment-1690640117">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6866">issue #6866</a>:</p>
+<blockquote>
+<p>Thanks for the pointers! I'll try to make it to the Debugging SIG Meeting.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

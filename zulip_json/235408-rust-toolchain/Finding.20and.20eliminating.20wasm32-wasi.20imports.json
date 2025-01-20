@@ -1,0 +1,476 @@
+[
+    {
+        "content": "<p>As someone who is trying to compile a rust crate to <code>wasm32-wasi</code> that has dependencies on C libs (QuickJS via rquickjs), how can I go about finding the reason that different WASI preview 1 imports are being pulled in?</p>\n<p>This risks being something that seems trivially obvious to some folks so to add extra context: I'm at the start of my rust journey and haven't played in compiled languages since a time when I had no idea what I was doing.</p>",
+        "id": 423478642,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708979619
+    },
+    {
+        "content": "<p>This unfortunately generally isn't easy AFAIK, you'd have to trace symbols backwards to some exported function or something in a table for example, and that's a pretty manual process.</p>\n<p>If you want zero imports you can use <code>wasm32-unknown-unknown</code>, though, but not all crate will compile for that target</p>",
+        "id": 423478971,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708979732
+    },
+    {
+        "content": "<p>I did try targeting <code>wasm32-unknown-unknown</code> but quickly discovered how far out of my depth I was. <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 423479140,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708979782
+    },
+    {
+        "content": "<p>Are you aware of any tools that might expose WASM call graphs in some ergonomic form?</p>",
+        "id": 423479212,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708979815
+    },
+    {
+        "content": "<p><code>twiggy</code> is the closest approximation that I can think of, but that's a \"theoretically this is possible\" kind of thing rather than \"here's the one liner to render a graphviz file\"</p>",
+        "id": 423479292,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708979849
+    },
+    {
+        "content": "<p><code>twiggy paths</code> looks super promising.</p>",
+        "id": 423479600,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708979966
+    },
+    {
+        "content": "<p>QuickJS's <code>os</code> module probably pulls in a lot of WASI stuff by way of <code>wasi-libc</code>: <a href=\"https://bellard.org/quickjs/quickjs.html#os-module\">https://bellard.org/quickjs/quickjs.html#os-module</a></p>",
+        "id": 423479794,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708980024
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> AFAICT, <code>rquickjs</code> shouldn't be pulling that in unless certain crate features are being used. I had he same question w/ <code>quickjs-wasm-rs</code> from the Javy team and I _know_ that it isn't pulling in the libc library.</p>",
+        "id": 423481116,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708980615
+    },
+    {
+        "content": "<p>Yeah, I don't think it's pulling in the libc os module: <a href=\"https://github.com/DelSkayn/rquickjs/blob/7029b70b75cf9220c16a1ce2768968f3b8bef6fc/sys/build.rs#L123-L134\">https://github.com/DelSkayn/rquickjs/blob/7029b70b75cf9220c16a1ce2768968f3b8bef6fc/sys/build.rs#L123-L134</a></p>",
+        "id": 423482292,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708981109
+    },
+    {
+        "content": "<p>Well I've gone down this rabbit-hole once again and seem to have found a couple plausible explanations, as described in these issues: </p>\n<ol>\n<li><a href=\"https://github.com/WebAssembly/wasi-sdk/issues/190\">https://github.com/WebAssembly/wasi-sdk/issues/190</a></li>\n<li><a href=\"https://github.com/WebAssembly/wasi-sdk/issues/220\">https://github.com/WebAssembly/wasi-sdk/issues/220</a></li>\n</ol>\n<p>As <span class=\"user-mention\" data-user-id=\"587520\">@Surma</span> found in the first, it seems that some nuance of the way C macros are defined in the <code>wasi-sdk</code> is forcing <code>NDEBUG</code> to be unset: <a href=\"https://github.com/WebAssembly/wasi-sdk/issues/190#issuecomment-914682467\">https://github.com/WebAssembly/wasi-sdk/issues/190#issuecomment-914682467</a> and then <code>assert()</code> resulting in this 'stong' reference to stdout that LTO isn't able to get rid of.</p>\n<p>I was able to avoid the imports by defining some stubs like the following: </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[no_mangle]</span>\n<span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"k\">extern</span><span class=\"w\"> </span><span class=\"s\">\"C\"</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">__stdio_write</span><span class=\"p\">(</span><span class=\"n\">ptr</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">len</span>: <span class=\"kt\">usize</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"mi\">0</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>(also for <code>__stdout_write</code>, <code>__stdio_seek</code> and <code>__stdio_close</code>)</p>\n<p>But these all end up becoming unnecessary and unwanted exports of the WASM binary. AFAICT, it's because of this: <a href=\"https://github.com/rust-lang/rust/issues/73958\">https://github.com/rust-lang/rust/issues/73958</a></p>\n<p>I'm a bit stumped for the time being on how I can put into place some of the findings from the first <code>wasi-sdk</code> issue.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasi-sdk/issues/190#issuecomment-914682467\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/b380733dcc0d559ae58edea0b40b3d7f5c70ae7c\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343264313264613232383032336363616532343030303565636432613536373335386364373936336338623634303332663339643539616664626330373432662f576562417373656d626c792f776173692d73646b2f6973737565732f313930)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasi-sdk/issues/190#issuecomment-914682467\" title=\"Avoid stdlib printing to stdout/stderr? · Issue #190 · WebAssembly/wasi-sdk\">Avoid stdlib printing to stdout/stderr? · Issue #190 · WebAssembly/wasi-sdk</a></div><div class=\"message_embed_description\">A very minimal code sample like this: #include &lt;memory&gt; int main() { auto a = std::shared_ptr&lt;int&gt;(new int(3)); return *a + 40; } compiled with WASI SDK like this: clang++ --target=wasm32-wasi -O3 ...</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-lang/rust/issues/73958\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/ef9dc0bd2adb901c38cf70821dc47a03166c6700\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316337633062306163613266333730333664323234613565373836353564333762336633663465663132346364393535313836653963323037323831313936332f727573742d6c616e672f727573742f6973737565732f3733393538)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-lang/rust/issues/73958\" title=\"Ability from the top-level of the compilation not to mark #[no_mangle] items exported from shared library · Issue #73958 · rust-lang/rust\">Ability from the top-level of the compilation not to mark #[no_mangle] items exported from shared library · Issue #73958 · rust-lang/rust</a></div><div class=\"message_embed_description\">Firefox currently builds all its Rust code into a static artifact called gkrust which is then statically linked, with cross-language LTO, with C++ artifacts to form the shippable libxul.so/dylib/dl...</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasi-sdk/issues/190\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/b380733dcc0d559ae58edea0b40b3d7f5c70ae7c\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343264313264613232383032336363616532343030303565636432613536373335386364373936336338623634303332663339643539616664626330373432662f576562417373656d626c792f776173692d73646b2f6973737565732f313930)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasi-sdk/issues/190\" title=\"Avoid stdlib printing to stdout/stderr? · Issue #190 · WebAssembly/wasi-sdk\">Avoid stdlib printing to stdout/stderr? · Issue #190 · WebAssembly/wasi-sdk</a></div><div class=\"message_embed_description\">A very minimal code sample like this: #include &lt;memory&gt; int main() { auto a = std::shared_ptr&lt;int&gt;(new int(3)); return *a + 40; } compiled with WASI SDK like this: clang++ --target=wasm32-wasi -O3 ...</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasi-sdk/issues/220\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/8cf7688333fdefed46c96d2f7f9c0ded96b760af\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f626432313263373038386361666430356136303064663465333430656463623163353138663339623139643862383339343435643934373565626166373232642f576562417373656d626c792f776173692d73646b2f6973737565732f323230)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasi-sdk/issues/220\" title=\"Using C++ string results in `fd_close`, `fd_seek` &amp; `fd_write`, even for BAREMETAL compile · Issue #220 · WebAssembly/wasi-sdk\">Using C++ string results in `fd_close`, `fd_seek` &amp; `fd_write`, even for BAREMETAL compile · Issue #220 · WebAssembly/wasi-sdk</a></div><div class=\"message_embed_description\">I am writing C++ code for the internet computer, and I am a bit stuck at the moment trying to use strings. I studied the discussion in this issue in great detail, and I made good progress after I e...</div></div></div>",
+        "id": 427937194,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1710944002
+    },
+    {
+        "content": "<p>It seems like <span class=\"user-mention\" data-user-id=\"498825\">@Sam Clegg</span> was pointing to <code>__stderr_used</code> as being some sort of strong reference preventing the LTO. I can see <code>__stderr_used</code> listed in <code>wasi-sdk/share/wasi-sysroot/share/wasm32-wasi/defined-symbols.txt</code> but no other mentions in the pre-built <code>wasi-sdk</code> package.</p>\n<p>Maybe that's what was meant by needing to rebuild the SDK from source. I'm out of my depth but will give that a spin next.</p>",
+        "id": 428039582,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1710982020
+    },
+    {
+        "content": "<p>I've found a sneaky call to <code>printf</code> in the subset of QuickJS I'm consuming but something sneaky is still pulling in stdout. I see the following in the generated function table: </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">$__stdio_write</span><span class=\"w\"> </span><span class=\"cp\">$__stdio_close</span><span class=\"w\"> </span><span class=\"cp\">$__stdout_write</span><span class=\"w\"> </span><span class=\"cp\">$__stdio_seek</span>\n</code></pre></div>\n<p>I can't figure out how to trace calls to those and perhaps nor can the linker.</p>",
+        "id": 428129149,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711027897
+    },
+    {
+        "content": "<p>Have you tried using e.g. <code>wasm-tools print</code> to inspect the generated Wasm file and find out which functions are calling those imports?</p>",
+        "id": 428129630,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1711028024
+    },
+    {
+        "content": "<p>That's how I've been doing most of my manual analysis. Those functions are never called directly, but I can't figure out if they might be called indirectly through <code>br_table</code> (if I'm even understanding wasi instructions correctly).</p>",
+        "id": 428130707,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711028291
+    },
+    {
+        "content": "<p>You could try adding <code>--trace-symbol=__stdio_write</code> to the linker flags; that can sometimes identify where the reference is coming from.</p>",
+        "id": 428131101,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711028399
+    },
+    {
+        "content": "<p>Hey <span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span>, sorry for the noob question but where would I put this flag? I have a gut feeling that this might be in the linking of the wasi sdk against one of quickjs's c files but not sure.</p>",
+        "id": 428131372,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711028472
+    },
+    {
+        "content": "<p>It depends on how the quickjs build works. If there's a Makefile involved, you might be able to add <code>-Wl,--trace-symbol=__stdio_write</code> to something like <code>LDFLAGS</code>.</p>",
+        "id": 428131691,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711028566
+    },
+    {
+        "content": "<p>If Rust is doing the linking, setting the env var <code>RUSTFLAGS='-C link-args=--trace-symbol=__stdio_write'</code></p>",
+        "id": 428132027,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711028654
+    },
+    {
+        "content": "<p>I'll try both! <span aria-label=\"goofy\" class=\"emoji emoji-1f92a\" role=\"img\" title=\"goofy\">:goofy:</span></p>",
+        "id": 428132283,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711028738
+    },
+    {
+        "content": "<p>Oh, and I always forget how to tell cargo to not swallow linker diagnostic output.</p>",
+        "id": 428132535,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711028804
+    },
+    {
+        "content": "<p>I'm running with <code>-vv</code> but I'm not seeing anything that looks like obvious traces</p>",
+        "id": 428132690,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711028848
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Bash\"><pre><span></span><code><span class=\"nv\">LDFLAGS</span><span class=\"o\">=</span><span class=\"s2\">\"-Wl,--trace-symbol=__stdio_write\"</span><span class=\"w\"> </span><span class=\"se\">\\</span>\n<span class=\"nv\">RUSTFLAGS</span><span class=\"o\">=</span><span class=\"s2\">\"-Zlocation-detail=none -C link-args=--trace-symbol=__stdio_write\"</span><span class=\"w\"> </span><span class=\"se\">\\</span>\n<span class=\"nv\">WASI_SDK</span><span class=\"o\">=</span><span class=\"s2\">\"</span><span class=\"k\">$(</span><span class=\"nb\">pwd</span><span class=\"k\">)</span><span class=\"s2\">/../wasi-sdk/build/wasi-sdk-21.0.0ga50a641f4b5a+m\"</span><span class=\"w\"> </span><span class=\"se\">\\</span>\n<span class=\"w\">  </span>cargo<span class=\"w\"> </span>+nightly<span class=\"w\"> </span>build<span class=\"w\"> </span>-Z<span class=\"w\"> </span>build-std<span class=\"o\">=</span>std,panic_abort<span class=\"w\"> </span>-Z<span class=\"w\"> </span>build-std-features<span class=\"o\">=</span>panic_immediate_abort<span class=\"w\"> </span>--target<span class=\"w\"> </span>wasm32-wasi<span class=\"w\"> </span>--release<span class=\"w\"> </span>-vv\n</code></pre></div>",
+        "id": 428132990,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711028932
+    },
+    {
+        "content": "<p>I'll try with a symbol that is legitimately being pulled</p>",
+        "id": 428133185,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711028983
+    },
+    {
+        "content": "<p>Ok, the full magic is <code>RUSTC_LOG=rustc_codegen_ssa::back::link=info RUSTFLAGS='-C link-args=-Wl,--trace-symbol=__stdio_write' cargo build</code></p>",
+        "id": 428133938,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711029169
+    },
+    {
+        "content": "<p>Also seems I had the wrong delimiter in RUSTFLAGS</p>",
+        "id": 428134139,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711029232
+    },
+    {
+        "content": "<p>Hrm, it's complaining with this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"o\">-</span><span class=\"w\">  </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">note</span>: <span class=\"nc\">rust</span><span class=\"o\">-</span><span class=\"n\">lld</span>: <span class=\"nc\">error</span>: <span class=\"nc\">unknown</span><span class=\"w\"> </span><span class=\"n\">argument</span>: <span class=\"o\">-</span><span class=\"n\">Wl</span><span class=\"p\">,</span><span class=\"o\">--</span><span class=\"n\">trace</span><span class=\"o\">-</span><span class=\"n\">symbol</span><span class=\"o\">=</span><span class=\"n\">__stdio_write</span>\n</code></pre></div>",
+        "id": 428134627,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711029359
+    },
+    {
+        "content": "<p>Ah, in that case, remove just the <code>-Wl,</code></p>",
+        "id": 428134754,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711029384
+    },
+    {
+        "content": "<p>(that's the flag needed when using <code>clang</code> as the \"linker\", which some things do)</p>",
+        "id": 428134922,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711029437
+    },
+    {
+        "content": "<p><span aria-label=\"boom\" class=\"emoji emoji-1f4a5\" role=\"img\" title=\"boom\">:boom:</span> we have liftoff. Here's what I'm seeing:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stderr</span>:\n\n<span class=\"nc\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stdout</span>:\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_write</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stdio_write</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdout_write</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__stdio_write</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_write</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stdio_write</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__stdio_write</span>\n</code></pre></div>",
+        "id": 428134960,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711029444
+    },
+    {
+        "content": "<p>So that must be indicative of it being unable to optimize it away from the <code>wasi-libc</code> <code>libc.a</code>?</p>",
+        "id": 428135320,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711029537
+    },
+    {
+        "content": "<p>The reference is coming from <code>stderr.o</code>, so maybe something is pulling in <code>stderr</code>. Try changing <code>__stdio_write</code> to <code>stderr</code></p>",
+        "id": 428135482,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711029588
+    },
+    {
+        "content": "<p>Ahh... meeting time. Will have to dive back in a bit later but big thanks <span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> and <span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span>.</p>\n<p>Now that you mention stderr, maybe it's back to the conclusions drawn in this comment: <a href=\"https://github.com/WebAssembly/wasi-sdk/issues/190#issuecomment-916783936\">https://github.com/WebAssembly/wasi-sdk/issues/190#issuecomment-916783936</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasi-sdk/issues/190#issuecomment-916783936\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/b380733dcc0d559ae58edea0b40b3d7f5c70ae7c\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343264313264613232383032336363616532343030303565636432613536373335386364373936336338623634303332663339643539616664626330373432662f576562417373656d626c792f776173692d73646b2f6973737565732f313930)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasi-sdk/issues/190#issuecomment-916783936\" title=\"Avoid stdlib printing to stdout/stderr? · Issue #190 · WebAssembly/wasi-sdk\">Avoid stdlib printing to stdout/stderr? · Issue #190 · WebAssembly/wasi-sdk</a></div><div class=\"message_embed_description\">A very minimal code sample like this: #include &lt;memory&gt; int main() { auto a = std::shared_ptr&lt;int&gt;(new int(3)); return *a + 40; } compiled with WASI SDK like this: clang++ --target=wasm32-wasi -O3 ...</div></div></div>",
+        "id": 428135845,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711029665
+    },
+    {
+        "content": "<p>That particular issue is specific to C++; is there C++ code in QuickJS?</p>",
+        "id": 428136950,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711029949
+    },
+    {
+        "content": "<p>Ah, gotcha. AFAICT it's 100% C.</p>",
+        "id": 428155242,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711034463
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stderr</span>:\n\n<span class=\"nc\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stdout</span>:\n<span class=\"p\">.</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">stderr</span>\n<span class=\"p\">.</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">stderr</span>\n</code></pre></div>",
+        "id": 428155560,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711034550
+    },
+    {
+        "content": "<p>Hmm, maybe also try <code>__stderr_FILE</code> or <code>__stderr_used</code></p>",
+        "id": 428155757,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711034610
+    },
+    {
+        "content": "<p>Both <code>stderr.c</code> and <code>stdout.c</code> in <code>wasi-libc</code> look very similar.</p>",
+        "id": 428155891,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711034642
+    },
+    {
+        "content": "<p><code>__stderr_used</code> gives: </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stderr</span>:\n\n<span class=\"nc\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stdout</span>:\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_exit</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stderr_used</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_exit</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stderr_used</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stderr_used</span>\n</code></pre></div>",
+        "id": 428162442,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711036430
+    },
+    {
+        "content": "<p>And <code>__stderr_FILE</code>: </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stderr</span>:\n\n<span class=\"nc\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stdout</span>:\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stderr_FILE</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">vfprintf</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__stderr_FILE</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stderr_FILE</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">strtod</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__stderr_FILE</span>\n</code></pre></div>",
+        "id": 428162669,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711036483
+    },
+    {
+        "content": "<p>Quick Q: are there any <code>assert</code>s in the codebase? That can pull in stderr. Compiling with <code>-DNDEBUG</code> can disable that.</p>",
+        "id": 428162730,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711036503
+    },
+    {
+        "content": "<p>Hrm, why does <code>strtod.o</code> reference <code>__stderr_FILE</code>?</p>",
+        "id": 428163049,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711036584
+    },
+    {
+        "content": "<p>I'll be in a meeting for the next hour or so, but I'll do some investigation when I get back.</p>",
+        "id": 428163174,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711036620
+    },
+    {
+        "content": "<p>There are definitely asserts in QuickJS. I did something terrible to try to work around that here: <a href=\"https://github.com/ggoodman/rquickjs/commit/a95736a505d92219c2bad46664cd18ab88e81c13\">https://github.com/ggoodman/rquickjs/commit/a95736a505d92219c2bad46664cd18ab88e81c13</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ggoodman/rquickjs/commit/a95736a505d92219c2bad46664cd18ab88e81c13\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/abb263dd3971b7e6363e79483609439d5aed9056\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f353665623136663065306137363365386265613532646138346265656564316530336363316336353136366262326366636138623133326635366531393265662f67676f6f646d616e2f72717569636b6a732f636f6d6d69742f61393537333661353035643932323139633262616434363636346364313861623838653831633133)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ggoodman/rquickjs/commit/a95736a505d92219c2bad46664cd18ab88e81c13\" title=\"Test overriding assert · ggoodman/rquickjs@a95736a\">Test overriding assert · ggoodman/rquickjs@a95736a</a></div><div class=\"message_embed_description\">High level bindings to the quickjs javascript engine - Test overriding assert · ggoodman/rquickjs@a95736a</div></div></div>",
+        "id": 428165008,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711037072
+    },
+    {
+        "content": "<p>I think this might be what is pulling it in: <a href=\"https://github.com/WebAssembly/wasi-libc/blob/6593687e25f07526c4b92a20fe5ddf507599d5b3/libc-top-half/headers/private/printscan.h#L46-L52\">https://github.com/WebAssembly/wasi-libc/blob/6593687e25f07526c4b92a20fe5ddf507599d5b3/libc-top-half/headers/private/printscan.h#L46-L52</a></p>\n<div class=\"codehilite\" data-code-language=\"C\"><pre><span></span><code><span class=\"n\">__attribute__</span><span class=\"p\">((</span><span class=\"n\">__cold__</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">__noreturn__</span><span class=\"p\">))</span>\n<span class=\"k\">static</span><span class=\"w\"> </span><span class=\"kt\">void</span><span class=\"w\"> </span><span class=\"n\">long_double_not_supported</span><span class=\"p\">(</span><span class=\"kt\">void</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"kt\">void</span><span class=\"w\"> </span><span class=\"nf\">abort</span><span class=\"p\">(</span><span class=\"kt\">void</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">__attribute__</span><span class=\"p\">((</span><span class=\"n\">__noreturn__</span><span class=\"p\">));</span>\n<span class=\"w\">    </span><span class=\"n\">fputs</span><span class=\"p\">(</span><span class=\"s\">\"Support for formatting long double values is currently disabled.</span><span class=\"se\">\\n</span><span class=\"s\">\"</span>\n<span class=\"w\">          </span><span class=\"s\">\"To enable it, \"</span><span class=\"w\"> </span><span class=\"n\">__wasilibc_printscan_full_support_option</span><span class=\"w\"> </span><span class=\"s\">\".</span><span class=\"se\">\\n</span><span class=\"s\">\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">__stderr_FILE</span><span class=\"p\">);</span>\n<span class=\"w\">    </span><span class=\"n\">abort</span><span class=\"p\">();</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>AFAICT, the similar construct for floats is not being pulled in.</p>",
+        "id": 428166931,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711037588
+    },
+    {
+        "content": "<p>I tried ripping out the fputs calls in there in my local wasi-sdk build. Maybe holding it wrong but didn't see the reference disappear.</p>",
+        "id": 428170181,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711038463
+    },
+    {
+        "content": "<p>I think I'm either rebuilding the sdk incorrectly or I'm not correctly propagating its path to the <code>rquickjs</code> crate's build process.</p>",
+        "id": 428171844,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711038949
+    },
+    {
+        "content": "<p>I'm going to try a full rebuild of wasi-libc.</p>",
+        "id": 428175438,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711040013
+    },
+    {
+        "content": "<p>Almost there:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stderr</span>:\n\n<span class=\"nc\">INFO</span><span class=\"w\"> </span><span class=\"n\">rustc_codegen_ssa</span>::<span class=\"n\">back</span>::<span class=\"n\">link</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"w\"> </span><span class=\"n\">stdout</span>:\n<span class=\"p\">.</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stderr_FILE</span>\n</code></pre></div>",
+        "id": 428182307,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711042129
+    },
+    {
+        "content": "<p>So AFAICT, that got rid of the two unexpected references to <code>__stderr_FILE</code> in <code>vfprintf</code> and <code>strtod</code>. They were both because of that pseudo-assertion around long long / long double support.</p>\n<p>And yet, the wasi imports persist! They are stubborn.</p>",
+        "id": 428185755,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711043295
+    },
+    {
+        "content": "<p>I notice that in <code>stdout.c</code> in <code>wasi-libc</code>, we reference <code>__stdout_write</code> while in <code>stderr.c</code>, we reference <code>__stdio_write</code>. Could there be some circular reference here preventing LTO?</p>\n<p>Compare:</p>\n<ul>\n<li><a href=\"https://github.com/WebAssembly/wasi-libc/blob/6593687e25f07526c4b92a20fe5ddf507599d5b3/libc-top-half/musl/src/stdio/stdout.c#L12\">https://github.com/WebAssembly/wasi-libc/blob/6593687e25f07526c4b92a20fe5ddf507599d5b3/libc-top-half/musl/src/stdio/stdout.c#L12</a></li>\n<li><a href=\"https://github.com/WebAssembly/wasi-libc/blob/6593687e25f07526c4b92a20fe5ddf507599d5b3/libc-top-half/musl/src/stdio/stderr.c#L12\">https://github.com/WebAssembly/wasi-libc/blob/6593687e25f07526c4b92a20fe5ddf507599d5b3/libc-top-half/musl/src/stdio/stderr.c#L12</a></li>\n</ul>",
+        "id": 428198284,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711047877
+    },
+    {
+        "content": "<p>Rebuilding wasi-libc and heating the room a bit.</p>",
+        "id": 428199244,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711048302
+    },
+    {
+        "content": "<p>Got rid of the strong reference but still have the imports sneaking in.</p>",
+        "id": 428201150,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711049090
+    },
+    {
+        "content": "<p>Pretty confused by this asymmetry:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">stderr</span>\n<span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasi</span><span class=\"o\">-</span><span class=\"n\">sysroot</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stdout</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">stdout</span>\n</code></pre></div>",
+        "id": 428205480,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711050552
+    },
+    {
+        "content": "<p>stderr is never buffered, while stdout is buffered by default. <code>__stdout_write</code> has extra code for handling line-buffering if it's attached to a terminal.</p>",
+        "id": 428206359,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711050919
+    },
+    {
+        "content": "<p>Here I am coming through with an axe when a scalpel is needed. Here's my hack-job so far: <a href=\"https://github.com/WebAssembly/wasi-libc/compare/main...ggoodman:wasi-libc:prune_stdio\">https://github.com/WebAssembly/wasi-libc/compare/main...ggoodman:wasi-libc:prune_stdio</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasi-libc/compare/main...ggoodman:wasi-libc:prune_stdio\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/408ae646d94c57e9577593a31f4d99015ae5b33a\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f326134353962306436373031353161656533666636646132616138646131336236353135663633323265663061633363626665336230653838376262653131392f576562417373656d626c792f776173692d6c696263)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasi-libc/compare/main...ggoodman:wasi-libc:prune_stdio\" title=\"Comparing WebAssembly:main...ggoodman:prune_stdio · WebAssembly/wasi-libc\">Comparing WebAssembly:main...ggoodman:prune_stdio · WebAssembly/wasi-libc</a></div><div class=\"message_embed_description\">WASI libc implementation for WebAssembly. Contribute to WebAssembly/wasi-libc development by creating an account on GitHub.</div></div></div>",
+        "id": 428206883,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711051133
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> do you have a hypothesis as to why one would be lazy and the other not?</p>",
+        "id": 428211076,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711052688
+    },
+    {
+        "content": "<p>Not offhand. \"lazy\" here is about wasm-ld's handling of archive files, where <code>.o</code> files are only pulled in if a symbol in them is defined, but I don't know the specifics.</p>",
+        "id": 428211898,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711052980
+    },
+    {
+        "content": "<p>Out of curiosity, is it within reason to compile against the <code>wasi-libc</code> source instead of built objects?</p>",
+        "id": 428221587,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711056789
+    },
+    {
+        "content": "<p>There aren't Makefiles set up to work that way, unfortunately.</p>",
+        "id": 428221654,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711056830
+    },
+    {
+        "content": "<p>If there were, then it'd be reasonable :-)</p>",
+        "id": 428221669,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711056838
+    },
+    {
+        "content": "<p>Gotcha. I've spent my novelty tokens and taken a line of credit already.</p>",
+        "id": 428221869,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711056923
+    },
+    {
+        "content": "<p>Do you have code you could publish somewhere, so I could take a look?</p>",
+        "id": 428222072,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1711056997
+    },
+    {
+        "content": "<p>Good idea. I'm not sure how to get my <code>wasi-libc</code> fork linked up to my rust project in a consumable way though.</p>",
+        "id": 428222162,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711057051
+    },
+    {
+        "content": "<p>I'm working from the <code>bridge</code> branch in <a href=\"https://github.com/ggoodman/quicky/tree/bridge\">https://github.com/ggoodman/quicky/tree/bridge</a>. That should already be linked to my fork of <code>rquickjs</code> but the <code>WASI_SDK</code> reference in <code>.cargo/config.toml</code> is relative to my local check-out.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ggoodman/quicky/tree/bridge\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/b669a55f9310176d708e055e8402bfd938efddc3\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f386563333033396138633463303731336337356663663765376365393730313865323162623039323763636433616332323830353437383535333230643031652f67676f6f646d616e2f717569636b79)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ggoodman/quicky/tree/bridge\" title=\"GitHub - ggoodman/quicky at bridge\">GitHub - ggoodman/quicky at bridge</a></div><div class=\"message_embed_description\">Contribute to ggoodman/quicky development by creating an account on GitHub.</div></div></div>",
+        "id": 428222932,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711057397
+    },
+    {
+        "content": "<p>I've been using this script to help w/ the cycle time between shots in the dark <span aria-label=\"joy\" class=\"emoji emoji-1f602\" role=\"img\" title=\"joy\">:joy:</span> <a href=\"https://github.com/ggoodman/quicky/blob/4d2d859c765bb337a9791a4e1b2dc367925d5916/scripts/build.sh#L6-L8\">https://github.com/ggoodman/quicky/blob/4d2d859c765bb337a9791a4e1b2dc367925d5916/scripts/build.sh#L6-L8</a></p>",
+        "id": 428223094,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711057461
+    },
+    {
+        "content": "<p>My fork of <code>wasi-sdk</code>: <a href=\"https://github.com/ggoodman/wasi-sdk/tree/strip-wasi-stdio\">https://github.com/ggoodman/wasi-sdk/tree/strip-wasi-stdio</a></p>\n<p>Points to <code>wasi-libc</code> that has these changes: <a href=\"https://github.com/WebAssembly/wasi-libc/compare/main...ggoodman:wasi-libc:prune_stdio\">https://github.com/WebAssembly/wasi-libc/compare/main...ggoodman:wasi-libc:prune_stdio</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ggoodman/wasi-sdk/tree/strip-wasi-stdio\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/d83dee816013ca1ab26ab1229cc0fee4805fcd25\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f616463353936376262366539356537666139383962316362633132363266663561333331643663643037306333613563636333663565653933363630396434662f67676f6f646d616e2f776173692d73646b)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ggoodman/wasi-sdk/tree/strip-wasi-stdio\" title=\"GitHub - ggoodman/wasi-sdk at strip-wasi-stdio\">GitHub - ggoodman/wasi-sdk at strip-wasi-stdio</a></div><div class=\"message_embed_description\">WASI-enabled WebAssembly C/C++ toolchain. Contribute to ggoodman/wasi-sdk development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasi-libc/compare/main...ggoodman:wasi-libc:prune_stdio\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/408ae646d94c57e9577593a31f4d99015ae5b33a\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f326134353962306436373031353161656533666636646132616138646131336236353135663633323265663061633363626665336230653838376262653131392f576562417373656d626c792f776173692d6c696263)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasi-libc/compare/main...ggoodman:wasi-libc:prune_stdio\" title=\"Comparing WebAssembly:main...ggoodman:prune_stdio · WebAssembly/wasi-libc\">Comparing WebAssembly:main...ggoodman:prune_stdio · WebAssembly/wasi-libc</a></div><div class=\"message_embed_description\">WASI libc implementation for WebAssembly. Contribute to WebAssembly/wasi-libc development by creating an account on GitHub.</div></div></div>",
+        "id": 428223444,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711057630
+    },
+    {
+        "content": "<p>That would be a lot of work to repro. I might be able to get a setup where only <code>quicky</code> needs to be pulled.</p>",
+        "id": 428223510,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711057669
+    },
+    {
+        "content": "<p>The workflow is now described and show be reproducible here: <a href=\"https://github.com/ggoodman/quicky/tree/bridge\">https://github.com/ggoodman/quicky/tree/bridge</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ggoodman/quicky/tree/bridge\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/b669a55f9310176d708e055e8402bfd938efddc3\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f386563333033396138633463303731336337356663663765376365393730313865323162623039323763636433616332323830353437383535333230643031652f67676f6f646d616e2f717569636b79)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ggoodman/quicky/tree/bridge\" title=\"GitHub - ggoodman/quicky at bridge\">GitHub - ggoodman/quicky at bridge</a></div><div class=\"message_embed_description\">Contribute to ggoodman/quicky development by creating an account on GitHub.</div></div></div>",
+        "id": 428244715,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711070465
+    },
+    {
+        "content": "<p>A new potential lead is <code>__stdio_exit</code> that I'm seeing getting linked. It seems like <code>__toread</code> and <code>__towrite</code> might both cause those weak references to become strong references:</p>\n<div class=\"codehilite\" data-code-language=\"C\"><pre><span></span><code><span class=\"cm\">/* atexit.c and __stdio_exit.c override these. the latter is linked</span>\n<span class=\"cm\"> * as a consequence of linking either __toread.c or __towrite.c. */</span>\n<span class=\"n\">weak_alias</span><span class=\"p\">(</span><span class=\"n\">dummy</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">__funcs_on_exit</span><span class=\"p\">);</span>\n<span class=\"n\">weak_alias</span><span class=\"p\">(</span><span class=\"n\">dummy</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">__stdio_exit</span><span class=\"p\">);</span>\n</code></pre></div>\n<p>I'm seeing this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_close</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stdio_close</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_seek</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stdio_seek</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_write</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stdio_write</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__toread</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__toread</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__towrite</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__towrite</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__overflow</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__towrite</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__towrite</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__towrite</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">fwrite</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__towrite</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stderr</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">lazy</span><span class=\"w\"> </span><span class=\"n\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">stderr</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stdout</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__stdio_close</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_close</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stdio_close</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stdout</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__stdio_write</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_write</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stdio_write</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stdout</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__stdio_seek</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__stdio_seek</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__stdio_seek</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">stdout</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">stdout</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">vfprintf</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__towrite</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__uflow</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">reference</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">__toread</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">wasi</span><span class=\"o\">/</span><span class=\"n\">libc</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">(</span><span class=\"n\">__toread</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span>: <span class=\"nc\">definition</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">__toread</span>\n</code></pre></div>",
+        "id": 428249294,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711073641
+    },
+    {
+        "content": "<p>One nuance is that this project is designed to be run through wizer. I only see an obvious reference to <code>__stdio_exit</code> here: </p>\n<div class=\"codehilite\" data-code-language=\"WebAssembly\"><pre><span></span><code>  <span class=\"p\">(</span><span class=\"k\">func</span> <span class=\"nv\">$__wasm_call_dtors</span> <span class=\"cm\">(;630;)</span> <span class=\"p\">(</span><span class=\"k\">type</span> <span class=\"mi\">72</span><span class=\"p\">)</span>\n    <span class=\"nb\">call</span> <span class=\"nv\">$#func629&lt;dummy&gt;</span>\n    <span class=\"nb\">call</span> <span class=\"nv\">$__stdio_exit</span>\n  <span class=\"p\">)</span>\n  <span class=\"p\">(</span><span class=\"k\">func</span> <span class=\"nv\">$init.command_export</span> <span class=\"cm\">(;631;)</span> <span class=\"p\">(</span><span class=\"k\">type</span> <span class=\"mi\">31</span><span class=\"p\">)</span> <span class=\"p\">(</span><span class=\"k\">result</span> <span class=\"kt\">i32</span><span class=\"p\">)</span>\n    <span class=\"nb\">call</span> <span class=\"nv\">$init</span>\n    <span class=\"nb\">call</span> <span class=\"nv\">$__wasm_call_dtors</span>\n  <span class=\"p\">)</span>\n</code></pre></div>",
+        "id": 428249622,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711073905
+    },
+    {
+        "content": "<p>Is there a way to elect out of calling destructors?</p>",
+        "id": 428250272,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711074437
+    },
+    {
+        "content": "<p>Lots of learning for me going down this rabbit hole but now I'm hoping to rein it back in. I think it's probably worth trying to come up with a minimal repro here. Any hypotheses on the shape of a minimal c library I can wrap in rust bindings to produce what we're seeing here?</p>",
+        "id": 428332340,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711114946
+    },
+    {
+        "content": "<p>OK <span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> I think I have a pretty sweet, mostly minimal repro here: <a href=\"https://github.com/ggoodman/wasi-import-repro\">https://github.com/ggoodman/wasi-import-repro</a></p>\n<p>The key finding is that the very presence of a <code>printf</code> call in a c library results in those <code>fd_*</code> imports getting pulled along even if we _know_ that the code calling <code>printf</code> is being eliminated by the linker.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ggoodman/wasi-import-repro\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/6767469bbfcf6ec0a2d95f2b84d5e0fc241cce27\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f666638303534643836353239383230373961393631396132383031306162613237306537303166633236633163316263656537383166323537373438666264632f67676f6f646d616e2f776173692d696d706f72742d726570726f)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ggoodman/wasi-import-repro\" title=\"GitHub - ggoodman/wasi-import-repro\">GitHub - ggoodman/wasi-import-repro</a></div><div class=\"message_embed_description\">Contribute to ggoodman/wasi-import-repro development by creating an account on GitHub.</div></div></div>",
+        "id": 428378073,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711128283
+    },
+    {
+        "content": "<p>This is showing that a rust function that references a c binding referencing a call to printf is enough, <strong>even if the rust function is omitted by a feature flag</strong>.</p>",
+        "id": 428379458,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711128800
+    },
+    {
+        "content": "<p>Filed an issue here: <a href=\"https://github.com/WebAssembly/wasi-sdk/issues/401\">https://github.com/WebAssembly/wasi-sdk/issues/401</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasi-sdk/issues/401\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/047b6f8847ee282146f38d6e7905687304b495f0\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f373366373464376533373934346263646466363565613638376231323239343434373631663064663738326464353832663663346564366435333131316162382f576562417373656d626c792f776173692d73646b2f6973737565732f343031)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasi-sdk/issues/401\" title=\"LTO failing to prune WASI fd_* imports · Issue #401 · WebAssembly/wasi-sdk\">LTO failing to prune WASI fd_* imports · Issue #401 · WebAssembly/wasi-sdk</a></div><div class=\"message_embed_description\">In this repo, I've shown two scenarios where code that is functionally identical produces very different WASM binaries. Setup The two scenarios I'm testing are for a rust cdylib whose code looks li...</div></div></div>",
+        "id": 428382627,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1711129959
+    },
+    {
+        "content": "<p>Thinking more about this, I have the hypothesis that it's the finalizers that could be holding onto strong references.</p>\n<p>That made me wonder (at least for my use-case) if I actually _cared_ about finalizers and clean-up. The main use-case I have at work uses a WASM instance exactly once and throws it away. All work after producing a 'result' is essentially wasted cycles as far as I'm concerned.</p>\n<p>So I wonder if tooling could be parametrized for this sort of use-case... Could we tell the wasi-sdk / wasi-libc that we don't actually care about clean-up? In other words, the host and runtime can handle that for us. I understand that this wouldn't be a general-purpose strategy which is why I'm wondering about some opt-in behaviour. Does it sound feasible?</p>",
+        "id": 437841611,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1715269594
+    },
+    {
+        "content": "<p>AFAIK, <code>wasi-libc</code> generally won't clean anything up unless you tell it to (e.g. by closing a file descriptor).  So I think the answer in your case is: \"don't call <code>close</code>\" (which at the Rust level means e.g. wrapping a <code>File</code> in <code>ManuallyDrop</code> and never dropping it).</p>",
+        "id": 437842671,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1715269985
+    },
+    {
+        "content": "<p>But maybe you're asking for an optional build of <code>wasi-libc</code> where <code>close</code> is a no-op?</p>",
+        "id": 437843052,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1715270128
+    },
+    {
+        "content": "<p>I think the solution when using rust is a bit easier but the use-case that confounds me is when building a c library against wasi-libc--and especially one whose source code I don't control.</p>",
+        "id": 438033619,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1715368140
+    }
+]

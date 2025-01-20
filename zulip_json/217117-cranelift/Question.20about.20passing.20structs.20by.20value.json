@@ -1,0 +1,188 @@
+[
+    {
+        "content": "<p>Hi! I'm adding structs to my toy compiler (custom frontend, cranelift as backend) and I was wondering about how to pass structs by value when calling functions.</p>\n<p>As far as I understand, the specific requirements of how to call functions are up to the ABI. I know it's often either splitting up the struct into multiple arguments or creating a copy of the struct in the caller's stack, and passing a pointer to that value (depending on size). In LLVM, you don't need to care about all this because struct types are part of the IR, but with cranelift, it seems things are a bit more low level since there are no structs in the IR.</p>\n<p>So, my question is. Do I need to have platform-specific code that adheres to the calling conventions of each platform when passing structs by value? Is there some helper code in cranelift already to achieve this?</p>",
+        "id": 352102681,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1682271686
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"610681\">Setzer22</span> has marked this topic as resolved.</p>",
+        "id": 352104765,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1682272681
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"610681\">Setzer22</span> has marked this topic as unresolved.</p>",
+        "id": 352104809,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1682272685
+    },
+    {
+        "content": "<p>Cranelift doesn't have any helper code to handle calling conventions. It only exposes the primitives necessary like the <code>StructArgument</code> atgument purpose for values that have been determined to be passed as a struct on the stack. You need your own code to determine if the struct should be passed on the stack with <code>StructArgument</code> or put in registers.</p>",
+        "id": 352114235,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1682278022
+    },
+    {
+        "content": "<p>You could look at <code>compiler/rustc_target/src/call</code> in <a href=\"https://github.com/rust-lang/rust\">https://github.com/rust-lang/rust</a> to see what it would roughly be. The code for sysv x86_64 is somewhat complex, but most other archs have simpler code.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-lang/rust\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/2bd0cd0a3e87fd62f29452bdb64a261d7aeceb44\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f336164666666656663323138623863653231643934663364326463366235376566346465313434383663666137633731343937326230623231383763366263362f727573742d6c616e672f72757374)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-lang/rust\" title=\"GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software.\">GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software.</a></div><div class=\"message_embed_description\">Empowering everyone to build reliable and efficient software. - GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software.</div></div></div>",
+        "id": 352114386,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1682278101
+    },
+    {
+        "content": "<p>Thanks! I'll have a look :)</p>\n<p>One question, though. When you say \"Cranelift doesn't have any helper code to handle calling conventions\", I'm assuming cranelift is still doing some work for me, right? For instance, picking the right registers in the right order, and fetching the return value from the right place too? Basically, how much does cranelift do for me here, and what do I need to care about on my end?</p>",
+        "id": 352203375,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1682325919
+    },
+    {
+        "content": "<p>Cranelift handles register assignment and in case of too much registers the placement of arguments on the stack. You are responsible for specifying the correct argument extension, argument purpose and lowering structs into primitive parts or using the struct argument argument purpose depending on the type. In addition for returns depending on the type you either add returns or add an extra pointer argument with the struct return argument purpose and write to this pointer on the callee side and pass a pointer to the location to put the return value as argument.</p>",
+        "id": 352207221,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1682326859
+    },
+    {
+        "content": "<p>Just to make it extra-clear, I would say it as: Cranelift <em>does</em> handle calling conventions, but only for the concepts that exist in its IR. Primitive types (i32/64, f32/64, 128-bit vectors) exist, so Cranelift can pass them as args and return them. Structs do not exist at the Cranelift level, so there's no ABI handling; you're responsible for that lowering Hopefully that's a useful way to think about it</p>",
+        "id": 352321803,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1682352257
+    },
+    {
+        "content": "<p>Oops, forgot about replying. Thanks a lot for the answers! :) Things are a lot clearer now</p>",
+        "id": 354841820,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1682937791
+    },
+    {
+        "content": "<p>I'm finally delving into the intricacies of calling conventions <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span> I had a few questions about <code>ArgumentPurpose</code>.</p>\n<p>First, there's <code>StructArgument</code>, which IIUC is necessary whenever the calling convention requires me to pass a struct via pointer to the stack (e.g. systemv requires this for structs with the MEMORY type). I don't understand why this takes a size argument. I thought I was expected to allocate a stack slot in the caller and pass its address as a pointer, but grepping through the code it seems cranelift-codegen itself is handling the allocation of that stack slot for me whenver I specify an argument with purpose StructArgument(size)? So my question is: Who is responsible from allocating that stack slot? And in case it's cranelift and not me, how do I figure out the address where I have to copy the struct data before the function call?</p>\n<p>I'm also quite confused about <code>StructReturn</code> for similar reasons. StructReturn is used for large return types that don't fit in registers. In those cases, the caller allocates space on the stack, and passes a pointer as a hidden first argument. The callee then writes the result in that stack slot. Here, again, who allocates this stack slot? There's no size argument here, which makes me think it's the caller who allocates it.</p>\n<p>Also about <code>StructReturn</code>. There's a note in the docs about some ABIs requiring it as a return type. But in the case of SystemV, the StructReturn argument has to be the first argument to the function, right?</p>\n<p>Thanks again! And hope you don't mind I'm asking so much stuff</p>",
+        "id": 356138395,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1683311287
+    },
+    {
+        "content": "<blockquote>\n<p>how do I figure out the address where I have to copy the struct data before the function call</p>\n</blockquote>\n<p>Okay, after looking into it a bit more, it seems cranelift-codegen is also handling the memcpy for me. So in that case, it looks like I should simply pass any pointer to the struct. Could someone confirm this is correct? <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 356140895,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1683312025
+    },
+    {
+        "content": "<p>cc <span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> who has implemented this for cg_clif</p>",
+        "id": 356147923,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1683314337
+    },
+    {
+        "content": "<p>For StructArgument the argument is a pointer to the value you want to pass. Cranelift will copy it to the location on the stack where the callee expects it and on the callee side, the parameter will be a pointer to this copy.</p>",
+        "id": 356148263,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1683314445
+    },
+    {
+        "content": "<p>Thanks! So it seems I was on the right track in the end</p>",
+        "id": 356148500,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1683314523
+    },
+    {
+        "content": "<p>And in the case of StructReturn, I guess I'm responsible for allocating the satck space and providing a pointer argument, correct?</p>",
+        "id": 356148599,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1683314552
+    },
+    {
+        "content": "<p>Indeed. For StructReturn the caller passes a pointer to a chunk of memory large enough to hold the return value and then the callee can write to this memory. The only reason that it is a separate argument purpose is that some calling conventions pass the struct return pointer in a register which isn't used for regular arguments.</p>",
+        "id": 356148711,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1683314601
+    },
+    {
+        "content": "<p>AArch64 for example passes it in x8, but uses x0-x7 for regular args. x86 however simply puts it as first argument. Note that Cranelift doesn't currently handle this on x86, so you need to ensure that the StructReturn argument is the first argument.</p>",
+        "id": 356148969,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1683314680
+    },
+    {
+        "content": "<p>Another thing I wanted to ask about is packing struct fields in registers. Let's say I have a {i32, i32, i64} struct. Do I have two pass that as three AbiParams (two with types::I32, and one with types::I64), or do I have to follow the calling convention and pack the first two into an i64 AbiParam (and thus, have a signature with just two arguments)? Basically, who is responsible for doing that, me or cranelift? (my example assumes SystemV)</p>",
+        "id": 356254212,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1683366418
+    },
+    {
+        "content": "<p>You have to pack it if the calling convention specifies this. Cranelift doesn't have native struct types. It only exposes the primitives necessary to handle them around the calling convention, but it is the responsibility of the clir ir producer to use those primitives according to the requirements of the calling convention.</p>",
+        "id": 356310590,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1683381784
+    },
+    {
+        "content": "<p>So, back to my example, this means if the ABI tells me I have to pack the first two ints into a single register, the signature I build in CLIF should have two arguments, not three, and I have to do some bit-fiddling on the frontend to actually produce the packed value. Did I get that right?</p>",
+        "id": 356311809,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1683382100
+    },
+    {
+        "content": "<p>Yes</p>",
+        "id": 356357944,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1683399552
+    },
+    {
+        "content": "<p>Ok, seems I finally got it working! <span aria-label=\"grinning face with smiling eyes\" class=\"emoji emoji-1f601\" role=\"img\" title=\"grinning face with smiling eyes\">:grinning_face_with_smiling_eyes:</span> <br>\n<a href=\"/user_uploads/15107/vVjQj_fvIhHPskvQCtYVE4g4/image.png\">image.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/vVjQj_fvIhHPskvQCtYVE4g4/image.png\" title=\"image.png\"><img src=\"/user_uploads/15107/vVjQj_fvIhHPskvQCtYVE4g4/image.png\"></a></div><p>Thanks a lot for bearing with me! <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span> Can't promise I won't be back with more questions, but in exchange, if you think there's a good place in the cranelift docs where I could write a piece on passing / returning structs by value, I think that could be valuable to future readers (and I'd be up for the task)</p>",
+        "id": 356782206,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1683569291
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"610681\">@Setzer22</span> that's great, congrats!</p>\n<p>Off the top of my head, we don't really have many good documents on \"ways to use Cranelift to implement common language features\" -- a section on that (i.e. a new Markdown file in cranelift/docs/) might be really nice. It could eventually be a part of a user's/embedder's guide, or example/tutorial language implementation, etc. In any case, please feel free to write up something and we can hammer it into the shape we want incrementally!</p>",
+        "id": 356783682,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1683569736
+    },
+    {
+        "content": "<p>Alright! I'll write up something and let you know</p>",
+        "id": 357070169,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1683656535
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/217117-cranelift/topic/Question.20about.20passing.20structs.20by.20value/near/352114386\">said</a>:</p>\n<blockquote>\n<p>You could look at <code>compiler/rustc_target/src/call</code> in <a href=\"https://github.com/rust-lang/rust\">https://github.com/rust-lang/rust</a> to see what it would roughly be. The code for sysv x86_64 is somewhat complex, but most other archs have simpler code.</p>\n</blockquote>\n<p>Seems there is no longer a <code>call</code> dir in <code>compiler/rustc_target/src</code> ... where should I look these days for an example of lowering structs?</p>",
+        "id": 361990937,
+        "sender_full_name": "Taylor Holliday",
+        "timestamp": 1685377463
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"610681\">Setzer22</span> <a href=\"#narrow/stream/217117-cranelift/topic/Question.20about.20passing.20structs.20by.20value/near/357070169\">said</a>:</p>\n<blockquote>\n<p>Alright! I'll write up something and let you know</p>\n</blockquote>\n<p>Did you write up something? or do you have some code online? :)</p>",
+        "id": 361991028,
+        "sender_full_name": "Taylor Holliday",
+        "timestamp": 1685377506
+    },
+    {
+        "content": "<p>I'm guessing this is codegen for struct field accesses? <a href=\"https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/value_and_place.rs#L8\">https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/value_and_place.rs#L8</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/value_and_place.rs#L8\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/7e0a0d0395822eb5a7c95b1633e234f5d47a4a11\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316633356466643264303231623464373035336236643136326432393161633432353665343261363066666138653735373761393564313530643435666438322f727573742d6c616e672f72757374)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/value_and_place.rs#L8\" title=\"rust/value_and_place.rs at 498553fc04f6a3fdc53412320f4e913bc53bc267 · rust-lang/rust\">rust/value_and_place.rs at 498553fc04f6a3fdc53412320f4e913bc53bc267 · rust-lang/rust</a></div><div class=\"message_embed_description\">Empowering everyone to build reliable and efficient software. - rust/value_and_place.rs at 498553fc04f6a3fdc53412320f4e913bc53bc267 · rust-lang/rust</div></div></div>",
+        "id": 361993856,
+        "sender_full_name": "Taylor Holliday",
+        "timestamp": 1685378529
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"601349\">Taylor Holliday</span> <a href=\"#narrow/stream/217117-cranelift/topic/Question.20about.20passing.20structs.20by.20value/near/361990937\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/217117-cranelift/topic/Question.20about.20passing.20structs.20by.20value/near/352114386\">said</a>:</p>\n<blockquote>\n<p>You could look at <code>compiler/rustc_target/src/call</code> in <a href=\"https://github.com/rust-lang/rust\">https://github.com/rust-lang/rust</a> to see what it would roughly be. The code for sysv x86_64 is somewhat complex, but most other archs have simpler code.</p>\n</blockquote>\n<p>Seems there is no longer a <code>call</code> dir in <code>compiler/rustc_target/src</code> ... where should I look these days for an example of lowering structs?</p>\n</blockquote>\n<p>Was missing <code>abi/</code> in between. The right link is <a href=\"https://github.com/rust-lang/rust/tree/master/compiler/rustc_target/src/abi/call\">https://github.com/rust-lang/rust/tree/master/compiler/rustc_target/src/abi/call</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-lang/rust/tree/master/compiler/rustc_target/src/abi/call\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/0aebd27af95667ef85886003b622933eb6791246\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f656631653863636434356131303231633962343230383938653036353261616139333965363139356361346335313466666131363731636263663334623339382f727573742d6c616e672f72757374)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-lang/rust/tree/master/compiler/rustc_target/src/abi/call\" title=\"rust/compiler/rustc_target/src/abi/call at master · rust-lang/rust\">rust/compiler/rustc_target/src/abi/call at master · rust-lang/rust</a></div><div class=\"message_embed_description\">Empowering everyone to build reliable and efficient software. - rust/compiler/rustc_target/src/abi/call at master · rust-lang/rust</div></div></div>",
+        "id": 362004300,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1685382144
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"601349\">Taylor Holliday</span> <a href=\"#narrow/stream/217117-cranelift/topic/Question.20about.20passing.20structs.20by.20value/near/361993856\">said</a>:</p>\n<blockquote>\n<p>I'm guessing this is codegen for struct field accesses? <a href=\"https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/value_and_place.rs#L8\">https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/value_and_place.rs#L8</a></p>\n</blockquote>\n<p>Yeah. That code is not really relevant to the calling convention though.</p>",
+        "id": 362004457,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1685382206
+    },
+    {
+        "content": "<p>The code around <a href=\"https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/abi/pass_mode.rs#L78\">https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/abi/pass_mode.rs#L78</a> is relevant. cg_clif uses rustc_target for calculating the abi to use and this code actually applies the calculated abi.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/abi/pass_mode.rs#L78\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/0aebd27af95667ef85886003b622933eb6791246\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f656631653863636434356131303231633962343230383938653036353261616139333965363139356361346335313466666131363731636263663334623339382f727573742d6c616e672f72757374)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-lang/rust/blob/498553fc04f6a3fdc53412320f4e913bc53bc267/compiler/rustc_codegen_cranelift/src/abi/pass_mode.rs#L78\" title=\"rust/pass_mode.rs at 498553fc04f6a3fdc53412320f4e913bc53bc267 · rust-lang/rust\">rust/pass_mode.rs at 498553fc04f6a3fdc53412320f4e913bc53bc267 · rust-lang/rust</a></div><div class=\"message_embed_description\">Empowering everyone to build reliable and efficient software. - rust/pass_mode.rs at 498553fc04f6a3fdc53412320f4e913bc53bc267 · rust-lang/rust</div></div></div>",
+        "id": 362004738,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1685382318
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"610681\">Setzer22</span> <a href=\"#narrow/stream/217117-cranelift/topic/Question.20about.20passing.20structs.20by.20value/near/357070169\">said</a>:</p>\n<blockquote>\n<p>Alright! I'll write up something and let you know</p>\n</blockquote>\n<p>ever manage to get around to doing this :) ?</p>",
+        "id": 372103510,
+        "sender_full_name": "Chris Clark",
+        "timestamp": 1688409696
+    }
+]

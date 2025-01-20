@@ -1,0 +1,113 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / Issue #2340 Allow loads to merge into other op... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232340.20Allow.20loads.20to.20merge.20into.20other.20op.2E.2E.2E.html">wasmtime / Issue #2340 Allow loads to merge into other op...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="215044571"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232340%20Allow%20loads%20to%20merge%20into%20other%20op.../near/215044571" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232340.20Allow.20loads.20to.20merge.20into.20other.20op.2E.2E.2E.html#215044571">(Oct 30 2020 at 00:17)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/issues/2340">Issue #2340</a>:</p>
+<blockquote>
+<p>In <code>MachInst</code>-based backends, instruction selection works by pattern-matching on a <em>root</em> opcode and potentially the opcodes that produce its inputs (the "operand tree"). Sometimes, a particular machine backend is able to pattern-match several opcodes in a certain arrangement and generate one machine instruction that covers them all (e.g.: multiply-add).</p>
+<p>Some machine architectures have the ability to load one operand of an operation from memory. For example, on x86, we can do <code>add rax, [rbx]</code>, which is a combination load and add (in that order).</p>
+<p>Unfortunately, because of a (sound but conservative) design in our pattern-matching system, we cannot match patterns where the load is an <em>operand</em> rather than the <em>root</em>, because we do not allow operations that have side-effects or touch memory to move in the program. This is because reasoning about when it is safe to do so is complex. (Instruction coloring is the framework that does this reasoning, but because the color changes <em>after</em> the load or side-effecting op, its own color differs from that of every program point below it, so it will never merge.)</p>
+<p>Consider the following test-case as an interesting example:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">block1</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i32</span><span class="p">)</span>:
+<span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sload</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sload</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v3</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+</code></pre></div>
+
+<p>We want this to lower to two add-from-memory instructions on x86. Working bottom-up (as VCode lowering does), we first see <code>v5</code> and perhaps reason that we can sink the load <code>v3</code> because it does not move across any other memory ops. We would also like to do this for <code>v2</code> into <code>v4</code>, and in this example we can, but only after we sink <code>v3</code>; the load producing <code>v2</code> moves across where <code>v3</code> <em>used</em> to be. Hence, a naïve coloring scheme won't necessarily work.</p>
+<p>A solution that @julian-seward1 and I have converged on involves numbering only side-effecting ops with colors (or sequence numbers), and while scanning backward through a basic block, tracking the "current sequence number", or in other words, the next number whose op we expect to see. We permit a merge of any load with this sequence number if (i) it's in the same BB and (ii) this use is its only use; then we decrement the sequence number.</p>
+<p>This implements the very simple rule that a load or store never moves over another load or store; but as we sink one, we create space for the one above it to sink, as well.</p>
+<p>(Later we might want to extend this with multiple sequence numbers, one per disjoint unit of state, sort of in the spirit of a vector clock; but details there are TBD.)</p>
+</blockquote>
+
+
+
+<a name="215044689"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232340%20Allow%20loads%20to%20merge%20into%20other%20op.../near/215044689" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232340.20Allow.20loads.20to.20merge.20into.20other.20op.2E.2E.2E.html#215044689">(Oct 30 2020 at 00:19)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/2340#issuecomment-719096550">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2340">Issue #2340</a>:</p>
+<blockquote>
+<p>cc @akirilov-arm and @abrown: this should enable us to properly handle the load-merging that <code>LoadSplat</code> addresses in #2278.</p>
+</blockquote>
+
+
+
+<a name="215044696"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232340%20Allow%20loads%20to%20merge%20into%20other%20op.../near/215044696" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232340.20Allow.20loads.20to.20merge.20into.20other.20op.2E.2E.2E.html#215044696">(Oct 30 2020 at 00:19)</a>:</h4>
+<p>cfallin assigned <a href="https://github.com/bytecodealliance/wasmtime/issues/2340">Issue #2340</a>:</p>
+<blockquote>
+<p>In <code>MachInst</code>-based backends, instruction selection works by pattern-matching on a <em>root</em> opcode and potentially the opcodes that produce its inputs (the "operand tree"). Sometimes, a particular machine backend is able to pattern-match several opcodes in a certain arrangement and generate one machine instruction that covers them all (e.g.: multiply-add).</p>
+<p>Some machine architectures have the ability to load one operand of an operation from memory. For example, on x86, we can do <code>add rax, [rbx]</code>, which is a combination load and add (in that order).</p>
+<p>Unfortunately, because of a (sound but conservative) design in our pattern-matching system, we cannot match patterns where the load is an <em>operand</em> rather than the <em>root</em>, because we do not allow operations that have side-effects or touch memory to move in the program. This is because reasoning about when it is safe to do so is complex. (Instruction coloring is the framework that does this reasoning, but because the color changes <em>after</em> the load or side-effecting op, its own color differs from that of every program point below it, so it will never merge.)</p>
+<p>Consider the following test-case as an interesting example:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">block1</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i32</span><span class="p">)</span>:
+<span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sload</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sload</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v3</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+</code></pre></div>
+
+<p>We want this to lower to two add-from-memory instructions on x86. Working bottom-up (as VCode lowering does), we first see <code>v5</code> and perhaps reason that we can sink the load <code>v3</code> because it does not move across any other memory ops. We would also like to do this for <code>v2</code> into <code>v4</code>, and in this example we can, but only after we sink <code>v3</code>; the load producing <code>v2</code> moves across where <code>v3</code> <em>used</em> to be. Hence, a naïve coloring scheme won't necessarily work.</p>
+<p>A solution that @julian-seward1 and I have converged on involves numbering only side-effecting ops with colors (or sequence numbers), and while scanning backward through a basic block, tracking the "current sequence number", or in other words, the next number whose op we expect to see. We permit a merge of any load with this sequence number if (i) it's in the same BB and (ii) this use is its only use; then we decrement the sequence number.</p>
+<p>This implements the very simple rule that a load or store never moves over another load or store; but as we sink one, we create space for the one above it to sink, as well.</p>
+<p>(Later we might want to extend this with multiple sequence numbers, one per disjoint unit of state, sort of in the spirit of a vector clock; but details there are TBD.)</p>
+</blockquote>
+
+
+
+<a name="215044720"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232340%20Allow%20loads%20to%20merge%20into%20other%20op.../near/215044720" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232340.20Allow.20loads.20to.20merge.20into.20other.20op.2E.2E.2E.html#215044720">(Oct 30 2020 at 00:20)</a>:</h4>
+<p>cfallin labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/2340">Issue #2340</a> (assigned to cfallin):</p>
+<blockquote>
+<p>In <code>MachInst</code>-based backends, instruction selection works by pattern-matching on a <em>root</em> opcode and potentially the opcodes that produce its inputs (the "operand tree"). Sometimes, a particular machine backend is able to pattern-match several opcodes in a certain arrangement and generate one machine instruction that covers them all (e.g.: multiply-add).</p>
+<p>Some machine architectures have the ability to load one operand of an operation from memory. For example, on x86, we can do <code>add rax, [rbx]</code>, which is a combination load and add (in that order).</p>
+<p>Unfortunately, because of a (sound but conservative) design in our pattern-matching system, we cannot match patterns where the load is an <em>operand</em> rather than the <em>root</em>, because we do not allow operations that have side-effects or touch memory to move in the program. This is because reasoning about when it is safe to do so is complex. (Instruction coloring is the framework that does this reasoning, but because the color changes <em>after</em> the load or side-effecting op, its own color differs from that of every program point below it, so it will never merge.)</p>
+<p>Consider the following test-case as an interesting example:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">block1</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i32</span><span class="p">)</span>:
+<span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sload</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sload</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v3</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+</code></pre></div>
+
+<p>We want this to lower to two add-from-memory instructions on x86. Working bottom-up (as VCode lowering does), we first see <code>v5</code> and perhaps reason that we can sink the load <code>v3</code> because it does not move across any other memory ops. We would also like to do this for <code>v2</code> into <code>v4</code>, and in this example we can, but only after we sink <code>v3</code>; the load producing <code>v2</code> moves across where <code>v3</code> <em>used</em> to be. Hence, a naïve coloring scheme won't necessarily work.</p>
+<p>A solution that @julian-seward1 and I have converged on involves numbering only side-effecting ops with colors (or sequence numbers), and while scanning backward through a basic block, tracking the "current sequence number", or in other words, the next number whose op we expect to see. We permit a merge of any load with this sequence number if (i) it's in the same BB and (ii) this use is its only use; then we decrement the sequence number.</p>
+<p>This implements the very simple rule that a load or store never moves over another load or store; but as we sink one, we create space for the one above it to sink, as well.</p>
+<p>(Later we might want to extend this with multiple sequence numbers, one per disjoint unit of state, sort of in the spirit of a vector clock; but details there are TBD.)</p>
+</blockquote>
+
+
+
+<a name="216947810"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232340%20Allow%20loads%20to%20merge%20into%20other%20op.../near/216947810" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232340.20Allow.20loads.20to.20merge.20into.20other.20op.2E.2E.2E.html#216947810">(Nov 16 2020 at 23:31)</a>:</h4>
+<p>cfallin closed <a href="https://github.com/bytecodealliance/wasmtime/issues/2340">Issue #2340</a> (assigned to cfallin):</p>
+<blockquote>
+<p>In <code>MachInst</code>-based backends, instruction selection works by pattern-matching on a <em>root</em> opcode and potentially the opcodes that produce its inputs (the "operand tree"). Sometimes, a particular machine backend is able to pattern-match several opcodes in a certain arrangement and generate one machine instruction that covers them all (e.g.: multiply-add).</p>
+<p>Some machine architectures have the ability to load one operand of an operation from memory. For example, on x86, we can do <code>add rax, [rbx]</code>, which is a combination load and add (in that order).</p>
+<p>Unfortunately, because of a (sound but conservative) design in our pattern-matching system, we cannot match patterns where the load is an <em>operand</em> rather than the <em>root</em>, because we do not allow operations that have side-effects or touch memory to move in the program. This is because reasoning about when it is safe to do so is complex. (Instruction coloring is the framework that does this reasoning, but because the color changes <em>after</em> the load or side-effecting op, its own color differs from that of every program point below it, so it will never merge.)</p>
+<p>Consider the following test-case as an interesting example:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">block1</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i32</span><span class="p">)</span>:
+<span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sload</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sload</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v3</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+</code></pre></div>
+<p>We want this to lower to two add-from-memory instructions on x86. Working bottom-up (as VCode lowering does), we first see <code>v5</code> and perhaps reason that we can sink the load <code>v3</code> because it does not move across any other memory ops. We would also like to do this for <code>v2</code> into <code>v4</code>, and in this example we can, but only after we sink <code>v3</code>; the load producing <code>v2</code> moves across where <code>v3</code> <em>used</em> to be. Hence, a naïve coloring scheme won't necessarily work.</p>
+<p>A solution that @julian-seward1 and I have converged on involves numbering only side-effecting ops with colors (or sequence numbers), and while scanning backward through a basic block, tracking the "current sequence number", or in other words, the next number whose op we expect to see. We permit a merge of any load with this sequence number if (i) it's in the same BB and (ii) this use is its only use; then we decrement the sequence number.</p>
+<p>This implements the very simple rule that a load or store never moves over another load or store; but as we sink one, we create space for the one above it to sink, as well.</p>
+<p>(Later we might want to extend this with multiple sequence numbers, one per disjoint unit of state, sort of in the spirit of a vector clock; but details there are TBD.)</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

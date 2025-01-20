@@ -1,0 +1,98 @@
+[
+    {
+        "content": "<p>Is there a timeline for being able to use wasmtime in a Rust/wasm32-unknown-unknown project?</p>\n<p>The use case is as follows:<br>\n  (1) I am trying to use wasm as a JIT for generating code that operates on float32* on the fly (think signal processing type work)<br>\n  (2) I want this app to run both on desktop (appears fine for now) and in browser (does not appear to be able to build wasmtime on arch=wasm32-unknown-unknown)</p>\n<p>I don't need the full power of cranelift. I am just looking for a \"simple\" wasm API that works on both desktop &amp; in browser, where by simple I mean:<br>\n  (*) create a module (from either *.wat or *.wasm)<br>\n  (*) allocate memory<br>\n  (*) call functions<br>\n  (*) write to / read from wasm-memory from Rust</p>",
+        "id": 210460342,
+        "sender_full_name": "zeroexcuses",
+        "timestamp": 1600382545
+    },
+    {
+        "content": "<p>Can you say a bit more about the use-case of using wasmtime-on-wasm to run a wasm module vs. simply running the wasm module itself on that Wasm platform?</p>",
+        "id": 210460544,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1600382714
+    },
+    {
+        "content": "<p>The reason I ask is that at least the JIT portion of Wasmtime becomes sort of a no-op if we were to host Wasmtime on a Wasm platform (with some hypothetical future ability to load and run dynamically generated code; one could polyfill this with JS today). The WASI API implementation still has value, I suppose, but most of Wasmtime's work would simply be to pass through your Wasm module to the underlying Wasm platform, I would think.</p>",
+        "id": 210460830,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1600382904
+    },
+    {
+        "content": "<p>That said, perhaps there's something I'm missing here; or perhaps the right answer is an API layer at the top level that can delegate either to wasmtime (on native) or to a \"call  into JS to load another Wasm module\" shim when running in a browser?</p>",
+        "id": 210460876,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1600382952
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"309488\">@zeroexcuses</span> I recently asked a simmilar question about interpreter support in wasmtime, but your question seems different in that you apparently need the performance that JIT provides. JIT is not supported on wasm32-unknown-unknown and requires the hypothetical future ability that Chris already mentioned, because compiled code is immutable and not observable at runtime: <a href=\"https://webassembly.org/docs/security/\">https://webassembly.org/docs/security/</a></p>\n<p>If you need the performance of dynamic code generation, I assume that you also need the performance of JIT all the way to the host instruction set. If not, directly interpreting something optimised for your use-case probably has better performance than compiling to wasm first, and interpreting the result. Do you agree, or do you think that wasmtime interpreter support could help your use-case?</p>",
+        "id": 210475775,
+        "sender_full_name": "Môshe van der Sterre",
+        "timestamp": 1600399543
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span>  <span class=\"user-mention\" data-user-id=\"296150\">@Morteza Milani</span> </p>\n<p>In reading your responses, I can definitely see how my original question was ambigiolus. I'm now going to take a few steps back and try to motivate the problem.</p>\n<p>*** back story</p>\n<p>Suppose we are working on an APL / J / K interpreter or something num-py like, where we perform arithmetric operations over scalars and vectors. The user types in a mathematical expression at runtime and we evaluate it. For this example, suppose X and Y are vectors of length n.</p>\n<p>Consider the following expression:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"mf\">1.0</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mf\">2.0</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">sqrt</span><span class=\"p\">(</span><span class=\"n\">X</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"n\">Y</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mf\">3.0</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">sqrt</span><span class=\"p\">(</span><span class=\"n\">X</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">Y</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mf\">4.0</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">sqrt</span><span class=\"p\">(</span><span class=\"n\">X</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">Y</span><span class=\"p\">).</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>Evaluating this is going to be memory bound. A dumb / naive approach would have us (1) traversing X &amp; Y multiple times (2) constructing intermediate arrays of length n and (3) traversing those intermediate arrays.</p>\n<p>A better approach would be to compile this to:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">i</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"w\"> </span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">X</span><span class=\"p\">[</span><span class=\"n\">i</span><span class=\"p\">];</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Y</span><span class=\"p\">[</span><span class=\"n\">i</span><span class=\"p\">];</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">out</span><span class=\"p\">[</span><span class=\"n\">i</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">1.0</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mf\">2.0</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">sqrt</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mf\">3.0</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">sqrt</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mf\">4.0</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">sqrt</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"mf\">3.0</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>Now, to do this, we need to do dynamic code generation.</p>\n<p>To have this work both on desktop &amp; in browser, I am considering doing this in wasm.</p>\n<p>In particular, I will be writing a function <code>fn compile(expr: MathExpr) -&gt; WebAssemblyText</code><br>\nwhich I then want to evaluate on some <code>mut *f32 's</code>.</p>\n<p>*** back to original question</p>\n<p>Perhaps wasmtime is overkill for this. What I am looking for is a common (both desktop &amp; browser) API where I can:</p>\n<p>(1) define a new webassembly 'vm'<br>\n(2) allocate some space on this vm (all the f32's will be stored in wasm memory space)<br>\n(3) execute arbitrary dynamically generated WebAsemblyText, passing the *mut f32 of (2) as arguments<br>\n(4) read/write to the *mut f32 in webassembly 'vm'</p>\n<p>I believe that <a href=\"https://github.com/paritytech/wasmi\">https://github.com/paritytech/wasmi</a> satisfies all the above requirements. However, I suspect wasmtime (being more 'native' compared to wasmi being an 'interpreter) is faster -- and performance does matter to me.</p>\n<p>If there is a way to do this in wasmtime -- great! If not, I would appreciate pointers to solving this problem.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/paritytech/wasmi\" style=\"background-image: url(https://avatars2.githubusercontent.com/u/14176906?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/paritytech/wasmi\" title=\"paritytech/wasmi\">paritytech/wasmi</a></div><div class=\"message_embed_description\">Wasm interpreter in Rust. Contribute to paritytech/wasmi development by creating an account on GitHub.</div></div></div>",
+        "id": 210478239,
+        "sender_full_name": "zeroexcuses",
+        "timestamp": 1600403736
+    },
+    {
+        "content": "<p>Having written the above, I do admit it is a bit weird that the original problem of:</p>\n<p>\"I want large blocks of dynamically allocated *f32's, and to execute dynamically generated assembly code on them\"</p>\n<p>has somehow translated into</p>\n<p>\"Is there some simple API that lets me execute wasm/desktop and wasm/wasm\"</p>",
+        "id": 210478512,
+        "sender_full_name": "zeroexcuses",
+        "timestamp": 1600404133
+    },
+    {
+        "content": "<p>This is getting more into your problem domain rather than wasm, but it would be interesting to at least have baseline data for \"small tight interpreter loop that runs arithmetic ops on f32s\". It's probably ... 10x?... 100x?... slower than native SIMD-vectorized high-performance math, but that's something you could do on wasm today</p>",
+        "id": 210478646,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1600404361
+    },
+    {
+        "content": "<p>Alternately, coarser-grained kernels that are compiled (Wasm or even Wasm/SIMD when that's widely available) and invoked from your expression bytecode. I guess that's the numpy approach, basically. If you need arbitrary expressions per loop iter then maybe not so much though.</p>",
+        "id": 210478719,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1600404438
+    },
+    {
+        "content": "<p>Ah, there is one more thing I was not clear on. We have:</p>\n<p>MathExpr -&gt; Desktop/Cuda<br>\nMathExpr -&gt; Desktop/Wasm<br>\nMathExpr -&gt; Browser/Wasm</p>\n<p>I care about the performanc of Desktop/Cuda (fastest on Desktop) and Brwoser/Wasm (fastest in browser).<br>\nI don't care about the performance of Desktop/Wasm. It exists mainly so that I can check Desktop/Cuda ==up-to-floating-point-numerical-errors== Desktop/Wasm, and just assume that Desktop/Wasm == Browser/Wasm.</p>",
+        "id": 210479014,
+        "sender_full_name": "zeroexcuses",
+        "timestamp": 1600404997
+    },
+    {
+        "content": "<p>Oh, GPUs, right... also out of Wasm's domain, but is GPU-based compute using shaders with WebGL an option?</p>",
+        "id": 210479093,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1600405120
+    },
+    {
+        "content": "<p>Otherwise I would say that dynamically generating a Wasm module is probably your best bet. If you know you're in Wasm in a browser you can bounce out to JS to call <code>WebAssembly.compile</code>; doesn't help your desktop case directly though, without some more work</p>",
+        "id": 210479101,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1600405193
+    },
+    {
+        "content": "<p>Shaders w/ WebGL is definitely in theory possible. However, I a control Desktop/Server, so I know I can do Cuda there. On the other hand, Browser runs on user's device and afaik, I can't rely on more than just Wasm.</p>\n<p>I guess refining the original question a bit more, what I need is:</p>\n<ul>\n<li>some WASM API that gives me near zero-overhead in browser</li>\n<li>is tolerable on desktop</li>\n</ul>\n<p>and preferably the same API, so I don't have #cfg's everywhere and can have faith that Desktop/wasm codepath == Browser/wasm codepath.</p>",
+        "id": 210479174,
+        "sender_full_name": "zeroexcuses",
+        "timestamp": 1600405255
+    },
+    {
+        "content": "<p>Now that we have refined the question to this point -- this actually throws out most of the advantage that wasmtime provides?</p>",
+        "id": 210479220,
+        "sender_full_name": "zeroexcuses",
+        "timestamp": 1600405323
+    },
+    {
+        "content": "<p>Well, I would say that wasmtime-compiled-to-wasm is out, at least; and for near-zero overhead in the browser, you'll want to go directly to the native wasm compiler. Then probably what you'd want to do is paper over this with an abstraction that has two backends, the other of which plugs into whatever desktop-Wasm engine you're using via some support code outside the wasm module (missed this above; is it wasmtime also, or Node, or...?).</p>",
+        "id": 210479307,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1600405463
+    },
+    {
+        "content": "<p>Afaik, I'm not using Node on Rust/x86. Are you suggesting:</p>\n<p>browser: <a href=\"https://rustwasm.github.io/wasm-bindgen/examples/wasm-in-wasm.html\">https://rustwasm.github.io/wasm-bindgen/examples/wasm-in-wasm.html</a><br>\ndesktop: wasmi or wasmtime</p>\n<p>then write a very thin abstraction layer myself over the two abstracting out: creating vm, malloc/free, read/write *f32, executing arbitrary WAT ?</p>",
+        "id": 210479576,
+        "sender_full_name": "zeroexcuses",
+        "timestamp": 1600405941
+    }
+]

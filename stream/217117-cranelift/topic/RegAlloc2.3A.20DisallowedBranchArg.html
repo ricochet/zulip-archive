@@ -1,0 +1,258 @@
+<html>
+<head><meta charset="utf-8"><title>RegAlloc2: DisallowedBranchArg · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html">RegAlloc2: DisallowedBranchArg</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="448205056"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448205056" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448205056">(Jul 01 2024 at 02:21)</a>:</h4>
+<p>Hello, I am using RegAlloc2 and have a question. I have produced the following MachineCode instructions. Their Mnemonics and Operands Vec can be seen here:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">   </span><span class="n">cmp_r_m</span><span class="w"> </span><span class="p">(</span><span class="n">Use</span><span class="p">:</span><span class="w"> </span><span class="nc">v23i</span><span class="w"> </span><span class="n">reg</span><span class="p">),(</span><span class="n">Use</span><span class="p">:</span><span class="w"> </span><span class="nc">v25i</span><span class="w"> </span><span class="n">reg</span><span class="p">),(</span><span class="n">Def</span><span class="p">:</span><span class="w"> </span><span class="nc">v28v</span><span class="w"> </span><span class="n">fixed</span><span class="p">(</span><span class="n">p6v</span><span class="p">)),</span>
+<span class="w">   </span><span class="n">jne</span><span class="w"> </span><span class="p">(</span><span class="n">Use</span><span class="p">:</span><span class="w"> </span><span class="nc">v0i</span><span class="w"> </span><span class="n">any</span><span class="p">),(</span><span class="n">Use</span><span class="p">:</span><span class="w"> </span><span class="nc">v28v</span><span class="w"> </span><span class="n">fixed</span><span class="p">(</span><span class="n">p6v</span><span class="p">)),</span>
+</code></pre></div>
+<p>However, the second operand(v28v) in the JNE is an x86 flag. The zero flag. This needs to be used by the JNE as it needs to be materialized in the actual ZF bit in the EFLAGS register however none of the successor blocks actually use this and so it isn't a branch parameter. The only real block parameter here is v0i, passed to both successors of the JNE.</p>
+<p>When running RegAlloc2 over this, I get the DisallowedBranchArg(inst) specifying that JNE.</p>
+<p>The docs say to create an "edge block" to solve this issue. I assume that means I need to insert blocks in between the current block and each of its predecessors that expects an additional parameter(which would be the ZF value used by the JNE). Then this could be discarded in the edge blocks before unconditionally branching to the real successors.</p>
+<p>Alternatively, could I just add this extra operand to each of the successor blocks parameter lists, even though they don't actually use it? Seems like that might be the best option.</p>
+<p>Thank you.</p>
+
+
+
+<a name="448209630"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448209630" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448209630">(Jul 01 2024 at 03:11)</a>:</h4>
+<p>More basic question (X-Y issue at play here): why track eflags via register allocation? It has special constraints (only one register, can't easily be spilled), is implicitly written by many instructions, and is usually handled specially during isel</p>
+
+
+
+<a name="448209699"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448209699" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448209699">(Jul 01 2024 at 03:12)</a>:</h4>
+<p>What we do in Cranelift is to implicitly get the eflags dataflow right by generating the cmp right before the conditional jump; RA2 doesn't otherwise know anything about it</p>
+
+
+
+<a name="448210415"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448210415" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448210415">(Jul 01 2024 at 03:21)</a>:</h4>
+<p>If I could avoid having to model the flags I would, but as it stands I cannot. I have them modeled each with their own individual PREG and instructions that use them can require that they come in in the right place. Then define MachineInstructions like this. This one is for x86 setne.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="n">setne</span><span class="p">(</span>
+<span class="w">        </span><span class="n">Data</span><span class="p">(),</span>
+<span class="w">        </span><span class="n">RegIn</span><span class="p">(),</span>
+<span class="w">        </span><span class="n">FlagIn</span><span class="p">(</span>
+<span class="w">            </span><span class="p">(</span><span class="n">zf</span><span class="p">,</span><span class="w"> </span><span class="n">OperandConstraint</span><span class="p">::</span><span class="n">FixedReg</span><span class="p">(</span><span class="n">PREG_ZF</span><span class="p">))</span>
+<span class="w">        </span><span class="p">),</span>
+<span class="w">        </span><span class="n">RegOut</span><span class="p">(</span>
+<span class="w">            </span><span class="p">(</span><span class="n">output</span><span class="p">,</span><span class="w"> </span><span class="n">OperandConstraint</span><span class="p">::</span><span class="n">Any</span><span class="p">)</span>
+<span class="w">        </span><span class="p">),</span>
+<span class="w">        </span><span class="n">FlagOut</span><span class="p">()</span>
+<span class="w">    </span><span class="p">),</span>
+</code></pre></div>
+
+
+
+<a name="448210535"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448210535" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448210535">(Jul 01 2024 at 03:23)</a>:</h4>
+<p>Ofc modeling them this way is really annoying when regalloc2 DOES create an edit which moves from one flag to another. But this is kinda rare.</p>
+
+
+
+<a name="448210590"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448210590" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448210590">(Jul 01 2024 at 03:23)</a>:</h4>
+<p>Can you say more <em>why</em> you need to model flags in this way? regalloc2 unfortunately is not designed to handle this (as you're seeing with the constraints around conditional-jump inputs).</p>
+
+
+
+<a name="448210817"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448210817" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448210817">(Jul 01 2024 at 03:26)</a>:</h4>
+<p>The input is the result of an x86 lifter. The flags have to be modeled and ideally I'd like to keep them in their original registers whenever possible. Trust me I know regalloc2 isn't setup to handle this <span aria-label="rofl" class="emoji emoji-1f923" role="img" title="rofl">:rofl:</span>. If there were more(unlimited) RegClasses I could prevent flag-to-flag moves. I considered forking and trying to implement this(side question: do you think that would be difficult to do?)</p>
+
+
+
+<a name="448211000"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211000" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211000">(Jul 01 2024 at 03:29)</a>:</h4>
+<p>It's an interesting question! The constraint around jump inputs comes mainly from the move-insertion (edge cases around where to place moves); I have vague recollections of running into some fuzzbugs and inserting this constraint, but no solid summary of what the problems will be, so it's worth removing the check, fuzzing, and seeing what comes up.</p>
+
+
+
+<a name="448211033"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211033" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211033">(Jul 01 2024 at 03:29)</a>:</h4>
+<p>(And as it goes, there is one free regclass: we have two bits now and only have three classes defined, Int, Float and Vector)</p>
+
+
+
+<a name="448211061"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211061" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211061">(Jul 01 2024 at 03:29)</a>:</h4>
+<p>Need at least 6 more unfortunately <span aria-label="pensive" class="emoji emoji-1f614" role="img" title="pensive">:pensive:</span></p>
+
+
+
+<a name="448211136"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211136" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211136">(Jul 01 2024 at 03:30)</a>:</h4>
+<p>How does regalloc 2 handle MIPs like branching, where there are uses of registers in the branch?</p>
+
+
+
+<a name="448211154"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211154" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211154">(Jul 01 2024 at 03:30)</a>:</h4>
+<p>Ah, if you know your function bodies won't be large, you could steal more bits from the vreg index</p>
+
+
+
+<a name="448211194"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211194" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211194">(Jul 01 2024 at 03:31)</a>:</h4>
+<p>(I'm not sure what a "MIP" is but branch instructions are handled mostly like any other in terms of uses and defs; they're only special w.r.t. move insertion for edge-moves)</p>
+
+
+
+<a name="448211262"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211262" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211262">(Jul 01 2024 at 03:31)</a>:</h4>
+<p>Might try doing that^ shouldn't be very large.</p>
+<p>MIPS as in the architecture:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">BNE</span><span class="w"> </span><span class="cp">$t0</span><span class="p">,</span><span class="cp">$t1</span><span class="p">,</span><span class="n">Target</span>
+</code></pre></div>
+<p>It has uses of registers, so they would be in the operand slice, but it conceivably might not be passing these values on to the successor blocks.</p>
+
+
+
+<a name="448211385"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211385" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211385">(Jul 01 2024 at 03:33)</a>:</h4>
+<p>ah, MIPS, sorry, parse error! We do generate <code>cbz</code>/<code>cbnz</code> in Cranelift on aarch64 which takes one register arg, and branch insts on risc-v which take two; I'm honestly blanking on how this works but that would be the place to start</p>
+
+
+
+<a name="448211478"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211478" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211478">(Jul 01 2024 at 03:34)</a>:</h4>
+<p><span aria-label="thumbs up" class="emoji emoji-1f44d" role="img" title="thumbs up">:thumbs_up:</span> thank you. I think however that's solved should be similar to the solution I'm looking for. Similar case at least, ignoring the fact that I'm doing dumb things with the flags.</p>
+
+
+
+<a name="448211496"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211496" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211496">(Jul 01 2024 at 03:34)</a>:</h4>
+<p>Ah, OK, that's how: as per <a href="https://github.com/bytecodealliance/regalloc2/blob/f4812a23efc82466ed8377c6e11113134e13f425/src/cfg.rs#L73-L77">here</a> we ensure the CFG is such that moves can be placed in successor blocks instead</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/regalloc2/blob/f4812a23efc82466ed8377c6e11113134e13f425/src/cfg.rs#L73-L77" style="background-image: url(&quot;https://uploads.zulipusercontent.net/af458113e7a18995a49b5f29f1e16ce70d03e0f5/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f386230636636346462643633636139333063623862343338306130383530626630353332333364623031386631383764653763653830623539656233623430322f62797465636f6465616c6c69616e63652f726567616c6c6f6332&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/regalloc2/blob/f4812a23efc82466ed8377c6e11113134e13f425/src/cfg.rs#L73-L77" title="regalloc2/src/cfg.rs at f4812a23efc82466ed8377c6e11113134e13f425 · bytecodealliance/regalloc2">regalloc2/src/cfg.rs at f4812a23efc82466ed8377c6e11113134e13f425 · bytecodealliance/regalloc2</a></div><div class="message_embed_description">A new register allocator. Contribute to bytecodealliance/regalloc2 development by creating an account on GitHub.</div></div></div>
+
+
+
+<a name="448211512"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211512" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211512">(Jul 01 2024 at 03:34)</a>:</h4>
+<p>so, back to your original message, something like "split the edge blocks" sounds like the right answer :-)</p>
+
+
+
+<a name="448211537"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211537" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211537">(Jul 01 2024 at 03:35)</a>:</h4>
+<p>(in Cranelift's BlockLoweringOrder we always ensure we split critical edges)</p>
+
+
+
+<a name="448211654"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211654" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211654">(Jul 01 2024 at 03:36)</a>:</h4>
+<p>If I just tacked on the flag's needed by the branch to the params of each of the successors, would that work too?</p>
+<p>So that now the flag(s) are used by the branch, and used in the params of the successor blocks.</p>
+
+
+
+<a name="448211852"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211852" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211852">(Jul 01 2024 at 03:39)</a>:</h4>
+<p>not necessarily, as the edge moves may (should) happen in the successor blocks' starts if there are multiple successors</p>
+
+
+
+<a name="448211869"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211869" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211869">(Jul 01 2024 at 03:39)</a>:</h4>
+<p>in other words the flags will be alive, somewhere, but RA2 isn't set up to tell you where</p>
+
+
+
+<a name="448211926"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211926" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211926">(Jul 01 2024 at 03:40)</a>:</h4>
+<p>better to split the block edges and use a true arg, then all the machinery will naturally work to give you the location</p>
+
+
+
+<a name="448211980"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448211980" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448211980">(Jul 01 2024 at 03:41)</a>:</h4>
+<p>are the operands of the branch instruction itself ignored then? I would put the flag in an use operand to the branch with a FixedReg constraint(which would force the move to happen before?)</p>
+
+
+
+<a name="448212111"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448212111" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448212111">(Jul 01 2024 at 03:42)</a>:</h4>
+<p>no, the normal args to the branch (not block args) should work properly</p>
+
+
+
+<a name="448212210"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448212210" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448212210">(Jul 01 2024 at 03:43)</a>:</h4>
+<p>(and yes, moves necessary to put things in place would happen before the branch)</p>
+
+
+
+<a name="448212244"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448212244" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448212244">(Jul 01 2024 at 03:43)</a>:</h4>
+<p>Ok I'll give it a shot and report back <span aria-label="salute" class="emoji emoji-1fae1" role="img" title="salute">:salute:</span></p>
+
+
+
+<a name="448212265"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448212265" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448212265">(Jul 01 2024 at 03:43)</a>:</h4>
+<p>best of luck!</p>
+
+
+
+<a name="448212301"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448212301" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448212301">(Jul 01 2024 at 03:43)</a>:</h4>
+<p>Going to look into increasing VReg size as well <span aria-label="eyes" class="emoji emoji-1f440" role="img" title="eyes">:eyes:</span></p>
+
+
+
+<a name="448213262"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448213262" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448213262">(Jul 01 2024 at 03:55)</a>:</h4>
+<p>Ok so here is what is the problem now: </p>
+<div class="message_inline_image"><a href="https://i.imgur.com/HMmTWzv.png"><img src="https://uploads.zulipusercontent.net/b165b2c9a79082a141a430cc37111467d11f6d4e/68747470733a2f2f692e696d6775722e636f6d2f484d6d54577a762e706e67"></a></div>
+
+
+
+<a name="448213272"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448213272" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448213272">(Jul 01 2024 at 03:55)</a>:</h4>
+<p>And I will solve it by doing this.<br>
+<a href="https://i.imgur.com/BP6XmjB.png">https://i.imgur.com/BP6XmjB.png</a></p>
+<div class="message_inline_image"><a href="https://i.imgur.com/BP6XmjB.png"><img src="https://uploads.zulipusercontent.net/ba969411450a34695e235f9754075b6427ddeb65/68747470733a2f2f692e696d6775722e636f6d2f425036586d6a422e706e67"></a></div>
+
+
+
+<a name="448213289"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448213289" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448213289">(Jul 01 2024 at 03:55)</a>:</h4>
+<p>Dummy edge blocks that consume the ZF, and pass only the expected args to the true successors.</p>
+
+
+
+<a name="448216406"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448216406" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448216406">(Jul 01 2024 at 04:28)</a>:</h4>
+<p>Sounds good except I don't think it should be necessary to consume ZF in the successor blocks: the branch itself using ZF should be enough (i.e., encode only the actual dependence)</p>
+
+
+
+<a name="448216589"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448216589" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448216589">(Jul 01 2024 at 04:29)</a>:</h4>
+<p>the purpose of the edge-split blocks is to give the regalloc a place to put moves that have to happen "on the edge"; without that, there'd be no place to put such moves for the top-center-to-bottom-left edge (because prior to the cond branch, we could go either way, we don't know we're taking that edge; and in teh bottom-left block, we could have come from top-center or top-left)</p>
+
+
+
+<a name="448216726"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448216726" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448216726">(Jul 01 2024 at 04:30)</a>:</h4>
+<p>once that block is there, regalloc is happy to let the cond br consume things, because it knows it doesn't have to put moves before the branch</p>
+
+
+
+<a name="448223433"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/RegAlloc2%3A%20DisallowedBranchArg/near/448223433" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leaves <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/RegAlloc2.3A.20DisallowedBranchArg.html#448223433">(Jul 01 2024 at 05:12)</a>:</h4>
+<p>yep noticed that too as implementing, adding the block alone will remove the multiple predecessors on successor violation.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

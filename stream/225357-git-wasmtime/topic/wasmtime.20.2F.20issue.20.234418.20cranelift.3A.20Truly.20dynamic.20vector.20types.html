@@ -1,0 +1,348 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #4418 cranelift: Truly dynamic vector types · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234418.20cranelift.3A.20Truly.20dynamic.20vector.20types.html">wasmtime / issue #4418 cranelift: Truly dynamic vector types</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="288939603"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234418%20cranelift%3A%20Truly%20dynamic%20vector%20types/near/288939603" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234418.20cranelift.3A.20Truly.20dynamic.20vector.20types.html#288939603">(Jul 08 2022 at 13:25)</a>:</h4>
+<p>sparker-arm opened <a href="https://github.com/bytecodealliance/wasmtime/issues/4418">issue #4418</a>:</p>
+<blockquote>
+<h3>Current Status</h3>
+<p>Basic support for dynamic vector types has been <a href="https://github.com/bytecodealliance/wasmtime/commit/9c43749dfe0b378c40b9932694d248c3546abac3">committed</a> in preparation to support the Wasm <a href="https://github.com/WebAssembly/flexible-vectors">Flexible Vectors</a> extension. The RFC discussion around the design is <a href="https://github.com/bytecodealliance/rfcs/pull/19">here</a>. And while we now have support for dynamic/flexible/scalable vectors, it doesn't support proper dynamic types. This is a top-level issue for what needs to be done to get there.</p>
+<p>Cranelift's type system now contains a dynamic vector type for each corresponding fixed-width type, with the dynamic type being a fixed-width type scaled by a target-defined factor. Currently, this factor (<code>dyn_scale_target_const</code>) is legalized to a constant. This makes lowering and stack layout simple. Below is an example CLIF function.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">i8x16_splat_add</span><span class="p">(</span><span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="kt">i8</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i8x16</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">gv0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dyn_scale_target_const</span><span class="p">.</span><span class="n">i8x16</span><span class="w"></span>
+<span class="w">  </span><span class="n">dt0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i8x16</span><span class="o">*</span><span class="n">gv0</span><span class="w"></span>
+
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i8</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span><span class="w"></span>
+<span class="w">  </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">extract_vector</span><span class="w"> </span><span class="n">v4</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v5</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<h3>Next Steps</h3>
+<p>The two main areas that need more work are in IR and the MachInst ABI layer. The first part is to modify, or introduce a new <code>GlobalValue</code>, that will be legalized and lowered to a runtime scaling value. Maybe in a similar way to how global values are currently used in the ABI for generating the stack limit.</p>
+<p>The second, and bigger issue, is in the ABI layer where we determine the stack layout. A complicating factor here is that the 'Vanilla' layer is mainly shared between the backends and, of course, everything is also designed around known constant sizes. However, I think the biggest challenge is the interface with the register allocator.</p>
+<p><strong>Spill Slots</strong><br>
+The register allocator currently only supports two register classes, and types are aren't tracked, so there is the potential for a target with wide vector support to use far more stack than necessary. For example, with the current implementation, a target using AVX-512 would require 64-bytes to spill a single precision float. </p>
+<p>To enable truly dynamic types, the interface with the register allocator will need to change. If we leave it to return a constant value, we will need to accommodate the maximum possible register size (2KB in the case of SVE) and that is a prohibitive cost for most CPUs.</p>
+<p>Also, with wider vectors usually comes predication and predicate registers are unlikely to map to either of the existing regalloc classes either.</p>
+<p><strong>Stack Slots</strong><br>
+Along with spill slots, our frame layout will need to handle dynamically sized stack slots which are defined in the IR or, possibly, arguments passed on the stack. The current stack layout is as follows (there's currently no distinction between spill slots for fixed and dynamic types):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="sd">//!   (high address)</span>
+<span class="sd">//!</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | stack args                |</span>
+<span class="sd">//!                              | (accessed via FP)         |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! SP at function entry -----&gt;  | return address            |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! FP after prologue --------&gt;  | FP (pushed by prologue)   |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | clobbered callee-saves    |</span>
+<span class="sd">//! unwind-frame base     ----&gt;  | (pushed by prologue)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | spill slots               |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | sized stack slots         |</span>
+<span class="sd">//!                              | dynamic stack slots       |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//! nominal SP ---------------&gt;  | (alloc'd by prologue)     |</span>
+<span class="sd">//! (SP at end of prologue)      +---------------------------+</span>
+<span class="sd">//!                              | [alignment as needed]     |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | args for call             |</span>
+<span class="sd">//! SP before making a call --&gt;  | (pushed at callsite)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!</span>
+<span class="sd">//!   (low address)</span>
+</code></pre></div>
+<p>We likely want to collect all the dynamically sized stack values and move them up the stack and introduce a new <code>StackAMode</code> to be addressed by FP. Spill and stack slots of compile-time known sizes can accessed as they are now, but the way we calculate at the end of the prologue will need to be modified. The current implementation allows the <code>TargetIsa</code> to report a fixed size for each dynamic type and so stack offsets can be calculated at compile-time. For dynamically-sized objects, _I think_ we'll want to use <code>vmctx</code> to generate our scaling factor from a <code>GlobalValue</code> and then multiple a slot index by the scaling factor to get our address.</p>
+<p>It could be that a target wants to specify multiple scaling values though, depending on the type/register that will be used. So, we could group the values so that each group is using the same scale value. The awkward part here is that we won't have a uniform space to scale across, and so we'll need a method to 'jump' over groups. <br>
+</p>
+</blockquote>
+
+
+
+<a name="288939604"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234418%20cranelift%3A%20Truly%20dynamic%20vector%20types/near/288939604" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234418.20cranelift.3A.20Truly.20dynamic.20vector.20types.html#288939604">(Jul 08 2022 at 13:25)</a>:</h4>
+<p>sparker-arm labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4418">issue #4418</a>:</p>
+<blockquote>
+<h3>Current Status</h3>
+<p>Basic support for dynamic vector types has been <a href="https://github.com/bytecodealliance/wasmtime/commit/9c43749dfe0b378c40b9932694d248c3546abac3">committed</a> in preparation to support the Wasm <a href="https://github.com/WebAssembly/flexible-vectors">Flexible Vectors</a> extension. The RFC discussion around the design is <a href="https://github.com/bytecodealliance/rfcs/pull/19">here</a>. And while we now have support for dynamic/flexible/scalable vectors, it doesn't support proper dynamic types. This is a top-level issue for what needs to be done to get there.</p>
+<p>Cranelift's type system now contains a dynamic vector type for each corresponding fixed-width type, with the dynamic type being a fixed-width type scaled by a target-defined factor. Currently, this factor (<code>dyn_scale_target_const</code>) is legalized to a constant. This makes lowering and stack layout simple. Below is an example CLIF function.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">i8x16_splat_add</span><span class="p">(</span><span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="kt">i8</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i8x16</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">gv0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dyn_scale_target_const</span><span class="p">.</span><span class="n">i8x16</span><span class="w"></span>
+<span class="w">  </span><span class="n">dt0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i8x16</span><span class="o">*</span><span class="n">gv0</span><span class="w"></span>
+
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i8</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span><span class="w"></span>
+<span class="w">  </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">extract_vector</span><span class="w"> </span><span class="n">v4</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v5</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<h3>Next Steps</h3>
+<p>The two main areas that need more work are in IR and the MachInst ABI layer. The first part is to modify, or introduce a new <code>GlobalValue</code>, that will be legalized and lowered to a runtime scaling value. Maybe in a similar way to how global values are currently used in the ABI for generating the stack limit.</p>
+<p>The second, and bigger issue, is in the ABI layer where we determine the stack layout. A complicating factor here is that the 'Vanilla' layer is mainly shared between the backends and, of course, everything is also designed around known constant sizes. However, I think the biggest challenge is the interface with the register allocator.</p>
+<p><strong>Spill Slots</strong><br>
+The register allocator currently only supports two register classes, and types are aren't tracked, so there is the potential for a target with wide vector support to use far more stack than necessary. For example, with the current implementation, a target using AVX-512 would require 64-bytes to spill a single precision float. </p>
+<p>To enable truly dynamic types, the interface with the register allocator will need to change. If we leave it to return a constant value, we will need to accommodate the maximum possible register size (2KB in the case of SVE) and that is a prohibitive cost for most CPUs.</p>
+<p>Also, with wider vectors usually comes predication and predicate registers are unlikely to map to either of the existing regalloc classes either.</p>
+<p><strong>Stack Slots</strong><br>
+Along with spill slots, our frame layout will need to handle dynamically sized stack slots which are defined in the IR or, possibly, arguments passed on the stack. The current stack layout is as follows (there's currently no distinction between spill slots for fixed and dynamic types):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="sd">//!   (high address)</span>
+<span class="sd">//!</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | stack args                |</span>
+<span class="sd">//!                              | (accessed via FP)         |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! SP at function entry -----&gt;  | return address            |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! FP after prologue --------&gt;  | FP (pushed by prologue)   |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | clobbered callee-saves    |</span>
+<span class="sd">//! unwind-frame base     ----&gt;  | (pushed by prologue)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | spill slots               |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | sized stack slots         |</span>
+<span class="sd">//!                              | dynamic stack slots       |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//! nominal SP ---------------&gt;  | (alloc'd by prologue)     |</span>
+<span class="sd">//! (SP at end of prologue)      +---------------------------+</span>
+<span class="sd">//!                              | [alignment as needed]     |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | args for call             |</span>
+<span class="sd">//! SP before making a call --&gt;  | (pushed at callsite)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!</span>
+<span class="sd">//!   (low address)</span>
+</code></pre></div>
+<p>We likely want to collect all the dynamically sized stack values and move them up the stack and introduce a new <code>StackAMode</code> to be addressed by FP. Spill and stack slots of compile-time known sizes can accessed as they are now, but the way we calculate at the end of the prologue will need to be modified. The current implementation allows the <code>TargetIsa</code> to report a fixed size for each dynamic type and so stack offsets can be calculated at compile-time. For dynamically-sized objects, _I think_ we'll want to use <code>vmctx</code> to generate our scaling factor from a <code>GlobalValue</code> and then multiple a slot index by the scaling factor to get our address.</p>
+<p>It could be that a target wants to specify multiple scaling values though, depending on the type/register that will be used. So, we could group the values so that each group is using the same scale value. The awkward part here is that we won't have a uniform space to scale across, and so we'll need a method to 'jump' over groups. <br>
+</p>
+</blockquote>
+
+
+
+<a name="288939608"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234418%20cranelift%3A%20Truly%20dynamic%20vector%20types/near/288939608" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234418.20cranelift.3A.20Truly.20dynamic.20vector.20types.html#288939608">(Jul 08 2022 at 13:25)</a>:</h4>
+<p>sparker-arm labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4418">issue #4418</a>:</p>
+<blockquote>
+<h3>Current Status</h3>
+<p>Basic support for dynamic vector types has been <a href="https://github.com/bytecodealliance/wasmtime/commit/9c43749dfe0b378c40b9932694d248c3546abac3">committed</a> in preparation to support the Wasm <a href="https://github.com/WebAssembly/flexible-vectors">Flexible Vectors</a> extension. The RFC discussion around the design is <a href="https://github.com/bytecodealliance/rfcs/pull/19">here</a>. And while we now have support for dynamic/flexible/scalable vectors, it doesn't support proper dynamic types. This is a top-level issue for what needs to be done to get there.</p>
+<p>Cranelift's type system now contains a dynamic vector type for each corresponding fixed-width type, with the dynamic type being a fixed-width type scaled by a target-defined factor. Currently, this factor (<code>dyn_scale_target_const</code>) is legalized to a constant. This makes lowering and stack layout simple. Below is an example CLIF function.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">i8x16_splat_add</span><span class="p">(</span><span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="kt">i8</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i8x16</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">gv0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dyn_scale_target_const</span><span class="p">.</span><span class="n">i8x16</span><span class="w"></span>
+<span class="w">  </span><span class="n">dt0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i8x16</span><span class="o">*</span><span class="n">gv0</span><span class="w"></span>
+
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i8</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span><span class="w"></span>
+<span class="w">  </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">extract_vector</span><span class="w"> </span><span class="n">v4</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v5</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<h3>Next Steps</h3>
+<p>The two main areas that need more work are in IR and the MachInst ABI layer. The first part is to modify, or introduce a new <code>GlobalValue</code>, that will be legalized and lowered to a runtime scaling value. Maybe in a similar way to how global values are currently used in the ABI for generating the stack limit.</p>
+<p>The second, and bigger issue, is in the ABI layer where we determine the stack layout. A complicating factor here is that the 'Vanilla' layer is mainly shared between the backends and, of course, everything is also designed around known constant sizes. However, I think the biggest challenge is the interface with the register allocator.</p>
+<p><strong>Spill Slots</strong><br>
+The register allocator currently only supports two register classes, and types are aren't tracked, so there is the potential for a target with wide vector support to use far more stack than necessary. For example, with the current implementation, a target using AVX-512 would require 64-bytes to spill a single precision float. </p>
+<p>To enable truly dynamic types, the interface with the register allocator will need to change. If we leave it to return a constant value, we will need to accommodate the maximum possible register size (2KB in the case of SVE) and that is a prohibitive cost for most CPUs.</p>
+<p>Also, with wider vectors usually comes predication and predicate registers are unlikely to map to either of the existing regalloc classes either.</p>
+<p><strong>Stack Slots</strong><br>
+Along with spill slots, our frame layout will need to handle dynamically sized stack slots which are defined in the IR or, possibly, arguments passed on the stack. The current stack layout is as follows (there's currently no distinction between spill slots for fixed and dynamic types):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="sd">//!   (high address)</span>
+<span class="sd">//!</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | stack args                |</span>
+<span class="sd">//!                              | (accessed via FP)         |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! SP at function entry -----&gt;  | return address            |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! FP after prologue --------&gt;  | FP (pushed by prologue)   |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | clobbered callee-saves    |</span>
+<span class="sd">//! unwind-frame base     ----&gt;  | (pushed by prologue)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | spill slots               |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | sized stack slots         |</span>
+<span class="sd">//!                              | dynamic stack slots       |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//! nominal SP ---------------&gt;  | (alloc'd by prologue)     |</span>
+<span class="sd">//! (SP at end of prologue)      +---------------------------+</span>
+<span class="sd">//!                              | [alignment as needed]     |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | args for call             |</span>
+<span class="sd">//! SP before making a call --&gt;  | (pushed at callsite)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!</span>
+<span class="sd">//!   (low address)</span>
+</code></pre></div>
+<p>We likely want to collect all the dynamically sized stack values and move them up the stack and introduce a new <code>StackAMode</code> to be addressed by FP. Spill and stack slots of compile-time known sizes can accessed as they are now, but the way we calculate at the end of the prologue will need to be modified. The current implementation allows the <code>TargetIsa</code> to report a fixed size for each dynamic type and so stack offsets can be calculated at compile-time. For dynamically-sized objects, _I think_ we'll want to use <code>vmctx</code> to generate our scaling factor from a <code>GlobalValue</code> and then multiple a slot index by the scaling factor to get our address.</p>
+<p>It could be that a target wants to specify multiple scaling values though, depending on the type/register that will be used. So, we could group the values so that each group is using the same scale value. The awkward part here is that we won't have a uniform space to scale across, and so we'll need a method to 'jump' over groups. <br>
+</p>
+</blockquote>
+
+
+
+<a name="288939609"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234418%20cranelift%3A%20Truly%20dynamic%20vector%20types/near/288939609" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234418.20cranelift.3A.20Truly.20dynamic.20vector.20types.html#288939609">(Jul 08 2022 at 13:25)</a>:</h4>
+<p>sparker-arm labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4418">issue #4418</a>:</p>
+<blockquote>
+<h3>Current Status</h3>
+<p>Basic support for dynamic vector types has been <a href="https://github.com/bytecodealliance/wasmtime/commit/9c43749dfe0b378c40b9932694d248c3546abac3">committed</a> in preparation to support the Wasm <a href="https://github.com/WebAssembly/flexible-vectors">Flexible Vectors</a> extension. The RFC discussion around the design is <a href="https://github.com/bytecodealliance/rfcs/pull/19">here</a>. And while we now have support for dynamic/flexible/scalable vectors, it doesn't support proper dynamic types. This is a top-level issue for what needs to be done to get there.</p>
+<p>Cranelift's type system now contains a dynamic vector type for each corresponding fixed-width type, with the dynamic type being a fixed-width type scaled by a target-defined factor. Currently, this factor (<code>dyn_scale_target_const</code>) is legalized to a constant. This makes lowering and stack layout simple. Below is an example CLIF function.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">i8x16_splat_add</span><span class="p">(</span><span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="kt">i8</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i8x16</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">gv0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dyn_scale_target_const</span><span class="p">.</span><span class="n">i8x16</span><span class="w"></span>
+<span class="w">  </span><span class="n">dt0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i8x16</span><span class="o">*</span><span class="n">gv0</span><span class="w"></span>
+
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i8</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span><span class="w"></span>
+<span class="w">  </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">extract_vector</span><span class="w"> </span><span class="n">v4</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v5</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<h3>Next Steps</h3>
+<p>The two main areas that need more work are in IR and the MachInst ABI layer. The first part is to modify, or introduce a new <code>GlobalValue</code>, that will be legalized and lowered to a runtime scaling value. Maybe in a similar way to how global values are currently used in the ABI for generating the stack limit.</p>
+<p>The second, and bigger issue, is in the ABI layer where we determine the stack layout. A complicating factor here is that the 'Vanilla' layer is mainly shared between the backends and, of course, everything is also designed around known constant sizes. However, I think the biggest challenge is the interface with the register allocator.</p>
+<p><strong>Spill Slots</strong><br>
+The register allocator currently only supports two register classes, and types are aren't tracked, so there is the potential for a target with wide vector support to use far more stack than necessary. For example, with the current implementation, a target using AVX-512 would require 64-bytes to spill a single precision float. </p>
+<p>To enable truly dynamic types, the interface with the register allocator will need to change. If we leave it to return a constant value, we will need to accommodate the maximum possible register size (2KB in the case of SVE) and that is a prohibitive cost for most CPUs.</p>
+<p>Also, with wider vectors usually comes predication and predicate registers are unlikely to map to either of the existing regalloc classes either.</p>
+<p><strong>Stack Slots</strong><br>
+Along with spill slots, our frame layout will need to handle dynamically sized stack slots which are defined in the IR or, possibly, arguments passed on the stack. The current stack layout is as follows (there's currently no distinction between spill slots for fixed and dynamic types):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="sd">//!   (high address)</span>
+<span class="sd">//!</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | stack args                |</span>
+<span class="sd">//!                              | (accessed via FP)         |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! SP at function entry -----&gt;  | return address            |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! FP after prologue --------&gt;  | FP (pushed by prologue)   |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | clobbered callee-saves    |</span>
+<span class="sd">//! unwind-frame base     ----&gt;  | (pushed by prologue)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | spill slots               |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | sized stack slots         |</span>
+<span class="sd">//!                              | dynamic stack slots       |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//! nominal SP ---------------&gt;  | (alloc'd by prologue)     |</span>
+<span class="sd">//! (SP at end of prologue)      +---------------------------+</span>
+<span class="sd">//!                              | [alignment as needed]     |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | args for call             |</span>
+<span class="sd">//! SP before making a call --&gt;  | (pushed at callsite)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!</span>
+<span class="sd">//!   (low address)</span>
+</code></pre></div>
+<p>We likely want to collect all the dynamically sized stack values and move them up the stack and introduce a new <code>StackAMode</code> to be addressed by FP. Spill and stack slots of compile-time known sizes can accessed as they are now, but the way we calculate at the end of the prologue will need to be modified. The current implementation allows the <code>TargetIsa</code> to report a fixed size for each dynamic type and so stack offsets can be calculated at compile-time. For dynamically-sized objects, _I think_ we'll want to use <code>vmctx</code> to generate our scaling factor from a <code>GlobalValue</code> and then multiple a slot index by the scaling factor to get our address.</p>
+<p>It could be that a target wants to specify multiple scaling values though, depending on the type/register that will be used. So, we could group the values so that each group is using the same scale value. The awkward part here is that we won't have a uniform space to scale across, and so we'll need a method to 'jump' over groups. <br>
+</p>
+</blockquote>
+
+
+
+<a name="289216179"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234418%20cranelift%3A%20Truly%20dynamic%20vector%20types/near/289216179" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234418.20cranelift.3A.20Truly.20dynamic.20vector.20types.html#289216179">(Jul 11 2022 at 16:26)</a>:</h4>
+<p>akirilov-arm labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4418">issue #4418</a>:</p>
+<blockquote>
+<h3>Current Status</h3>
+<p>Basic support for dynamic vector types has been <a href="https://github.com/bytecodealliance/wasmtime/commit/9c43749dfe0b378c40b9932694d248c3546abac3">committed</a> in preparation to support the Wasm <a href="https://github.com/WebAssembly/flexible-vectors">Flexible Vectors</a> extension. The RFC discussion around the design is <a href="https://github.com/bytecodealliance/rfcs/pull/19">here</a>. And while we now have support for dynamic/flexible/scalable vectors, it doesn't support proper dynamic types. This is a top-level issue for what needs to be done to get there.</p>
+<p>Cranelift's type system now contains a dynamic vector type for each corresponding fixed-width type, with the dynamic type being a fixed-width type scaled by a target-defined factor. Currently, this factor (<code>dyn_scale_target_const</code>) is legalized to a constant. This makes lowering and stack layout simple. Below is an example CLIF function.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">i8x16_splat_add</span><span class="p">(</span><span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="kt">i8</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i8x16</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">gv0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">dyn_scale_target_const</span><span class="p">.</span><span class="n">i8x16</span><span class="w"></span>
+<span class="w">  </span><span class="n">dt0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i8x16</span><span class="o">*</span><span class="n">gv0</span><span class="w"></span>
+
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i8</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i8</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">dt0</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span><span class="w"></span>
+<span class="w">  </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">extract_vector</span><span class="w"> </span><span class="n">v4</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v5</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<h3>Next Steps</h3>
+<p>The two main areas that need more work are in IR and the MachInst ABI layer. The first part is to modify, or introduce a new <code>GlobalValue</code>, that will be legalized and lowered to a runtime scaling value. Maybe in a similar way to how global values are currently used in the ABI for generating the stack limit.</p>
+<p>The second, and bigger issue, is in the ABI layer where we determine the stack layout. A complicating factor here is that the 'Vanilla' layer is mainly shared between the backends and, of course, everything is also designed around known constant sizes. However, I think the biggest challenge is the interface with the register allocator.</p>
+<p><strong>Spill Slots</strong><br>
+The register allocator currently only supports two register classes, and types are aren't tracked, so there is the potential for a target with wide vector support to use far more stack than necessary. For example, with the current implementation, a target using AVX-512 would require 64-bytes to spill a single precision float. </p>
+<p>To enable truly dynamic types, the interface with the register allocator will need to change. If we leave it to return a constant value, we will need to accommodate the maximum possible register size (2KB in the case of SVE) and that is a prohibitive cost for most CPUs.</p>
+<p>Also, with wider vectors usually comes predication and predicate registers are unlikely to map to either of the existing regalloc classes either.</p>
+<p><strong>Stack Slots</strong><br>
+Along with spill slots, our frame layout will need to handle dynamically sized stack slots which are defined in the IR or, possibly, arguments passed on the stack. The current stack layout is as follows (there's currently no distinction between spill slots for fixed and dynamic types):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="sd">//!   (high address)</span>
+<span class="sd">//!</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | stack args                |</span>
+<span class="sd">//!                              | (accessed via FP)         |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! SP at function entry -----&gt;  | return address            |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//! FP after prologue --------&gt;  | FP (pushed by prologue)   |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | clobbered callee-saves    |</span>
+<span class="sd">//! unwind-frame base     ----&gt;  | (pushed by prologue)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | spill slots               |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | sized stack slots         |</span>
+<span class="sd">//!                              | dynamic stack slots       |</span>
+<span class="sd">//!                              | (accessed via nominal SP) |</span>
+<span class="sd">//! nominal SP ---------------&gt;  | (alloc'd by prologue)     |</span>
+<span class="sd">//! (SP at end of prologue)      +---------------------------+</span>
+<span class="sd">//!                              | [alignment as needed]     |</span>
+<span class="sd">//!                              |          ...              |</span>
+<span class="sd">//!                              | args for call             |</span>
+<span class="sd">//! SP before making a call --&gt;  | (pushed at callsite)      |</span>
+<span class="sd">//!                              +---------------------------+</span>
+<span class="sd">//!</span>
+<span class="sd">//!   (low address)</span>
+</code></pre></div>
+<p>We likely want to collect all the dynamically sized stack values and move them up the stack and introduce a new <code>StackAMode</code> to be addressed by FP. Spill and stack slots of compile-time known sizes can accessed as they are now, but the way we calculate at the end of the prologue will need to be modified. The current implementation allows the <code>TargetIsa</code> to report a fixed size for each dynamic type and so stack offsets can be calculated at compile-time. For dynamically-sized objects, _I think_ we'll want to use <code>vmctx</code> to generate our scaling factor from a <code>GlobalValue</code> and then multiple a slot index by the scaling factor to get our address.</p>
+<p>It could be that a target wants to specify multiple scaling values though, depending on the type/register that will be used. So, we could group the values so that each group is using the same scale value. The awkward part here is that we won't have a uniform space to scale across, and so we'll need a method to 'jump' over groups. <br>
+</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

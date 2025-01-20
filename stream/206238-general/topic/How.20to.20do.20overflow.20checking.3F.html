@@ -1,0 +1,170 @@
+<html>
+<head><meta charset="utf-8"><title>How to do overflow checking? · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html">How to do overflow checking?</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="464148154"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464148154" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464148154">(Aug 21 2024 at 19:30)</a>:</h4>
+<p>I'm in the process of writing my own cranelift backend for a proprietary bytecode which has signed and unsigned instructions which do overflow checking. Since cranelift doesn't differentiate between signed/unsigned types and operations I'm kind of lost how to preserve that information through the optimization process. Is there a good way to do that, maybe attaching value labels (assuming they are preserved through e-graph and isle shenanigans)? How does the rust cranelift backend do it?</p>
+
+
+
+<a name="464153498"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464153498" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464153498">(Aug 21 2024 at 19:55)</a>:</h4>
+<p><span class="user-mention" data-user-id="745970">@Jan Katzer</span> what sort of consumer are you needing the information for? In other words, do you have some stage or tooling that needs to know that a particular {value,operator} at the IR level became a particular {register,instruction} at the machine level? That is what debug value labels would give you. For overflow checking and compiled-in checks in general though, I'd expect the IR itself to encode the check and what happens if it fails -- for example, a compare and trap on overflow (<code>iadd</code>, <code>icmp</code> the result to either input, if result is less, wraparound/overflow; <code>trapnz</code> on that 0/1 value). See e.g. how the Wasmtime frontend emits CLIF to implement explicit bounds-checks on heaps for an example of "compiled-in checks"</p>
+
+
+
+<a name="464154770"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464154770" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464154770">(Aug 21 2024 at 19:59)</a>:</h4>
+<p><span class="user-mention" data-user-id="254389">@Chris Fallin</span> In my specific case I have bytecode instructions which encode the signedness and overflow check as part of the operation, e.g. <code>add16s dst, src</code> does a signed 16-bit addition and traps if needed. So I would need that information in the isa backend</p>
+
+
+
+<a name="464155176"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464155176" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464155176">(Aug 21 2024 at 20:00)</a>:</h4>
+<p>Ah, sorry, I missed the "new backend" bit; I think the best answer here (or at least, the right one imho) is probably to add new CLIF instructions for these operators</p>
+
+
+
+<a name="464155342"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464155342" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464155342">(Aug 21 2024 at 20:01)</a>:</h4>
+<p>Oh boy, that sounds like an adventure and a half :D</p>
+
+
+
+<a name="464156805"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464156805" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464156805">(Aug 21 2024 at 20:05)</a>:</h4>
+<p>hopefully not too bad! The instructions are defined in cranelift/codegen/meta/src/shared/instructions.rs; takes a little stanza of a handful of lines for each; most of the compiler shouldn't need to know about them (they'll be considered pure by default which may be a problem if you want trapping ops that are unused to not be optimized out); then use them in lowering rules in your backend</p>
+
+
+
+<a name="464156941"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464156941" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464156941">(Aug 21 2024 at 20:05)</a>:</h4>
+<p>the InstBuilder boilerplate to add them when driving the Cranelift API, and all the glue for ISLE matching rules and such, is generated automatically</p>
+
+
+
+<a name="464157550"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464157550" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464157550">(Aug 21 2024 at 20:07)</a>:</h4>
+<p>The trapping behaviour should not matter too much, since that's transparent to the program (the interpreter just exits early) EDIT: Oh you're right, but I'm fine with unused/optimized operations not trapping, since it's more of a security than a correctness thing</p>
+<p>I'm mostly concerned about cranelift then not knowing how to optimize these new opcodes properly</p>
+
+
+
+<a name="464157850"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464157850" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464157850">(Aug 21 2024 at 20:09)</a>:</h4>
+<p>so absent any other newly defined midend rules, Cranelift should treat newly defined instructions as opaque operators -- we don't know what they are, so we won't rewrite them</p>
+
+
+
+<a name="464157980"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464157980" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464157980">(Aug 21 2024 at 20:09)</a>:</h4>
+<p>since they default to "pure" they'll also be subject to code motion, so e.g. GVN (reusing the result of the same trapping op computed earlier) or hoisting out of a loop (LICM, if loop-invariant), but those should be fine too from your description</p>
+
+
+
+<a name="464158294"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464158294" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464158294">(Aug 21 2024 at 20:11)</a>:</h4>
+<p>Makes sense, but as essentially all arithmetic operations would be my own opcodes, that would basically prohibit much if not all of the optimization</p>
+
+
+
+<a name="464158352"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464158352" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464158352">(Aug 21 2024 at 20:11)</a>:</h4>
+<p>the other good news is that you're free to add your own mid-end rules :-)</p>
+
+
+
+<a name="464158421"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464158421" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464158421">(Aug 21 2024 at 20:11)</a>:</h4>
+<p>I can see why you might want to take a different approach and re-use all the rules we have for "normal" adds and such</p>
+
+
+
+<a name="464158693"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464158693" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464158693">(Aug 21 2024 at 20:12)</a>:</h4>
+<p>I guess I'd be a little cautious of that in the face of signed/unsigned overflow semantics (is it still valid to commute operations or rewrite x-y to x+(-y) or ... any other algebraic identity if we want to preserve what would have trapped in the middle of that expression)</p>
+
+
+
+<a name="464159519"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464159519" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464159519">(Aug 21 2024 at 20:16)</a>:</h4>
+<p>Like I said, that's shouldn't be that big of a deal. The overflow checks are mostly for preventing accidental overflow, they aren't really a guaranteed part of the operations semantics. <code>x + (-y)</code> is fine with me as long as the effective value doesn't cause a robot arm to spin around and decapitate a worker :D</p>
+
+
+
+<a name="464160025"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464160025" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464160025">(Aug 21 2024 at 20:18)</a>:</h4>
+<p>(obligatory disclaimer: Cranelift is not warrantied against decapitation risks; that is, uh, terrifying and I'll keep thinking about formal verification techniques)</p>
+
+
+
+<a name="464160345"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464160345" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464160345">(Aug 21 2024 at 20:18)</a>:</h4>
+<p>one other thing that comes to mind: you could define new "overflow check" operators that <em>wrap</em> the existing operators; so <code>overflow_check(iadd(x, y), x, y)</code> or something of the sort</p>
+
+
+
+<a name="464160426"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464160426" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464160426">(Aug 21 2024 at 20:19)</a>:</h4>
+<p>with the semantics that these check-opcodes pass through the result value, but also potentially have the side-effect of trapping</p>
+
+
+
+<a name="464160569"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464160569" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464160569">(Aug 21 2024 at 20:19)</a>:</h4>
+<p>this allows existing rules in the mid-end to fire, though we'll miss any rewrites that match on trees (<code>iadd(x, iadd(y, z))</code> sort of thing) because of the check ops wrapping each layer</p>
+
+
+
+<a name="464160671"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464160671" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464160671">(Aug 21 2024 at 20:20)</a>:</h4>
+<p>but with additional rewrite rules the "middle" check ops could be removed, depending on what precise trapping semantics you want</p>
+
+
+
+<a name="464160910"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464160910" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464160910">(Aug 21 2024 at 20:21)</a>:</h4>
+<p>Hm, that might be a good idea, though I also would have to tinker with basically all rewrite rules</p>
+
+
+
+<a name="464161266"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464161266" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464161266">(Aug 21 2024 at 20:22)</a>:</h4>
+<p>finally to your original point/direction, I can imagine a framework that basically carries signedness and boundedness information on the side; new array in CLIF (<code>SecondaryMap&lt;Value, SignAndBound&gt;</code> or somesuch), and accessors to use that in lowering rules. I'd probably suggest that over trying to use debug value labels since the latter... mostly work, but aren't really meant to be used in a "100% precision lossless type system" sort of way</p>
+
+
+
+<a name="464161429"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464161429" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464161429">(Aug 21 2024 at 20:23)</a>:</h4>
+<p>Yeah, I figured as much</p>
+
+
+
+<a name="464161483"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464161483" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464161483">(Aug 21 2024 at 20:23)</a>:</h4>
+<p>anyway best of luck with your (properly signed and bounded) robots!</p>
+
+
+
+<a name="464161604"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464161604" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464161604">(Aug 21 2024 at 20:24)</a>:</h4>
+<p>This might be the easiest route. I would have to tinker with the egraph/rewrite/whatever to preserve that info, but easier then to rewrite all rules :D</p>
+
+
+
+<a name="464161613"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/How%20to%20do%20overflow%20checking%3F/near/464161613" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jan Katzer <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/How.20to.20do.20overflow.20checking.3F.html#464161613">(Aug 21 2024 at 20:24)</a>:</h4>
+<p>Thanks! :D</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

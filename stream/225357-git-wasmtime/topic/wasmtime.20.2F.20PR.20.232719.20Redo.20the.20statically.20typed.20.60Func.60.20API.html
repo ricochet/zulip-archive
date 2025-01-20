@@ -1,0 +1,374 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #2719 Redo the statically typed `Func` API · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html">wasmtime / PR #2719 Redo the statically typed `Func` API</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="229731935"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229731935" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229731935">(Mar 10 2021 at 19:56)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit reimplements the <code>Func</code> API with respect to statically typed<br>
+dispatch. Previously <code>Func</code> had a <code>getN</code> and <code>getN_async</code> family of<br>
+methods which were implemented for 0 to 16 parameters. The return value<br>
+of these functions was an <code>impl Fn(..)</code> closure with the appropriate<br>
+parameters and return values.</p>
+<p>There are a number of downsides with this approach that have become<br>
+apparent over time:</p>
+<ul>
+<li>
+<p>The addition of <code>*_async</code> doubled the API surface area (which is quite<br>
+  large here due to one-method-per-number-of-parameters).</p>
+</li>
+<li>
+<p>The [documentation of <code>Func</code>][old-docs] are quite verbose and feel<br>
+  "polluted" with all these getters, making it harder to understand the<br>
+  other methods that can be used to interact with a <code>Func</code>.</p>
+</li>
+<li>
+<p>These methods unconditionally pay the cost of returning an owned <code>impl
+  Fn</code> with a <code>'static</code> lifetime. While cheap, this is still paying the<br>
+  cost for cloning the <code>Store</code> effectively and moving data into the<br>
+  closed-over environment.</p>
+</li>
+<li>
+<p>Storage of the return value into a struct, for example, always<br>
+  requires <code>Box</code>-ing the returned closure since it otherwise cannot be<br>
+  named.</p>
+</li>
+<li>
+<p>Recently I had the desire to implement an "unchecked" path for<br>
+  invoking wasm where you unsafely assert the type signature of a wasm<br>
+  function. Doing this with today's scheme would require doubling<br>
+  (again) the API surface area for both async and synchronous calls,<br>
+  further polluting the documentation.</p>
+</li>
+</ul>
+<p>The main benefit of the previous scheme is that by returning a <code>impl Fn</code><br>
+it was quite easy and ergonomic to actually invoke the function. In<br>
+practice, though, examples would often have something akin to<br>
+<code>.get0::&lt;()&gt;()?()?</code> which is a lot of things to interpret all at once.<br>
+Note that <code>get0</code> means "0 parameters" yet a type parameter is passed.<br>
+There's also a double function invocation which looks like a lot of<br>
+characters all lined up in a row.</p>
+<p>Overall, I think that the previous design is starting to show too many<br>
+cracks and deserves a rewrite. This commit is that rewrite.</p>
+<p>The new design in this commit is to delete the <code>getN{,_async}</code> family of<br>
+functions and instead have a new API:</p>
+<div class="codehilite"><pre><span></span><code>impl Func {
+    fn typed&lt;P, R&gt;(&amp;self) -&gt; Result&lt;&amp;Typed&lt;P, R&gt;&gt;;
+}
+
+impl Typed&lt;P, R&gt; {
+    fn call(&amp;self, params: P) -&gt; Result&lt;R, Trap&gt;;
+    async fn call_async(&amp;self, params: P) -&gt; Result&lt;R, Trap&gt;;
+}
+</code></pre></div>
+
+<p>This should entirely replace the current scheme, albeit by slightly<br>
+losing ergonomics use cases. The idea behind the API is that the<br>
+existence of <code>Typed&lt;P, R&gt;</code> is a "proof" that the underlying function<br>
+takes <code>P</code> and returns <code>R</code>. The <code>Func::typed</code> method peforms a runtime<br>
+type-check to ensure that types all match up, and if successful you get<br>
+a <code>Typed</code> value. Otherwise an error is returned.</p>
+<p>Once you have a <code>Typed</code> then, like <code>Func</code>, you can either <code>call</code> or<br>
+<code>call_async</code>. The difference with a <code>Typed</code>, however, is that the<br>
+params/results are statically known and hence these calls can be much<br>
+more efficient.</p>
+<p>This is a much smaller API surface area from before and should greatly<br>
+simplify the <code>Func</code> documentation. There's still a problem where<br>
+<code>Func::wrapN_async</code> produces a lot of functions to document, but that's<br>
+now the sole offender. It's a nice benefit that the<br>
+statically-typed-async verisons are now expressed with an <code>async</code><br>
+function rather than a function-returning-a-future which makes it both<br>
+more efficient and easier to understand.</p>
+<p>The type <code>P</code> and <code>R</code> are intended to either be bare types (e.g. <code>i32</code>)<br>
+or tuples of any length (including 0). At this time <code>R</code> is only allowed<br>
+to be <code>()</code> or a bare <code>i32</code>-style type because multi-value is not<br>
+supported with a native ABI (yet). The <code>P</code>, however, can be any size of<br>
+tuples of parameters. This is also where some ergonomics are lost<br>
+because instead of <code>f(1, 2)</code> you now have to write <code>f.call((1, 2))</code><br>
+(note the double-parens). Similarly <code>f()</code> becomes <code>f.call(())</code>.</p>
+<p>Overall I feel that this is a better tradeoff than before. While not<br>
+universally better due to the loss in ergonomics I feel that this design<br>
+is much more flexible in terms of what you can do with the return value<br>
+and also understanding the API surface area (just less to take in).</p>
+<p>[old-docs]: <a href="https://docs.rs/wasmtime/0.24.0/wasmtime/struct.Func.html#method.get0">https://docs.rs/wasmtime/0.24.0/wasmtime/struct.Func.html#method.get0</a></p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="229732091"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229732091" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229732091">(Mar 10 2021 at 19:57)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229732143"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229732143" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229732143">(Mar 10 2021 at 19:57)</a>:</h4>
+<p>alexcrichton edited <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit reimplements the <code>Func</code> API with respect to statically typed<br>
+dispatch. Previously <code>Func</code> had a <code>getN</code> and <code>getN_async</code> family of<br>
+methods which were implemented for 0 to 16 parameters. The return value<br>
+of these functions was an <code>impl Fn(..)</code> closure with the appropriate<br>
+parameters and return values.</p>
+<p>There are a number of downsides with this approach that have become<br>
+apparent over time:</p>
+<ul>
+<li>
+<p>The addition of <code>*_async</code> doubled the API surface area (which is quite<br>
+  large here due to one-method-per-number-of-parameters).</p>
+</li>
+<li>
+<p>The [documentation of <code>Func</code>][old-docs] are quite verbose and feel<br>
+  "polluted" with all these getters, making it harder to understand the<br>
+  other methods that can be used to interact with a <code>Func</code>.</p>
+</li>
+<li>
+<p>These methods unconditionally pay the cost of returning an owned <code>impl
+  Fn</code> with a <code>'static</code> lifetime. While cheap, this is still paying the<br>
+  cost for cloning the <code>Store</code> effectively and moving data into the<br>
+  closed-over environment.</p>
+</li>
+<li>
+<p>Storage of the return value into a struct, for example, always<br>
+  requires <code>Box</code>-ing the returned closure since it otherwise cannot be<br>
+  named.</p>
+</li>
+<li>
+<p>Recently I had the desire to implement an "unchecked" path for<br>
+  invoking wasm where you unsafely assert the type signature of a wasm<br>
+  function. Doing this with today's scheme would require doubling<br>
+  (again) the API surface area for both async and synchronous calls,<br>
+  further polluting the documentation.</p>
+</li>
+</ul>
+<p>The main benefit of the previous scheme is that by returning a <code>impl Fn</code><br>
+it was quite easy and ergonomic to actually invoke the function. In<br>
+practice, though, examples would often have something akin to<br>
+<code>.get0::&lt;()&gt;()?()?</code> which is a lot of things to interpret all at once.<br>
+Note that <code>get0</code> means "0 parameters" yet a type parameter is passed.<br>
+There's also a double function invocation which looks like a lot of<br>
+characters all lined up in a row.</p>
+<p>Overall, I think that the previous design is starting to show too many<br>
+cracks and deserves a rewrite. This commit is that rewrite.</p>
+<p>The new design in this commit is to delete the <code>getN{,_async}</code> family of<br>
+functions and instead have a new API:</p>
+<div class="codehilite"><pre><span></span><code>impl Func {
+    fn typed&lt;P, R&gt;(&amp;self) -&gt; Result&lt;&amp;TypedFunc&lt;P, R&gt;&gt;;
+}
+
+impl TypedFunc&lt;P, R&gt; {
+    fn call(&amp;self, params: P) -&gt; Result&lt;R, Trap&gt;;
+    async fn call_async(&amp;self, params: P) -&gt; Result&lt;R, Trap&gt;;
+}
+</code></pre></div>
+
+<p>This should entirely replace the current scheme, albeit by slightly<br>
+losing ergonomics use cases. The idea behind the API is that the<br>
+existence of <code>TypedFunc&lt;P, R&gt;</code> is a "proof" that the underlying function<br>
+takes <code>P</code> and returns <code>R</code>. The <code>Func::typed</code> method peforms a runtime<br>
+type-check to ensure that types all match up, and if successful you get<br>
+a <code>TypedFunc</code> value. Otherwise an error is returned.</p>
+<p>Once you have a <code>TypedFunc</code> then, like <code>Func</code>, you can either <code>call</code> or<br>
+<code>call_async</code>. The difference with a <code>Typed</code>, however, is that the<br>
+params/results are statically known and hence these calls can be much<br>
+more efficient.</p>
+<p>This is a much smaller API surface area from before and should greatly<br>
+simplify the <code>Func</code> documentation. There's still a problem where<br>
+<code>Func::wrapN_async</code> produces a lot of functions to document, but that's<br>
+now the sole offender. It's a nice benefit that the<br>
+statically-typed-async verisons are now expressed with an <code>async</code><br>
+function rather than a function-returning-a-future which makes it both<br>
+more efficient and easier to understand.</p>
+<p>The type <code>P</code> and <code>R</code> are intended to either be bare types (e.g. <code>i32</code>)<br>
+or tuples of any length (including 0). At this time <code>R</code> is only allowed<br>
+to be <code>()</code> or a bare <code>i32</code>-style type because multi-value is not<br>
+supported with a native ABI (yet). The <code>P</code>, however, can be any size of<br>
+tuples of parameters. This is also where some ergonomics are lost<br>
+because instead of <code>f(1, 2)</code> you now have to write <code>f.call((1, 2))</code><br>
+(note the double-parens). Similarly <code>f()</code> becomes <code>f.call(())</code>.</p>
+<p>Overall I feel that this is a better tradeoff than before. While not<br>
+universally better due to the loss in ergonomics I feel that this design<br>
+is much more flexible in terms of what you can do with the return value<br>
+and also understanding the API surface area (just less to take in).</p>
+<p>[old-docs]: <a href="https://docs.rs/wasmtime/0.24.0/wasmtime/struct.Func.html#method.get0">https://docs.rs/wasmtime/0.24.0/wasmtime/struct.Func.html#method.get0</a></p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="229742908"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229742908" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229742908">(Mar 10 2021 at 20:57)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229744741"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229744741" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229744741">(Mar 10 2021 at 21:07)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229749700"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229749700" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229749700">(Mar 10 2021 at 21:39)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229752399"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229752399" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229752399">(Mar 10 2021 at 21:56)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229779075"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229779075" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229779075">(Mar 11 2021 at 01:45)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2719#pullrequestreview-609315077">PR Review</a>.</p>
+
+
+
+<a name="229779076"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229779076" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229779076">(Mar 11 2021 at 01:45)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/2719#discussion_r592003370">PR Review Comment</a>:</p>
+<blockquote>
+<p>Given this seems to be common (<code>get_func</code> followed by <code>typed</code> which then needs to be cloned), perhaps we should have <code>Instance::get_typed_func</code> to shorthand this?</p>
+</blockquote>
+
+
+
+<a name="229779078"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229779078" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229779078">(Mar 11 2021 at 01:45)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2719#pullrequestreview-609315077">PR Review</a>.</p>
+
+
+
+<a name="229779079"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229779079" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229779079">(Mar 11 2021 at 01:45)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/2719#discussion_r591994955">PR Review Comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>    /// used instead of [`Func::call`] (which is more general, hence its
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="229882417"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229882417" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229882417">(Mar 11 2021 at 16:44)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2719#pullrequestreview-609977627">PR Review</a>.</p>
+
+
+
+<a name="229882419"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229882419" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229882419">(Mar 11 2021 at 16:44)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2719#discussion_r592523194">PR Review Comment</a>:</p>
+<blockquote>
+<p>Seems reasonable to me!</p>
+</blockquote>
+
+
+
+<a name="229891649"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229891649" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229891649">(Mar 11 2021 at 17:32)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229891731"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229891731" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229891731">(Mar 11 2021 at 17:33)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229892094"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229892094" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229892094">(Mar 11 2021 at 17:34)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229892483"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229892483" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229892483">(Mar 11 2021 at 17:36)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229892686"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229892686" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229892686">(Mar 11 2021 at 17:36)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/peterhuene">peterhuene</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a>.</p>
+
+
+
+<a name="229908272"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229908272" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229908272">(Mar 11 2021 at 19:13)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2719#pullrequestreview-610134416">PR Review</a>.</p>
+
+
+
+<a name="229909932"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229909932" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229909932">(Mar 11 2021 at 19:23)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a> from <code>typed-func</code> to <code>main</code>.</p>
+
+
+
+<a name="229922513"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232719%20Redo%20the%20statically%20typed%20%60Func%60%20API/near/229922513" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232719.20Redo.20the.20statically.20typed.20.60Func.60.20API.html#229922513">(Mar 11 2021 at 20:43)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/2719">PR #2719</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

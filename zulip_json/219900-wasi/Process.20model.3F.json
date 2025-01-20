@@ -1,0 +1,230 @@
+[
+    {
+        "content": "<p>Would there be interest for a light \"process\" model in WASI? Things like build tools and compilers often fork or execute other programs, and these essentially \"shared nothing threads\" are also possible on the web without SharedArrayBuffer. It would include a \"process\" tree with a way to get the exit code of a child,  killing a child, \"fork\" (create a copy of the WASM instance without shared memory) and \"exec\" (replace the instance in the process tree with an instance of a wasm file, probably from bytes for flexibility, but can be loaded from the filesystem with wasi:fs). Supported for running would only be components implementing the cli world. Signals could be supported with the async component model in the future. That would e.g. allow standard build tools to run easier in a browser. Also may be enough for the Python multiprocessing module to work, though that probably needs signals.</p>",
+        "id": 426485936,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710402713
+    },
+    {
+        "content": "<p>Or should this be a larger proposal with its own <code>posix-cli</code>world? And support for more Posix APIs? Or should something like that be split into multiple small proposals?</p>",
+        "id": 426486990,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710403230
+    },
+    {
+        "content": "<p>Supporting only something like posix_spawn would be a better idea than supporting fork+exec IMO. Supporting fork basically mandates COW memory to avoid terrible performance due to having to copy the entire linear memory on every fork and it requires cloning the wasm stack too, which most wasm runtimes don't support and I don't think will ever be supported on the web. Posix_spawn on the other hand directly creates a new process with the target executable loaded in already, which is indeed easy to do on the web already using web workers.</p>",
+        "id": 426508958,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1710411447
+    },
+    {
+        "content": "<p>I don't think posix signals should be allowed. They can interrupt the process in between any two instructions. The component model async support will I would expect not allow preemption, but only allow task switching at yield points where the current task is awaiting completion of a future. Furthermore posix signals leak part of their state across exec, which can cause processes that don't expect this to misbehave.</p>\n<p>On the other hand something closer to linux's signalfd may work. That requires you to actively poll for incoming signals and thus doesn't cause arbitrary preemption. At that point however you may as well use a pipe or some other IPC mechanism that doesn't involve signals as you don't have compatibility with programs that expect posix signals anyway.</p>",
+        "id": 426510050,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1710411791
+    },
+    {
+        "content": "<p>Also your processes don't need to form a process tree. The process spawn method should probably return a pidfd equivalent and allow any process with the pidfd to wait on it. And then not expose any pid's at all. This is more secure and doesn't require zombie processes when you haven't waited on the process exit yet to avoid pid reuse as the pidfd is intrinsically tied to a single process.</p>",
+        "id": 426510741,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1710412026
+    },
+    {
+        "content": "<blockquote>\n<p>Supporting fork basically mandates COW memory to avoid terrible performance due to having to copy the entire linear memory on every fork and it requires cloning the wasm stack too, which most wasm runtimes don't support and I don't think will ever be supported on the web.</p>\n</blockquote>\n<p>Oh right, the call stack. I suppose <code>asyncify</code> would support replaying the stack until the fork call. And I don't expect forks to happen often so performance wouldn't be that big of an issue.</p>\n<blockquote>\n<p>I don't think posix signals should be allowed. They can interrupt the process in between any two instructions. The component model async support will I would expect not allow preemption, but only allow task switching at yield points where the current task is awaiting completion of a future. Furthermore posix signals leak part of their state across exec, which can cause processes that don't expect this to misbehave.</p>\n<p>On the other hand something closer to linux's signalfd may work. That requires you to actively poll for incoming signals and thus doesn't cause arbitrary preemption. At that point however you may as well use a pipe or some other IPC mechanism that doesn't involve signals as you don't have compatibility with programs that expect posix signals anyway.</p>\n</blockquote>\n<p>Traditional signals can be supported with threads then: A thread listens for signal on a signalfd-equivalent and runs the registered signal handlers.</p>\n<blockquote>\n<p>Also your processes don't need to form a process tree. The process spawn method should probably return a pidfd equivalent and allow any process with the pidfd to wait on it. And then not expose any pid's at all. This is more secure and doesn't require zombie processes when you haven't waited on the process exit yet to avoid pid reuse as the pidfd is intrinsically tied to a single process.</p>\n</blockquote>\n<p>This is about compatibility with existing software though: I don't know how much software uses <code>posix_spawn</code> or pidfds.</p>",
+        "id": 426511093,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710412148
+    },
+    {
+        "content": "<p>tl;dr: I personally see value in supporting processes, but I don't think we should simply copy what POSIX does, but follow the capability oriented model of WASI and forego signals entirely. I don't have any voting rights for WASI proposals though.</p>",
+        "id": 426511148,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1710412169
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/219900-wasi/topic/Process.20model.3F/near/426511148\">said</a>:</p>\n<blockquote>\n<p>tl;dr: I personally see value in supporting processes, but I don't think we should simply copy what POSIX does, but follow the capability oriented model of WASI and forego signals entirely. I don't have any voting rights for WASI proposals though.</p>\n</blockquote>\n<p>I'd still like  to have to possibility of <em>emulating</em> POSIX APIs though, at the WASI libc level.</p>",
+        "id": 426511416,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710412250
+    },
+    {
+        "content": "<p>For compatibility maybe it would be possible for wasi-libc to keep an internal mapping between pid and pidfd and when you wait on a pid, lookup the corresponding pidfd and wait on it instead. This would give every process their own pid namespace though.</p>",
+        "id": 426511665,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1710412328
+    },
+    {
+        "content": "<p>For signals, single threaded programs may expect the signal handler to run on the main thread and to cause all syscalls to return EINTR. For multi threaded programs your compatibility mechanism would work for as long as a process doesn't use pthread_kill (or was it another function) to send a signal to a specific thread.</p>",
+        "id": 426512046,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1710412444
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/219900-wasi/topic/Process.20model.3F/near/426512046\">said</a>:</p>\n<blockquote>\n<p>For signals, single threaded programs may expect the signal handler to run on the main thread and to cause all syscalls to return EINTR. For multi threaded programs your compatibility mechanism would work for as long as a process doesn't use pthread_kill (or was it another function) to send a signal to a specific thread.</p>\n</blockquote>\n<p>That would also be possible: Host calls would need to check for pending signals on return and execute the signal handler.</p>",
+        "id": 426512780,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710412720
+    },
+    {
+        "content": "<p>That doesn't actually interrupt the syscall itself, which some processes rely on.</p>",
+        "id": 426513210,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1710412882
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/219900-wasi/topic/Process.20model.3F/near/426513210\">said</a>:</p>\n<blockquote>\n<p>That doesn't actually interrupt the syscall itself, which some processes rely on.</p>\n</blockquote>\n<p>Some syscalls like sleep, read and write would need special handling to support interruption. I don't think many syscalls would need that though.</p>",
+        "id": 426514043,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710413124
+    },
+    {
+        "content": "<p>Especially since I/O will probably go async in p3, so poll/await would probably be the only thing that needs to be interruptible.</p>",
+        "id": 426514755,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710413392
+    },
+    {
+        "content": "<p>And I think the cost of <code>asyncify</code> for fork is also OK: A stated, the goal is compatibility, not performance. You're free to use the spawn API that would also logically be included and your program wouldn't need to go through <code>asyncify</code>, and there would be no need to copy memory.</p>",
+        "id": 426518479,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710414764
+    },
+    {
+        "content": "<p>But it may make sense to split it into modern and legacy POSIX proposals. Modern would include the process model, spawn, signalfds, pidfds and other easily implementable things, and the legacy proposal would add things like a proper process tree with PIDs, fork on top of <code>asyncify</code> and exec. The modern one would have priority IMO, but supporting older POSIX APIs is a nice long-term goal.</p>",
+        "id": 426519168,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710415061
+    },
+    {
+        "content": "<p>The problem with <code>fork</code> is that it's more of a whole-system design philosophy than a function. We can't ignore it when we don't need it, because just by existing, it creates the possibility that a <code>fork</code> could happen at any time. Everything in the system, for all time, has to be designed with <code>fork</code> in mind.</p>",
+        "id": 426542646,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710423295
+    },
+    {
+        "content": "<p>Many WASI proposals would need no interaction with fork: E.g. the key-value store. Those proposals should have their resources not copied with fork, they only stay in the parent (though the program is intended to be a POSIX app and shouldn't even be aware of WASI). Only resources like open files would need special fork handling. Because other than copying the memory, call stack and fd table, there's nothing else to fork. And the call stack would be saved via asyncify, and both instances would then rewind to the fork call and get the appropriate return value. The posix-legacy world would need to expose stack unwinding and rewinding functions based on asyncify, and that should trap if there isn't enough memory.</p>",
+        "id": 426544800,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710423958
+    },
+    {
+        "content": "<p>The whole-system design philosophy we are aiming for is: every API can be virtualized. And the filesystem API is a key part of that story. If we start saying that the filesystem API has some special relationship with <code>fork</code>, that would mean that when we virtualize the filesystem by implementing it in Wasm, now arbitrary Wasm code has to have that same special relationship with <code>fork</code>.</p>",
+        "id": 426562131,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710428715
+    },
+    {
+        "content": "<p>Technically the only thing it needs to support is cloning resources into the resource table of the new instance. So the fs resources need a clone method (which shouldn't be that hard), and the legacy-posix world needs a function that accepts a resource and puts it in the specified resource index. That would need a move function that moves a resource to the specified index in the resource table, AFAIK that just means manipulating the table of externrefs inside WASM. Seems virtualizable to me.</p>",
+        "id": 426565444,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710429612
+    },
+    {
+        "content": "<p>And any resources that support cloning would be cloned to the child.</p>",
+        "id": 426566649,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710429901
+    },
+    {
+        "content": "<p>What happens if you <code>fork</code> while something in your \"process\" is holding a resource which can't be cloned? When does a virtual filesystem instance allocate a new linear-memory stack and thread-local storage to use when the new \"process\" calls it? How does this interact with <a href=\"https://github.com/WebAssembly/stack-switching\">stack-switching</a>? How does this interact with <a href=\"https://github.com/WebAssembly/gc\">GC</a>?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/stack-switching\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/f4328199a68c760264bd8af98838964a065277ac\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f633330393361663635303535663665363464376339613734613839636134353166353564626531613239373630623739626636643564303461306361303762612f576562417373656d626c792f737461636b2d737769746368696e67)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/stack-switching\" title=\"GitHub - WebAssembly/stack-switching: A repository for the stack switching proposal.\">GitHub - WebAssembly/stack-switching: A repository for the stack switching proposal.</a></div><div class=\"message_embed_description\">A repository for the stack switching proposal. Contribute to WebAssembly/stack-switching development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/gc\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/5d7446388cf5af1249c64bdb797fb59627f5fca0\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f363638643833366230326162653835303363373432363937663734646439333830626563396437613565306631383039326563643831633438653864386666352f576562417373656d626c792f6763)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/gc\" title=\"GitHub - WebAssembly/gc: Branch of the spec repo scoped to discussion of GC integration in WebAssembly\">GitHub - WebAssembly/gc: Branch of the spec repo scoped to discussion of GC integration in WebAssembly</a></div><div class=\"message_embed_description\">Branch of the spec repo scoped to discussion of GC integration in WebAssembly - WebAssembly/gc</div></div></div>",
+        "id": 426571560,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710431216
+    },
+    {
+        "content": "<blockquote>\n<p>the fs resources need a clone method (which shouldn't be that hard)</p>\n</blockquote>\n<p>Why do you think <code>clone</code> would be contained to just filesystem resources?</p>",
+        "id": 426571818,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1710431293
+    },
+    {
+        "content": "<p>Stack switching: interaction if it is needed for threads. GC: GC objects aren't copied. Remember, everything that's not posix-relevant is invisible to fork, because programs using fork aren't using these APIs anyways. fork is for compatibility, not for making a crazy WASM-POSIX hybrid application.</p>",
+        "id": 426572274,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710431433
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"378155\">Dave Bakker (badeend)</span> <a href=\"#narrow/stream/219900-wasi/topic/Process.20model.3F/near/426571818\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>the fs resources need a clone method (which shouldn't be that hard)</p>\n</blockquote>\n<p>Why do you think <code>clone</code> would be contained to just filesystem resources?</p>\n</blockquote>\n<p>It doesn't need to, but any resource that wants to support fork must support cloning. That would probably need another table for mapping resource ids to clone methods, AFAIK resources should be opaque types if you only have a handle, right?</p>",
+        "id": 426572667,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710431559
+    },
+    {
+        "content": "<p>Ultimately, I suspect you're right; if we really sat down and thought about it, we could probably design a whole \"legacy POSIX mode\", with <code>fork</code> and something approximating signals, and that only tries to support \"any language you want as long as it's C\", and so on. And there is a perspective from which that would be a cool thing to have.<br>\nBut there's also a cost. Where do we direct our finite energies? What are the eventual outcomes we're working for? I don't think many people would want us to build two separate ecosystems.</p>",
+        "id": 426583454,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710434603
+    },
+    {
+        "content": "<p>That's the purpose of having multiple worlds though: The CLI world is for running new applications, the proxy world is for writing HTTP proxies, and a modern POSIX interface would be compatible with the CLI world, but legacy-posix would be its own world, without access to many of the other proposals, but with better POSIX compatibility.</p>",
+        "id": 426584646,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710434942
+    },
+    {
+        "content": "<p>The ecosystem we're building doesn't stop at world boundaries. When you build an app for the wasi-cli world, maybe you use wasi-virt to wrap it up in with a virtual filesystem and other stuff so that it runs in some other world. Maybe your CLI app pulls in some library offering a non-CLI API, and maybe it's implemented in another component written in another language which happens to use GC.</p>",
+        "id": 426585155,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710435112
+    },
+    {
+        "content": "<p>As long as no GC references are passed to the component that wants to fork, everything should be fine. There's component-level isolation for a reason. The legacy-posix world would include no interface that uses GC types or other fancy WASM-specific features. The intended use case it to spawn a component that needs more POSIX features from e.g. a CLI component. It then writes its result in e.g. the filesystem and exits. E.g. you may want to execute a build tool that forks itself in WASM to build something.</p>",
+        "id": 426588019,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710435928
+    },
+    {
+        "content": "<p>But we'd still need some way to differentiate \"I'm using this instance as a library and I expect it to clone all its state along with me\" vs \"I'm using this instance as a service and I'm expecting to be ok being shared by a cloned instance\".</p>",
+        "id": 426588509,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710436067
+    },
+    {
+        "content": "<p>And if it happens to be using GC, then it just can't be used in \"library\" mode if the application does a fork</p>",
+        "id": 426588797,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710436148
+    },
+    {
+        "content": "<p>And if we do instance graph cloning, that's really inefficient, especially if we're often going to throw away the graph with an exec.</p>",
+        "id": 426589000,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710436208
+    },
+    {
+        "content": "<p>Fork is just a really special snowflake. <a href=\"https://www.microsoft.com/en-us/research/uploads/prod/2019/04/fork-hotos19.pdf\">It's a really really bad API</a>.</p>",
+        "id": 426589102,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710436238
+    },
+    {
+        "content": "<p><strong>Applications using the legacy-posix world would not use GC libraries</strong>. The whole purpose is to take vanilla posix C programs with <strong>no knowledge of WASI or WASM</strong> and be able to run them correctly.</p>",
+        "id": 426589114,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710436243
+    },
+    {
+        "content": "<p>If we did that, we would be creating a parallel ecosystem.</p>",
+        "id": 426589209,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710436276
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254083\">Dan Gohman</span> <a href=\"#narrow/stream/219900-wasi/topic/Process.20model.3F/near/426589102\">said</a>:</p>\n<blockquote>\n<p>Fork is just a really special snowflake. <a href=\"https://www.microsoft.com/en-us/research/uploads/prod/2019/04/fork-hotos19.pdf\">It's a really really bad API</a>.</p>\n</blockquote>\n<p>I hate COBOL as a language, it's still used and still needs compatibility.</p>",
+        "id": 426589287,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710436307
+    },
+    {
+        "content": "<p>This gets to why I describe fork as a \"design philosophy\" more than a function. It's possible to implement Cobol. People have done it, and it works fine. It's possible to do a lot of things on Wasm. But <code>fork</code> is something that you can't implement in Wasm. It needs to be magic.</p>",
+        "id": 426589540,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1710436375
+    },
+    {
+        "content": "<p>I think we talked enough about fork specifically now.</p>",
+        "id": 426590110,
+        "sender_full_name": "Tarek Sander",
+        "timestamp": 1710436545
+    }
+]

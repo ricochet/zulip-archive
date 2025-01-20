@@ -1,0 +1,86 @@
+<html>
+<head><meta charset="utf-8"><title>Load[32|64]Zero · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html">Load[32|64]Zero</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="219134614"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219134614" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Andrew Brown <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219134614">(Dec 07 2020 at 20:34)</a>:</h4>
+<p><span class="user-mention" data-user-id="268444">@Julian Seward</span>, <span class="user-mention" data-user-id="254389">@Chris Fallin</span>, <span class="user-mention" data-user-id="254393">@Benjamin Bouvier</span>: Hey! I'm looking at the translation for Load[32|64]Zero and it currently takes two CLIF instructions: a <code>load</code> and then <code>scalar_to_vector</code>. The appropriate lowering for x64 will be a single instruction, MOVSS or MOVSD, so I to either: 1) tell CLIF that scalar_to_vector can accept a memory address as input (or the equivalent in a new CLIF instruction), which implies that the aarch64 lowering might have to change a bit, or 2) figure out how to make load coalescing work for this case. What opinions do you all have? And if option 2 is preferable, can someone point me to an example?</p>
+
+
+
+<a name="219134755"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219134755" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Julian Seward <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219134755">(Dec 07 2020 at 20:35)</a>:</h4>
+<p>(2) is the plan going forwards.  I can't point you at any example but I'm sure Chris can.</p>
+
+
+
+<a name="219135923"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219135923" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219135923">(Dec 07 2020 at 20:44)</a>:</h4>
+<p>The latter is preferable, yep, and <code>LoadSplat</code> matching in the aarch64 backend is a good example</p>
+
+
+
+<a name="219135953"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219135953" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219135953">(Dec 07 2020 at 20:45)</a>:</h4>
+<p>basically you just query the lowering context for "source instruction or constant for this arg", and if it's the load that you can merge, then do so</p>
+
+
+
+<a name="219135984"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219135984" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219135984">(Dec 07 2020 at 20:45)</a>:</h4>
+<p>(my PR for x64 load-op merging would be a backend-specific example of this for x64)</p>
+
+
+
+<a name="219149588"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219149588" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Andrew Brown <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219149588">(Dec 07 2020 at 22:48)</a>:</h4>
+<p>Ok, I tried the load merging but I'm running into the following issue: MOVSS is considered a move by <code>MachInst::is_move</code> and this is correct when the input is a register. I am load merging a <code>load</code> into a <code>scalar_to_vector</code> using <code>MOVSS</code> and the <code>load</code> is sunk by <code>input_to_reg_mem</code>--this <code>MOVSS</code>, when the input is an address, should be considered a load, not a move. But <code>input_to_reg_mem</code> is returning a <code>RegMem::Reg</code> not a <code>RegMem::Mem</code> so <code>MOVSS</code> is being considered a move and being elided...</p>
+
+
+
+<a name="219149658"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219149658" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Andrew Brown <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219149658">(Dec 07 2020 at 22:49)</a>:</h4>
+<p>Now I'm looking at <code>get_value_as_source_or_const</code> and trying to understand what is going on.</p>
+
+
+
+<a name="219151573"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219151573" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Andrew Brown <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219151573">(Dec 07 2020 at 23:09)</a>:</h4>
+<p><span class="user-mention" data-user-id="254389">@Chris Fallin</span>, I can put up a draft PR if that will help... perhaps I'm doing something else wrong</p>
+
+
+
+<a name="219152523"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219152523" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219152523">(Dec 07 2020 at 23:21)</a>:</h4>
+<p>Sure, happy to look</p>
+
+
+
+<a name="219152528"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219152528" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219152528">(Dec 07 2020 at 23:21)</a>:</h4>
+<p>(sorry, was deep in the weeds)</p>
+
+
+
+<a name="219175069"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219175069" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Julian Seward <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219175069">(Dec 08 2020 at 06:16)</a>:</h4>
+<p>I thought <code>is_move</code> was related only to register allocation.  Kinda surprised it plays any role in insn selection.  But maybe I misunderstand?</p>
+
+
+
+<a name="219232189"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Load%5B32%7C64%5DZero/near/219232189" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Andrew Brown <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Load.5B32.7C64.5DZero.html#219232189">(Dec 08 2020 at 17:00)</a>:</h4>
+<p>Ok, I opened a draft PR for this and added a comment reproducing the error: <a href="https://github.com/bytecodealliance/wasmtime/pull/2489">https://github.com/bytecodealliance/wasmtime/pull/2489</a></p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/wasmtime/pull/2489" style="background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/wasmtime/pull/2489" title="[machinst x64]: implement load*_zero for x64 by abrown · Pull Request #2489 · bytecodealliance/wasmtime">[machinst x64]: implement load*_zero for x64 by abrown · Pull Request #2489 · bytecodealliance/wasmtime</a></div><div class="message_embed_description">Like #2480, this should not be merged until #2432 is resolved and x64 Wasm SIMD spec tests are turned back on. The simd_load_zero.wast test is now in-tree since #2481 but will have to be enabled in...</div></div></div>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

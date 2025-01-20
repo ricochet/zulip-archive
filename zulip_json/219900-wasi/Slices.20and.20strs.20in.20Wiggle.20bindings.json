@@ -1,0 +1,536 @@
+[
+    {
+        "content": "<p><strong>tl;dr</strong> We're hoping to find safer ways to access slices and strs in Wiggle trait implementations, particularly in the presence of invalidating operations like yielding. But we don't want to mess up what's already working well for wasi-common.</p>\n<p>Hey folks, this week I've been looking at how to start rolling out Wiggle-generated code to more hostcall implementations in our Wasm execution daemon. I've run into a couple points of additional friction vs writing hostcall implementations manually. I'm hoping y'all might have some ideas for how we might be able to reduce this friction?</p>\n<p>The first problem is one that I've actually managed to sidestep for now: Lucet supports a <a href=\"https://docs.rs/lucet-runtime/0.6.1/lucet_runtime/vmctx/struct.Vmctx.html#method.yield_\" title=\"https://docs.rs/lucet-runtime/0.6.1/lucet_runtime/vmctx/struct.Vmctx.html#method.yield_\">family of yield functions</a> on its VM context object which are quite useful for integrating Lucet execution with async Rust runtimes. For safety, these require an exclusive <code>&amp;mut</code> reference to the VM context, but Wiggle only provides a shared <code>&amp;</code> reference to the user-provided context type. I've sidestepped this issue for the moment by converting async calls within hostcalls to blocking calls using <code>futures::executor::block_on</code>. This works for now, but is not ideal because it prevents those blocked threads from handling other async work.</p>\n<p>The bigger problem at the moment is that it's currently quite painstaking to get access to slices and strs in Wiggle implementations. It requires using the honor system with <a href=\"https://docs.rs/wiggle/0.16.0/wiggle/struct.GuestBorrows.html\" title=\"https://docs.rs/wiggle/0.16.0/wiggle/struct.GuestBorrows.html\">GuestBorrows</a>, plus explicit unsafe to dereference a raw pointer. My understanding is that this is pretty uncommon in wasi-common compared to dealing with [pointers to] scalars, enums, and structs, but in our Wasm daemon the situation is practically the reverse: we're dealing with slices and strings in almost all of our hostcalls. If it was just a few functions in special situations, I would feel better about rolling this out with appropriate signposting and warnings, but right now we're holding off until the common case no longer requires this manually-checked reasoning.</p>\n<p>In Lucet, we address this with <a href=\"https://docs.rs/lucet-runtime/0.6.1/lucet_runtime/vmctx/struct.Vmctx.html#method.heap\" title=\"https://docs.rs/lucet-runtime/0.6.1/lucet_runtime/vmctx/struct.Vmctx.html#method.heap\">dynamic borrow checking on heap accessors</a>. This works out nicely, because any operations on the VM context that might invalidate the view of the heap such as yielding or growing the heap (a safe callback interface is still a TODO for us; we don't use callbacks in our daemon) require exclusive <code>&amp;mut</code> access, and thus the borrow checker prevents the <code>Ref</code>s and <code>RefMut</code>s from staying live during these operations. The hostcall implementor is then free to reacquire updated views of these resources on the other side of the invalidating operation.</p>\n<p>I tried noodling around a bit adding <code>RefCell</code>s to my Wiggle context, and to my Wiggle <code>GuestMemory</code> implementation, in order to achieve a similar effect, but I'm running into a couple problems:</p>\n<ol>\n<li>\n<p><code>GuestPtr</code>s contain shared references to the <code>GuestMemory</code>, and are provided to the implementation as function arguments. This means that even if we change the shared <code>&amp;</code> reference to a dynamically-checked <code>Ref</code>, we have no way of re-acquiring that borrow after relinquishing it for an invalidating operation that requires an exclusive <code>&amp;mut</code> or <code>RefMut</code> reference.</p>\n</li>\n<li>\n<p>I haven't found a workable solution for having the <code>GuestMemory</code> and the user-provided Wiggle context share borrow state. Having a <em>single object</em> produce both our views into memory, and mediate access to invalidating operations is how we get machine-checked assurance that we're not changing the world out from under ourselves. So naturally, I tried to make these values share a borrow state through <code>RefCell</code> in order to recover these semantics.</p>\n<p>What I found was that it's very difficult to nest <code>RefCell</code>s in a way that allows functions to return a <code>Ref</code> or <code>RefMut</code> from the inner cell. While you <em>can</em> <a href=\"https://doc.rust-lang.org/std/cell/struct.Ref.html#method.map\" title=\"https://doc.rust-lang.org/std/cell/struct.Ref.html#method.map\">map over a <code>Ref</code></a>, the closure you map with must return a <code>&amp;U</code>, it can't return <code>Ref&lt;'_, U&gt;</code>. This makes sense because of the ownership logic of the dynamic borrows involved here, and I'm guessing could be worked around with a custom variant of <code>RefCell</code>, but <span aria-label=\"grimacing\" class=\"emoji emoji-1f62c\" role=\"img\" title=\"grimacing\">:grimacing:</span></p>\n</li>\n</ol>\n<p>So I'm stuck wishing for three things, and realizing they're probably incompatible with the current Wiggle API: </p>\n<ol>\n<li>I want to have my <code>GuestMemory</code> and user-provided context be the same object, with no indirection through <code>RefCell</code>, <code>RwLock</code>, etc.</li>\n<li>I want to have exclusive <code>&amp;mut</code> access to that object in the body of my Wiggle trait implementations.</li>\n<li>I want to be able to either get fresh <code>GuestPtr</code>s on the other side of an invalidating operation, or have them be safe to hold across such an operation.</li>\n</ol>\n<p>Do y'all have ideas for how we might be able to accommodate these wishes without having to tear down what we've already built and what works well for wasi-common?</p>",
+        "id": 196830860,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588885977
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253993\">@acfoltzer</span> FWIW I believe I'm \"at fault\" for most of the current restrictions in wiggle, but that was mostly just me rationalizing Rust's memory model with executing arbitrary wasm code. Given that there's not a huge amount of wiggle (hah) room without larger changes.</p>",
+        "id": 196831616,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886388
+    },
+    {
+        "content": "<p>For example if you've got a <code>&amp;mut T</code> that points into wasm memory, then it's memory unsafe to just call back into the wasm. Nothing about <code>GuestBorrows</code> will help fix that unsoundness. This could be fixable, however, if you've got a larger system which dynamically prevents reentering the wasm once you have a <code>&amp;mut T</code></p>",
+        "id": 196831705,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886437
+    },
+    {
+        "content": "<p>(and then you'd also dynamic-borrow-check to make sure the <code>&amp;mut T</code> didn't overlap with anything)</p>",
+        "id": 196831726,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886449
+    },
+    {
+        "content": "<p>Yep, and that's exactly what we have in our daemon</p>",
+        "id": 196831785,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886463
+    },
+    {
+        "content": "<p>it seems like a fundamentally different approach to what Wiggle is currently doing, though, which led to this wall of text <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span></p>",
+        "id": 196831903,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886515
+    },
+    {
+        "content": "<p>It sounds like some of these may be solvable with codegen tweaks? My intention was that wiggle would generate 100% safe things, but if y'all have extra checking in place that wiggle isn't aware of then it would be pushing the unsafe boundary outwards</p>",
+        "id": 196831954,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886532
+    },
+    {
+        "content": "<p>but yeah if y'all are statically preventing reentering wasm then that changes a whole lot about wiggle</p>",
+        "id": 196831973,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886548
+    },
+    {
+        "content": "<p>yeah, it's a bit of a hack but it works pretty nicely in practice</p>",
+        "id": 196831995,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886566
+    },
+    {
+        "content": "<p>from a bindings-generator point of view which is purely consuming <code>wasmtime</code> APIs, it's impossible to provide that guarantee statically though</p>",
+        "id": 196832050,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886605
+    },
+    {
+        "content": "<p>e.g. if other users of wiggle come along</p>",
+        "id": 196832059,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886612
+    },
+    {
+        "content": "<p>it does require some pretty gross stuff under the hood though, most notoriously <a href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-runtime/lucet-runtime-internals/src/vmctx.rs#L177\" title=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-runtime/lucet-runtime-internals/src/vmctx.rs#L177\">https://github.com/bytecodealliance/lucet/blob/master/lucet-runtime/lucet-runtime-internals/src/vmctx.rs#L177</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-runtime/lucet-runtime-internals/src/vmctx.rs#L177\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-runtime/lucet-runtime-internals/src/vmctx.rs#L177\" title=\"bytecodealliance/lucet\">bytecodealliance/lucet</a></div><div class=\"message_embed_description\">Lucet, the Sandboxing WebAssembly Compiler. Contribute to bytecodealliance/lucet development by creating an account on GitHub.</div></div></div>",
+        "id": 196832073,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886617
+    },
+    {
+        "content": "<p>we might have to wait for Pat to come back from vacation to really get to the point of making any decisions, because he's much more familiar with the API constraints you have on the <code>wasmtime</code> side</p>",
+        "id": 196832271,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886725
+    },
+    {
+        "content": "<p>I may have also just mistaken the purpose of wiggle somewhat</p>",
+        "id": 196832369,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886769
+    },
+    {
+        "content": "<p>one of my fallback ideas though is to see about factoring the witx consumption and reasoning about Rust host-side types into a common module, and just doing different codegen for Lucet</p>",
+        "id": 196832378,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886773
+    },
+    {
+        "content": "<p>I was viewing it from a lens of \"anyone who's binding <code>*.witx</code> will want to use this to bind host functions\"</p>",
+        "id": 196832393,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886782
+    },
+    {
+        "content": "<p>but if it's instead \"fastly is binding <code>*.witx</code> with these extra assumptions\" then wiggle should look very different</p>",
+        "id": 196832426,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886799
+    },
+    {
+        "content": "<p>it sounds like y'all are making assumptions about the wasm execution which other projects may not always be able to make</p>",
+        "id": 196832460,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886821
+    },
+    {
+        "content": "<p>hmm, do you have an example of that?</p>",
+        "id": 196832487,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886836
+    },
+    {
+        "content": "<p>which changes quite a bit how nice a bindings library can be</p>",
+        "id": 196832490,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886837
+    },
+    {
+        "content": "<p>oh so I don't think we have any other examples of wiggle in use, but I'm imagining a use case which allows reentrancy</p>",
+        "id": 196832533,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886865
+    },
+    {
+        "content": "<p>e.g. you call into the host and then it calls you back during that host call</p>",
+        "id": 196832553,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886875
+    },
+    {
+        "content": "<p>the possibility of that happening is a fundamental assumption of wiggle right now, but it sounds like y'all prevent that via other means</p>",
+        "id": 196832639,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886906
+    },
+    {
+        "content": "<p>but no one's getting too too much use out of wiggle right now, so we can also just document how it's safely used</p>",
+        "id": 196832683,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886937
+    },
+    {
+        "content": "<p>and change it to assume no reentrancy</p>",
+        "id": 196832692,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886945
+    },
+    {
+        "content": "<p><em>oh</em>, you mean that some other thread in the host calls into the same Wasm module?</p>",
+        "id": 196832702,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886954
+    },
+    {
+        "content": "<p>rather than the hostcall implementation doing the callback on the same thread?</p>",
+        "id": 196832726,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588886968
+    },
+    {
+        "content": "<p>nah not another thread, but the same thread itself</p>",
+        "id": 196832728,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886970
+    },
+    {
+        "content": "<p>like some funky syscall where you call <code>host.call_me_back(my_fn_pointer)</code> and then the host, during that function call, calls <code>my_fn_pointer</code></p>",
+        "id": 196832763,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588886992
+    },
+    {
+        "content": "<p>so the native stack looks like <code>[top] -&gt; wasm code -&gt; [hostcall] -&gt; wasm code -&gt; ...</code></p>",
+        "id": 196832819,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887011
+    },
+    {
+        "content": "<p>where any borrows that <code>[hostcall]</code> has active are immediately invalidated by executing wasm code</p>",
+        "id": 196832832,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887026
+    },
+    {
+        "content": "<p>right. our assumption is that you <em>can</em> do that, but only through a function that takes <code>&amp;mut Vmctx</code> so that outstanding heap references must be dropped</p>",
+        "id": 196832843,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887036
+    },
+    {
+        "content": "<p>(that function doesn't exist yet in our <code>Vmctx</code> interface though; <code>yield</code> is a better example right now)</p>",
+        "id": 196832877,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887063
+    },
+    {
+        "content": "<p>ah ok, that's sort of the same thing though, the risk of allowing reentering wasm during a hostcall is active borrows</p>",
+        "id": 196832943,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887107
+    },
+    {
+        "content": "<p>exactly</p>",
+        "id": 196832952,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887117
+    },
+    {
+        "content": "<p>but y'all are dynamically guaranteeing there are no active borrows with Rust's lifetime system (I think?)</p>",
+        "id": 196832955,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887119
+    },
+    {
+        "content": "<p>that assumption wasn't baked into wiggle b/c that's an application-specific restriction you have</p>",
+        "id": 196833005,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887135
+    },
+    {
+        "content": "<p>but wiggle could of course be rewritten or updated with that restriction</p>",
+        "id": 196833021,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887148
+    },
+    {
+        "content": "<p>and simply say \"applications gotta have something like this\"</p>",
+        "id": 196833028,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887153
+    },
+    {
+        "content": "<p>that's right. Rust will complain if the heap view <code>Ref&lt;'_, [u8]&gt;</code> is live when you try to use <code>&amp;mut Vmctx</code></p>",
+        "id": 196833029,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887157
+    },
+    {
+        "content": "<p>@acfoltzer Would it be possible to build around <code>wiggle</code>, here <code>wiggle</code> staying largely the same and you providing something more specific like <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> is pointing out?</p>",
+        "id": 196833050,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588887172
+    },
+    {
+        "content": "<p>that is what I was trying to do with the <code>RefCell</code> experiments I describe above</p>",
+        "id": 196833077,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887195
+    },
+    {
+        "content": "<p>maybe I just got myself backed into a corner with it, but I couldn't figure out how to make it work out</p>",
+        "id": 196833097,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887215
+    },
+    {
+        "content": "<p>Oh and for the record, although perhaps I misunderstood you, we do quite a few calls to get a string out of guest in <code>wasi-common</code></p>",
+        "id": 196833103,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588887220
+    },
+    {
+        "content": "<p>ah, Pat was describing it as a less common case in wasi-common than it is in our daemon</p>",
+        "id": 196833174,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887245
+    },
+    {
+        "content": "<p>oh it may be so</p>",
+        "id": 196833194,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588887264
+    },
+    {
+        "content": "<p>(also to clarify I didn't really understand what you were mentioning about RefCell and things above)</p>",
+        "id": 196833204,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887274
+    },
+    {
+        "content": "<p>in <code>wasi-common</code> any syscall that includes \"path\" requires fetching a string</p>",
+        "id": 196833225,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588887288
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253994\">Alex Crichton</span> <a href=\"#narrow/stream/219900-wasi/topic/Slices.20and.20strs.20in.20Wiggle.20bindings/near/196833204\" title=\"#narrow/stream/219900-wasi/topic/Slices.20and.20strs.20in.20Wiggle.20bindings/near/196833204\">said</a>:</p>\n<blockquote>\n<p>(also to clarify I didn't really understand what you were mentioning about RefCell and things above)</p>\n</blockquote>\n<p>hah sorry. that was a bit more of a brain dump than I had intended. I was basically trying to recover the connection between the lifetimes of the active borrows with the lifetime of the user-provided context type</p>",
+        "id": 196833357,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887381
+    },
+    {
+        "content": "<p>and as far <code>&amp;</code> vs <code>&amp;mut</code> I thought that was the desired requirement so that we can easily stick any context object in an <code>Rc</code>/<code>Arc</code></p>",
+        "id": 196833361,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588887383
+    },
+    {
+        "content": "<p>ahh, that's good to know. we do not have that as a restriction in Lucet, so we've always had the hostcall context as a <code>&amp;mut</code></p>",
+        "id": 196833557,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887508
+    },
+    {
+        "content": "<p>But also to be clear, this is again sort of just shaping wiggle as a library that makes minimal assumptions</p>",
+        "id": 196833664,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887586
+    },
+    {
+        "content": "<p>yeah, that makes sense</p>",
+        "id": 196833675,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887595
+    },
+    {
+        "content": "<p>Wiggle right now is designed to assume a maximally malicious host which wants to stress everything</p>",
+        "id": 196833679,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887600
+    },
+    {
+        "content": "<p>but it still wants to provide a 100% safe interface</p>",
+        "id": 196833743,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887613
+    },
+    {
+        "content": "<p>so the trivial reason for requiring <code>&amp;</code> for user contexts is that wasm can call the host twice on the stack</p>",
+        "id": 196833761,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887628
+    },
+    {
+        "content": "<p>which makes it sort of like TLS, so you can only get a shared reference</p>",
+        "id": 196833774,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887638
+    },
+    {
+        "content": "<p>once you start making other assumptions though these requirements go away</p>",
+        "id": 196833790,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887652
+    },
+    {
+        "content": "<p>it sounds like y'all are making enough assumptions that wiggle is just getting in the way</p>",
+        "id": 196833802,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887663
+    },
+    {
+        "content": "<p>I think the assumptions you're making though might be quite difficult for other applications to make as well, so I'm not sure if there's a nice reusable binding layer to share unfortunately</p>",
+        "id": 196833859,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887698
+    },
+    {
+        "content": "<p>I think I agree with <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> on this</p>",
+        "id": 196833894,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588887720
+    },
+    {
+        "content": "<p>Perhaps we could figure out if we could make <code>wiggle</code>-like interface pluggable into <code>wasi-common</code> rather than specifically requiring it?</p>",
+        "id": 196833961,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588887746
+    },
+    {
+        "content": "<p>yeah, and it's possible this may just come down to us having faulty assumptions about the safety of our system. for example if you have a stack with [Rust] -&gt; [Wasm] -&gt; [Hostcall] -&gt; [Wasm] -&gt; [Hostcall] then you have two <code>&amp;mut Vmctx</code> on the stack pointing to the same place. our argument has been this is okay because the second is entirely contained within the first, but maybe that's naïve</p>",
+        "id": 196833964,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887748
+    },
+    {
+        "content": "<p>Not sure if that makes sense but then you guys could have a more specialised version of it and everything would be fine</p>",
+        "id": 196834003,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588887772
+    },
+    {
+        "content": "<p>yeah, I'm leaning toward something like that</p>",
+        "id": 196834046,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887799
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253993\">@acfoltzer</span> I think that's a really fine line to walk there</p>",
+        "id": 196834201,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887891
+    },
+    {
+        "content": "<p>I wouldn't say with certainty that it's safe or unsafe</p>",
+        "id": 196834218,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887902
+    },
+    {
+        "content": "<p>I'm glad we agree <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span></p>",
+        "id": 196834237,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588887911
+    },
+    {
+        "content": "<p>You can have two <code>&amp;mut T</code> pointers on the stack that point to the same thing, but in safe rust rustc/llvm can see the pointers getting passed around</p>",
+        "id": 196834262,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887925
+    },
+    {
+        "content": "<p>the unsafety would happen I believe if they can't see the pointers passed around</p>",
+        "id": 196834296,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887938
+    },
+    {
+        "content": "<p>like:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">Context</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">field1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">foobar</span><span class=\"p\">();</span><span class=\"w\"> </span><span class=\"c1\">// may read/mutate `x`</span>\n<span class=\"n\">assert_eq</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">field1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 196834378,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887967
+    },
+    {
+        "content": "<p>if rustc sees you pass <code>x</code> to <code>foobar</code>, then it knows it has to reload <code>x.field1</code> after the call</p>",
+        "id": 196834392,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887985
+    },
+    {
+        "content": "<p>if it doesn't see you pass <code>x</code> to <code>foobar</code> then it could assume it's impossible to change, so there's no need to reload <code>x.field1</code></p>",
+        "id": 196834410,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588887997
+    },
+    {
+        "content": "<p>but if <code>x.field1</code> was mutated in <code>foobar</code> then that's an issue</p>",
+        "id": 196834421,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588888005
+    },
+    {
+        "content": "<p>clearly if you do <code>foobar(x)</code> rustc/llvm will see through all that, but if it's actually <code>some_wasm_call()</code> it's not clear if LLVM/rustc can see enough to assume that pointers might change</p>",
+        "id": 196834449,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588888031
+    },
+    {
+        "content": "<p>that makes sense, and certainly makes our current interface unsafe. but a callback interface that requires a <code>&amp;mut Vmctx</code> would let Rust see the pointer being used</p>",
+        "id": 196834481,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888053
+    },
+    {
+        "content": "<p>these are also sort of just vague thoughts though, I'm definitely not like on the unsafe guidelines wg or anything like that</p>",
+        "id": 196834523,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1588888081
+    },
+    {
+        "content": "<p>yeah, I'm glad to see that your thinking resembles mine quite a bit, though</p>",
+        "id": 196834683,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888173
+    },
+    {
+        "content": "<p>fine line indeed</p>",
+        "id": 196834776,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888205
+    },
+    {
+        "content": "<p>okay, well thank you for the extra context about the whys of the current interface. I think I'll have to wait for Pat to get back and chat with him about what our strategy should be. right now I'm leaning toward doing additional Lucet-specific codegen (we already do a bit in <code>lucet-wiggle</code>), but this is probably worth talking about more at the meeting next week</p>",
+        "id": 196834858,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888270
+    },
+    {
+        "content": "<p>given that wasmtime/lucet integration is on our roadmap, it'd be good to understand exactly what the assumptions are in each system, and know how we can reconcile them</p>",
+        "id": 196834937,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888318
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253993\">acfoltzer</span> <a href=\"#narrow/stream/219900-wasi/topic/Slices.20and.20strs.20in.20Wiggle.20bindings/near/196834858\" title=\"#narrow/stream/219900-wasi/topic/Slices.20and.20strs.20in.20Wiggle.20bindings/near/196834858\">said</a>:</p>\n<blockquote>\n<p>okay, well thank you for the extra context about the whys of the current interface. I think I'll have to wait for Pat to get back and chat with him about what our strategy should be. right now I'm leaning toward doing additional Lucet-specific codegen (we already do a bit in <code>lucet-wiggle</code>), but this is probably worth talking about more at the meeting next week</p>\n</blockquote>\n<p>Sounds good! Oh and would you mind pinging a couple of links in my direction where this problem space appears in lucet? I used to keep track of you changes guys but sadly not for a while now...</p>",
+        "id": 196834989,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588888334
+    },
+    {
+        "content": "<p>or if they can't be reconciled, how to turn the difference into one of the \"knobs\" we've discussed before for modularizing the systems</p>",
+        "id": 196835037,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888364
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"263195\">@Jakub Konka</span> I unfortunately can't share the daemon code where we're doing this hostcall implementation, if that's what you mean</p>",
+        "id": 196835113,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888410
+    },
+    {
+        "content": "<p>the <code>lucet-wiggle</code> stuff though is just a thin wrapper around <code>wiggle</code> crates. you can see the core idea here: <a href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs\" title=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs\">https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs\" title=\"bytecodealliance/lucet\">bytecodealliance/lucet</a></div><div class=\"message_embed_description\">Lucet, the Sandboxing WebAssembly Compiler. Contribute to bytecodealliance/lucet development by creating an account on GitHub.</div></div></div>",
+        "id": 196835237,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888486
+    },
+    {
+        "content": "<p>sorry, meant to link to this line: <a href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs#L64\" title=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs#L64\">https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs#L64</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs#L64\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs#L64\" title=\"bytecodealliance/lucet\">bytecodealliance/lucet</a></div><div class=\"message_embed_description\">Lucet, the Sandboxing WebAssembly Compiler. Contribute to bytecodealliance/lucet development by creating an account on GitHub.</div></div></div>",
+        "id": 196835293,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588888521
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253993\">acfoltzer</span> <a href=\"#narrow/stream/219900-wasi/topic/Slices.20and.20strs.20in.20Wiggle.20bindings/near/196835113\" title=\"#narrow/stream/219900-wasi/topic/Slices.20and.20strs.20in.20Wiggle.20bindings/near/196835113\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"263195\">Jakub Konka</span> I unfortunately can't share the daemon code where we're doing this hostcall implementation, if that's what you mean</p>\n</blockquote>\n<p>Oh, sure thing, I actually meant the lucet stuff mainly and lucet-wiggle in particular :-)</p>",
+        "id": 196835639,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588888758
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253993\">acfoltzer</span> <a href=\"#narrow/stream/219900-wasi/topic/Slices.20and.20strs.20in.20Wiggle.20bindings/near/196835293\" title=\"#narrow/stream/219900-wasi/topic/Slices.20and.20strs.20in.20Wiggle.20bindings/near/196835293\">said</a>:</p>\n<blockquote>\n<p>sorry, meant to link to this line: <a href=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs#L64\" title=\"https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs#L64\">https://github.com/bytecodealliance/lucet/blob/master/lucet-wiggle/generate/src/lib.rs#L64</a></p>\n</blockquote>\n<p>Awesome, thanks!</p>",
+        "id": 196835675,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1588888787
+    },
+    {
+        "content": "<p>thank you all for taking a look <span aria-label=\"heart\" class=\"emoji emoji-2764\" role=\"img\" title=\"heart\">:heart:</span></p>",
+        "id": 196836101,
+        "sender_full_name": "acfoltzer",
+        "timestamp": 1588889033
+    }
+]

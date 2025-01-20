@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>Hi,</p>\n<p>I have a basic shared library written in rust, that uses <code>wasmtime</code> and only creates the default Engine using <code>let engine = Engine::default()</code>.</p>\n<p>When I call <code>dlopen(\"libmy_library.so\", RTLD_LAZY);</code> from c++ code, i get the following error from <code>dlerror()</code>: <code>cannot allocate memory in static TLS block</code></p>\n<p>When I remove the call to <code>Engine::default()</code> (and thus, have no remaining dependencies on <code>wasmtime</code>), the library loads successfully.</p>\n<p>The same behavior repeats with versions <code>5.0.0</code> -&gt; <code>7.0.0</code> (haven't tried earlier ones).</p>\n<p>Any thoughts on what could be the culprit, or how I should debug/solve this?</p>",
+        "id": 345515514,
+        "sender_full_name": "yonil",
+        "timestamp": 1680123930
+    },
+    {
+        "content": "<p>I think you may be running into this issue <a href=\"https://github.com/bytecodealliance/wasmtime/issues/3654\">https://github.com/bytecodealliance/wasmtime/issues/3654</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/3654\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/a80d32511cc650408ac85698973a7789ef70eeb0\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f356264313865336336336234333539623265333937393236383335383938656532303936623633303834316331313433666665666634326238343734343639312f62797465636f6465616c6c69616e63652f7761736d74696d652f6973737565732f33363534)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/3654\" title=\"Cranelift: timing module for `cranelift-codegen` uses too much TLS space · Issue #3654 · bytecodealliance/wasmtime\">Cranelift: timing module for `cranelift-codegen` uses too much TLS space · Issue #3654 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">.clif Test Case I think this is not relevant because it's an issue about thread-local usage. wasmtime/cranelift/codegen/src/timing.rs Lines 178 to 181 in 8043c1f thread_local! { static CURRENT_PASS...</div></div></div>",
+        "id": 345515989,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1680124089
+    },
+    {
+        "content": "<p>One possible fix is to shrink the size of the TLS variables in Cranelift, probably with a box, since you're the second one to run into this.</p>",
+        "id": 345516308,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1680124203
+    },
+    {
+        "content": "<p>Although as bjorn3 mentions there may be deeper toolchain fixes to apply here too</p>",
+        "id": 345516385,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1680124216
+    },
+    {
+        "content": "<p>When compiling the library are you doing something that sets the tls model to initial exec? If so using dlopen on it is not allowed. It may happen to work if the library uses little tls space as in that case it is allocated in the static tls block, but this block is tiny and thus will result in an error if more tls space is used, like cranelift-codegen does.</p>",
+        "id": 345517908,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1680124898
+    },
+    {
+        "content": "<p>Are you using any kind of build tool that may pass extra compile args?</p>",
+        "id": 345518089,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1680124965
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/217126-wasmtime/topic/.22cannot.20allocate.20memory.20in.20static.20TLS.20block.22.20in.20dlopen.28.29/near/345518089\">said</a>:</p>\n<blockquote>\n<p>Are you using any kind of build tool that may pass extra compile args?</p>\n</blockquote>\n<p>thanks for replying.<br>\ni'm using <a href=\"https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-build\"><code>dotnet build</code></a> with no special arguments</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-build\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/b391ffb5bbb07ec8f5a5d07ecf15c20cfdd88b70\\/68747470733a2f2f6c6561726e2e6d6963726f736f66742e636f6d2f646f746e65742f6d656469612f646f746e65742d6c6f676f2e706e67)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-build\" title=\"dotnet build command - .NET CLI\">dotnet build command - .NET CLI</a></div><div class=\"message_embed_description\">The dotnet build command builds a project and all of its dependencies.</div></div></div>",
+        "id": 345525601,
+        "sender_full_name": "yonil",
+        "timestamp": 1680128563
+    },
+    {
+        "content": "<p>which, in turn, invokes <code>cargo build --release</code> on the library that references <code>wasmtime</code></p>",
+        "id": 345527847,
+        "sender_full_name": "yonil",
+        "timestamp": 1680129918
+    },
+    {
+        "content": "<p>Is your .NET code linked into <a href=\"http://libmy_library.so\">libmy_library.so</a> or is the .NET code loading <a href=\"http://libmy_library.so\">libmy_library.so</a>? It looks like .NET itself enables <code>-ftls-model=initial-exec</code> for compiling the runtime: <a href=\"https://github.com/dotnet/runtime/blob/57ae91cf6fc5672e34705b1a272cf268761d505a/src/mono/mono/utils/mono-tls.h#L183\">https://github.com/dotnet/runtime/blob/57ae91cf6fc5672e34705b1a272cf268761d505a/src/mono/mono/utils/mono-tls.h#L183</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dotnet/runtime/blob/57ae91cf6fc5672e34705b1a272cf268761d505a/src/mono/mono/utils/mono-tls.h#L183\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/e44b27258bda2a9dbb1c433a7a8cde0194dc706e\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f363734623936616338633735386331363137376433316533333561613261656465366431386230316338376132363939396537383265376431653862333539642f646f746e65742f72756e74696d65)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dotnet/runtime/blob/57ae91cf6fc5672e34705b1a272cf268761d505a/src/mono/mono/utils/mono-tls.h#L183\" title=\"runtime/mono-tls.h at 57ae91cf6fc5672e34705b1a272cf268761d505a · dotnet/runtime\">runtime/mono-tls.h at 57ae91cf6fc5672e34705b1a272cf268761d505a · dotnet/runtime</a></div><div class=\"message_embed_description\">.NET is a cross-platform runtime for cloud, mobile, desktop, and IoT apps. - runtime/mono-tls.h at 57ae91cf6fc5672e34705b1a272cf268761d505a · dotnet/runtime</div></div></div>",
+        "id": 345609959,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1680167685
+    },
+    {
+        "content": "<p>thank you for the tip.<br>\nAFAICS, that flag doesn't get propagated to the build script that invokes <code>cargo build --release --target-dir &lt;target_dir&gt; --package &lt;package_name&gt;</code></p>\n<p>if this is a known issue that is expected to be fixed in the underlying libraries at some point (hinted by Alex's comments), that's fine, it's not urgent from my perspective. otherwise, if it's by design / isn't planned to be addressed - i would recommend there be some documentation/recommendation on how to overcome it.</p>",
+        "id": 345989946,
+        "sender_full_name": "yonil",
+        "timestamp": 1680277303
+    }
+]

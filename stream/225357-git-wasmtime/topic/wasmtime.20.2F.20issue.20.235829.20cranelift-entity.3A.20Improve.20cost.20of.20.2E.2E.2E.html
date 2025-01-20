@@ -1,0 +1,100 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #5829 cranelift-entity: Improve cost of ... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235829.20cranelift-entity.3A.20Improve.20cost.20of.20.2E.2E.2E.html">wasmtime / issue #5829 cranelift-entity: Improve cost of ...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="328590324"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235829%20cranelift-entity%3A%20Improve%20cost%20of%20.../near/328590324" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235829.20cranelift-entity.3A.20Improve.20cost.20of.20.2E.2E.2E.html#328590324">(Feb 18 2023 at 00:58)</a>:</h4>
+<p>jameysharp opened <a href="https://github.com/bytecodealliance/wasmtime/issues/5829">issue #5829</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>The <code>EntityList</code>/<code>ListPool</code> types declared in <code>cranelift/entity/src/list.rs</code> allocate arrays from a large pool of memory. Empty lists use no space in the pool. Otherwise, lists use a minimum of 4 elements of the pool. With a little cleverness, I believe we can arrange that lists of length 1 use no space in the pool either. Alternatively, we can at least reduce the minimum pool allocation to 2 elements instead of 4 and test whether that's an improvement.</p>
+<h4>Benefit</h4>
+<p>If we have a lot of length-1 <code>EntityList</code>s, then this could save a lot of memory. It might also save on memory bandwidth, reduce cache pressure, and avoid pipeline stalls from chasing indirections.</p>
+<p>Part of completing this issue is checking whether this change really does improve performance. It could be that the extra complexity of handling singleton lists specially takes more time than we save, or that most lists have at least two elements, or that I've misjudged the possible microarchitectural benefits.</p>
+<p>That said, my guess is that we do have a lot of length-1 lists, especially now that <code>BlockCall</code>s are stored in the <code>ValueListPool</code>. (A branch to a block that takes no block-parameters is stored as a singleton list containing only the <code>Block</code> index.)</p>
+<h4>Implementation</h4>
+<p>The basic idea is similar to <a href="https://docs.rs/smallvec/latest/smallvec/">smallvec</a>. <code>EntityList</code> holds an index to the location of the list within the <code>ListPool</code>. For a singleton list, we can store the one list element inside the <code>EntityList</code>, instead of interpreting it as an index into the pool.</p>
+<p>There are two details that make this worth considering:</p>
+<ul>
+<li>
+<p>All of our types that implement <code>EntityRef</code> are <code>u32</code> internally, and so is <code>EntityList</code>. If entities were larger this wouldn't be worth doing.</p>
+</li>
+<li>
+<p>Some bit-patterns in an <code>EntityList</code> are unused. A storage block within a <code>ListPool</code> always starts at an offset that is at least a multiple of 4, and the index stored in <code>EntityList</code> is one past the start of the block. So currently, an <code>EntityList</code> is either zero (representing an empty list), or its least-significant two bits are <code>01</code>.</p>
+</li>
+</ul>
+<p>And one detail that makes this tricky: An <code>EntityList</code> can return a slice, possibly mutable, of its contents. To make this work with singleton lists stored directly inside the <code>struct EntityList&lt;T&gt;</code> itself, we'd need to be able to borrow a <code>&amp;mut [T]</code> out of it without enabling callers to break our invariants.</p>
+<p>One way to do that is when someone asks for a mutable slice, promote a singleton list into a pool-backed list. This is bad if we need to do that for most lists, since it undoes any advantages we might get from making this change in the first place. For <code>BlockCall</code> specifically we can do better, because at any given time we only want to access either the first element or a slice of the remaining elements, and for singleton lists we can return <code>&amp;mut []</code> without needing any backing storage.</p>
+<h4>Alternatives</h4>
+<p>The simplest alternative which might help is to reduce the minimum block allocation size from 4 to 2 in <code>ListPool</code>. If all our lists were singletons, that change would cut memory usage in these pools by 50%; counting the size of the <code>struct EntityList</code> it's a savings of 40%. That might be a better choice than all of the above due to its simplicity, but doesn't save as much memory.</p>
+</blockquote>
+
+
+
+<a name="345813743"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235829%20cranelift-entity%3A%20Improve%20cost%20of%20.../near/345813743" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235829.20cranelift-entity.3A.20Improve.20cost.20of.20.2E.2E.2E.html#345813743">(Mar 31 2023 at 00:46)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/5829">issue #5829</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>The <code>EntityList</code>/<code>ListPool</code> types declared in <code>cranelift/entity/src/list.rs</code> allocate arrays from a large pool of memory. Empty lists use no space in the pool. Otherwise, lists use a minimum of 4 elements of the pool. With a little cleverness, I believe we can arrange that lists of length 1 use no space in the pool either. Alternatively, we can at least reduce the minimum pool allocation to 2 elements instead of 4 and test whether that's an improvement.</p>
+<h4>Benefit</h4>
+<p>If we have a lot of length-1 <code>EntityList</code>s, then this could save a lot of memory. It might also save on memory bandwidth, reduce cache pressure, and avoid pipeline stalls from chasing indirections.</p>
+<p>Part of completing this issue is checking whether this change really does improve performance. It could be that the extra complexity of handling singleton lists specially takes more time than we save, or that most lists have at least two elements, or that I've misjudged the possible microarchitectural benefits.</p>
+<p>That said, my guess is that we do have a lot of length-1 lists, especially now that <code>BlockCall</code>s are stored in the <code>ValueListPool</code>. (A branch to a block that takes no block-parameters is stored as a singleton list containing only the <code>Block</code> index.)</p>
+<h4>Implementation</h4>
+<p>The basic idea is similar to <a href="https://docs.rs/smallvec/latest/smallvec/">smallvec</a>. <code>EntityList</code> holds an index to the location of the list within the <code>ListPool</code>. For a singleton list, we can store the one list element inside the <code>EntityList</code>, instead of interpreting it as an index into the pool.</p>
+<p>There are two details that make this worth considering:</p>
+<ul>
+<li>
+<p>All of our types that implement <code>EntityRef</code> are <code>u32</code> internally, and so is <code>EntityList</code>. If entities were larger this wouldn't be worth doing.</p>
+</li>
+<li>
+<p>Some bit-patterns in an <code>EntityList</code> are unused. A storage block within a <code>ListPool</code> always starts at an offset that is at least a multiple of 4, and the index stored in <code>EntityList</code> is one past the start of the block. So currently, an <code>EntityList</code> is either zero (representing an empty list), or its least-significant two bits are <code>01</code>.</p>
+</li>
+</ul>
+<p>And one detail that makes this tricky: An <code>EntityList</code> can return a slice, possibly mutable, of its contents. To make this work with singleton lists stored directly inside the <code>struct EntityList&lt;T&gt;</code> itself, we'd need to be able to borrow a <code>&amp;mut [T]</code> out of it without enabling callers to break our invariants.</p>
+<p>One way to do that is when someone asks for a mutable slice, promote a singleton list into a pool-backed list. This is bad if we need to do that for most lists, since it undoes any advantages we might get from making this change in the first place. For <code>BlockCall</code> specifically we can do better, because at any given time we only want to access either the first element or a slice of the remaining elements, and for singleton lists we can return <code>&amp;mut []</code> without needing any backing storage.</p>
+<h4>Alternatives</h4>
+<p>The simplest alternative which might help is to reduce the minimum block allocation size from 4 to 2 in <code>ListPool</code>. If all our lists were singletons, that change would cut memory usage in these pools by 50%; counting the size of the <code>struct EntityList</code> it's a savings of 40%. That might be a better choice than all of the above due to its simplicity, but doesn't save as much memory.</p>
+</blockquote>
+
+
+
+<a name="345813744"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235829%20cranelift-entity%3A%20Improve%20cost%20of%20.../near/345813744" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235829.20cranelift-entity.3A.20Improve.20cost.20of.20.2E.2E.2E.html#345813744">(Mar 31 2023 at 00:46)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/5829">issue #5829</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>The <code>EntityList</code>/<code>ListPool</code> types declared in <code>cranelift/entity/src/list.rs</code> allocate arrays from a large pool of memory. Empty lists use no space in the pool. Otherwise, lists use a minimum of 4 elements of the pool. With a little cleverness, I believe we can arrange that lists of length 1 use no space in the pool either. Alternatively, we can at least reduce the minimum pool allocation to 2 elements instead of 4 and test whether that's an improvement.</p>
+<h4>Benefit</h4>
+<p>If we have a lot of length-1 <code>EntityList</code>s, then this could save a lot of memory. It might also save on memory bandwidth, reduce cache pressure, and avoid pipeline stalls from chasing indirections.</p>
+<p>Part of completing this issue is checking whether this change really does improve performance. It could be that the extra complexity of handling singleton lists specially takes more time than we save, or that most lists have at least two elements, or that I've misjudged the possible microarchitectural benefits.</p>
+<p>That said, my guess is that we do have a lot of length-1 lists, especially now that <code>BlockCall</code>s are stored in the <code>ValueListPool</code>. (A branch to a block that takes no block-parameters is stored as a singleton list containing only the <code>Block</code> index.)</p>
+<h4>Implementation</h4>
+<p>The basic idea is similar to <a href="https://docs.rs/smallvec/latest/smallvec/">smallvec</a>. <code>EntityList</code> holds an index to the location of the list within the <code>ListPool</code>. For a singleton list, we can store the one list element inside the <code>EntityList</code>, instead of interpreting it as an index into the pool.</p>
+<p>There are two details that make this worth considering:</p>
+<ul>
+<li>
+<p>All of our types that implement <code>EntityRef</code> are <code>u32</code> internally, and so is <code>EntityList</code>. If entities were larger this wouldn't be worth doing.</p>
+</li>
+<li>
+<p>Some bit-patterns in an <code>EntityList</code> are unused. A storage block within a <code>ListPool</code> always starts at an offset that is at least a multiple of 4, and the index stored in <code>EntityList</code> is one past the start of the block. So currently, an <code>EntityList</code> is either zero (representing an empty list), or its least-significant two bits are <code>01</code>.</p>
+</li>
+</ul>
+<p>And one detail that makes this tricky: An <code>EntityList</code> can return a slice, possibly mutable, of its contents. To make this work with singleton lists stored directly inside the <code>struct EntityList&lt;T&gt;</code> itself, we'd need to be able to borrow a <code>&amp;mut [T]</code> out of it without enabling callers to break our invariants.</p>
+<p>One way to do that is when someone asks for a mutable slice, promote a singleton list into a pool-backed list. This is bad if we need to do that for most lists, since it undoes any advantages we might get from making this change in the first place. For <code>BlockCall</code> specifically we can do better, because at any given time we only want to access either the first element or a slice of the remaining elements, and for singleton lists we can return <code>&amp;mut []</code> without needing any backing storage.</p>
+<h4>Alternatives</h4>
+<p>The simplest alternative which might help is to reduce the minimum block allocation size from 4 to 2 in <code>ListPool</code>. If all our lists were singletons, that change would cut memory usage in these pools by 50%; counting the size of the <code>struct EntityList</code> it's a savings of 40%. That might be a better choice than all of the above due to its simplicity, but doesn't save as much memory.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

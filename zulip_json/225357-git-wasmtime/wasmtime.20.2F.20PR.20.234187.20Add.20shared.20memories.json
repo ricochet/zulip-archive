@@ -1,0 +1,1034 @@
+[
+    {
+        "content": "<p>abrown opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>:</p>\n<blockquote>\n<p>This change adds the ability to use shared memories in Wasmtime when the<br>\n[threads proposal] is enabled. Shared memories are annotated as <code>shared</code><br>\nin the WebAssembly syntax, e.g., <code>(memory 1 1 shared)</code>, and are<br>\nprotected from concurrent access during <code>memory.size</code> and <code>memory.grow</code>.</p>\n<p>[threads proposal]: <a href=\"https://github.com/WebAssembly/threads/blob/master/proposals/threads/Overview.md\">https://github.com/WebAssembly/threads/blob/master/proposals/threads/Overview.md</a></p>\n<p>In order to implement this in Wasmtime, there are two main cases to<br>\ncover:</p>\n<div class=\"codehilite\"><pre><span></span><code>- a program may simply create a shared memory and possibly export it;\nthis means that Wasmtime itself must be able to create shared\nmemories\n\n- a user may create a shared memory externally and pass it in as an\nimport during instantiation; this is the case when the program\ncontains code like `(import &quot;env&quot; &quot;memory&quot; (memory 1 1\nshared))`--this case is handled by a new Wasmtime API\ntype--`SharedMemory`\n</code></pre></div>\n\n<p>Because of the first case, this change allows any of the current<br>\nmemory-creation mechanisms to work as-is. Wasmtime can still create<br>\neither static or dynamic memories in either on-demand or pooling modes,<br>\nand any of these memories can be considered shared. When shared, the<br>\n<code>Memory</code> runtime container will lock appropriately during <code>memory.size</code><br>\nand <code>memory.grow</code> operations; since all memories use this container, it<br>\nis an ideal place for implementing the locking once and once only.</p>\n<p>The second case is covered by the new <code>SharedMemory</code> structure. It uses<br>\nthe same <code>Mmap</code> allocation under the hood as non-shared memories, but<br>\nallows the user to perform the allocation externally to Wasmtime and<br>\nshare the memory across threads (via an <code>Arc</code>). The pointer address to<br>\nthe actual memory is carefully wired through and owned by the<br>\n<code>SharedMemory</code> structure itself. This means that there are differing<br>\nviews of where to access the pointer (i.e., <code>VMMemoryDefinition</code>): for<br>\nowned memories (the default), the <code>VMMemoryDefinition</code> is stored<br>\ndirectly by the <code>VMContext</code>; in the <code>SharedMemory</code> case, however, this<br>\n<code>VMContext</code> must point to this separate structure.</p>\n<p>To ensure that the <code>VMContext</code> can always point to the correct<br>\n<code>VMMemoryDefinition</code>, this change alters the <code>VMContext</code> structure.<br>\nSince a <code>SharedMemory</code> owns its own <code>VMMemoryDefinition</code>, the<br>\n<code>defined_memories</code> table in the <code>VMContext</code> becomes a sequence of<br>\npointers--in the shared memory case, they point to the<br>\n<code>VMMemoryDefinition</code> owned by the <code>SharedMemory</code> and in the owned memory<br>\ncase (i.e., not shared) they point to <code>VMMemoryDefinition</code>s stored in a<br>\nnew table, <code>owned_memories</code>.</p>\n<p>This change adds an additional indirection (through the <code>*mut\nVMMemoryDefinition</code> pointer) that could add overhead. Using an imported<br>\nmemory as a proxy, we measured a 1-3% overhead of this approach on the<br>\n<code>pulldown-cmark</code> benchmark. To avoid this, Cranelift-generated code will<br>\nspecial-case the owned memory access (i.e., load a pointer directly to<br>\nthe <code>owned_memories</code> entry) for <code>memory.size</code> so that only<br>\nshared memories (and imported memories, as before) incur the indirection<br>\ncost.</p>\n<p>&lt;!--</p>\n<p>Please ensure that the following steps are all taken care of before submitting<br>\nthe PR.</p>\n<ul>\n<li>\n<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>\n  here.</p>\n</li>\n<li>\n<p>[ ] A short description of what this does, why it is needed; if the<br>\n  description becomes long, the matter should probably be discussed in an issue<br>\n  first.</p>\n</li>\n<li>\n<p>[ ] This PR contains test cases, if meaningful.</p>\n</li>\n<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>\n  If you don't know who could review this, please indicate so. The list of<br>\n  suggested reviewers on the right can help you.</li>\n</ul>\n<p>Please ensure all communication adheres to the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md\">code of\nconduct</a>.<br>\n--&gt;<br>\n</p>\n</blockquote>",
+        "id": 283812751,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653430689
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 283816227,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653432985
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-983952095\">PR review</a>.</p>",
+        "id": 283816873,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653433416
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881047215\">PR review comment</a>:</p>\n<blockquote>\n<p>I think a refactoring to make this work would be to:</p>\n<ul>\n<li>change the signature of <code>RuntimeLinearMemory::grow</code> to take a <code>limiter_fn: Option&lt;Fn&lt;...&gt;&gt;</code> instead of the entire store</li>\n<li>remove the error reporting to the limiter (<code>Store::memory_grow_failed</code> -&gt; <code>ResourceLimiter::memory_grow_failed</code>); right now it is unclear (except during testing) why a limiter would need to receive the growth failure--shouldn't it be the one producing this error instead? If indeed this _is_ needed, perhaps we could alter the suggestion above to an <code>Option&lt;dyn ResourceLimiter&gt;</code>?</li>\n</ul>\n</blockquote>",
+        "id": 283816874,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653433416
+    },
+    {
+        "content": "<p>abrown edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881047215\">PR review comment</a>.</p>",
+        "id": 283816910,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653433439
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 283817049,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653433533
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-983959689\">PR review</a>.</p>",
+        "id": 283818164,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653434297
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881053145\">PR review comment</a>:</p>\n<blockquote>\n<p>It is unclear what to do at this point if the module's memory is a shared one... The current logic below is incorrect.</p>\n</blockquote>",
+        "id": 283818166,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653434297
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 283818225,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653434358
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 283818263,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653434390
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 283818545,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653434597
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-983971589\">PR review</a>.</p>",
+        "id": 283892214,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-983971589\">PR review</a>.</p>",
+        "id": 283892216,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881064734\">PR review comment</a>:</p>\n<blockquote>\n<p>I see this was added to import <code>OwnedMemoryIndex</code>, but for most other types the <code>wasmtime-types</code> crate is largely reexported through the <code>wasmtime-environ</code> crate. Could the indexes be used through there perhaps?</p>\n</blockquote>",
+        "id": 283892217,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881065114\">PR review comment</a>:</p>\n<blockquote>\n<p>I think this is no longer needed?</p>\n</blockquote>",
+        "id": 283892218,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881062490\">PR review comment</a>:</p>\n<blockquote>\n<p>Now that shared memories are supported I think it's' ok to remove this and the block below that was modified (and let wasmparser handle using shared memories without the threads feature enabled)</p>\n</blockquote>",
+        "id": 283892219,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881065472\">PR review comment</a>:</p>\n<blockquote>\n<p>\"instantiation\" here I think should be reworded</p>\n</blockquote>",
+        "id": 283892220,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881065779\">PR review comment</a>:</p>\n<blockquote>\n<p>Since <code>self</code> is <code>Copy</code> I think the <code>into_</code> here can be skipped and this can probably instead be <code>as_shared_memory</code> perhaps? (taking <code>&amp;self</code> as an argument)</p>\n</blockquote>",
+        "id": 283892221,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881066095\">PR review comment</a>:</p>\n<blockquote>\n<p>To me this isn't necessarily an error per se, I think a better signature for this function might be <code>-&gt; Option&lt;SharedMemory&gt;</code> (since there's only one \"error\" condition here anyway)</p>\n</blockquote>",
+        "id": 283892222,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881066466\">PR review comment</a>:</p>\n<blockquote>\n<p>leaving a note here to ensure this isn't forgotten before landing</p>\n</blockquote>",
+        "id": 283892223,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881068492\">PR review comment</a>:</p>\n<blockquote>\n<p>This API isn't actually safe to provide because otherwise you could do something like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">mem1</span>: <span class=\"nc\">SharedMemory</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">mem2</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">mem1</span><span class=\"p\">.</span><span class=\"n\">clone</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">mem1</span><span class=\"p\">.</span><span class=\"n\">data_mut</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">b</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">mem2</span><span class=\"p\">.</span><span class=\"n\">data_mut</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"c1\">// .. a and b alias here</span>\n</code></pre></div>\n<p>which isn't memory-safe in Rust. In the <code>Memory</code> API we leverage that the owner of the memory is <code>Store&lt;T&gt;</code> so by taking <code>AsContextMut</code> we can thread through the lifetime of that borrow onto the borrow of memory, but here with no single owner we can't do that. </p>\n<p>We actually can't even support <code>fn data(&amp;self) -&gt; &amp;[u8]</code> either since that type signature in Rust assumes no writes will happen to the array (when in fact they can happen). For now all we can do I think is return perhaps <code>*mut [u8]</code> and then document how to be careful with it.</p>\n<p>This also reminds me, we'll need to do something about <code>Memory::data{,_mut}</code> as well. That'll either need to return <code>None</code> or panic for a shared memory. I feel like panicking may be the best bet for now, but we'd need to clearly document that as well (and panicking isn't great but the set of embedders that don't want to think about threads is probably nontrivial to the point that returning an <code>Option</code> would be too onerous)</p>\n<p>This also </p>\n</blockquote>",
+        "id": 283892224,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489805
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881068842\">PR review comment</a>:</p>\n<blockquote>\n<p>I think the minimum/maximum here should be u32 if this is a 32-bit memory constructor (and later with <code>MemoryType::shared64</code> the arguments would be <code>u64</code>)</p>\n</blockquote>",
+        "id": 283892225,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881069379\">PR review comment</a>:</p>\n<blockquote>\n<p>Similar to above could the memory get reexported and the embedding api tested on the returned handle?</p>\n</blockquote>",
+        "id": 283892226,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881071749\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this test exercise growing the memory externally and ensuring that the instanc sees the grown memory size? Also could you add a second instance here and ensure that both instances see the same size?</p>\n</blockquote>",
+        "id": 283892227,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881071335\">PR review comment</a>:</p>\n<blockquote>\n<p>From what I was mentioning above about how <code>data_mut</code> isn't a sound API in Rust, for the memory modification here it's probably best to have an exported function from the wasm itself which modifies memory and that's invoked here to do the modifications on behalf of this test. </p>\n<p>Otherwise though having an <code>unsafe</code> block here to do the modification is also fine (but this should be <code>unsafe</code> one way or another with a non-atomic write)</p>\n</blockquote>",
+        "id": 283892228,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881072034\">PR review comment</a>:</p>\n<blockquote>\n<p>It's ok to skip the <code>Arc</code> wrappers here since the <code>Clone</code> implementation on the inner types already only clones an <code>Arc</code></p>\n</blockquote>",
+        "id": 283892229,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881072788\">PR review comment</a>:</p>\n<blockquote>\n<p>I believe this assertion can get tripped and as-written I think that's expected. I believe 4 different threads an all concurrently execute <code>grow</code>, they witness sizes N, N+1, N+2, and N+3, and then the threads all race to push onto the <code>sizes</code> list meaning that there's no guarantee it'll be pushed in a sorted order.</p>\n<p>I think though one thing that could be tested here is that the returned list is sorted and then assert that each element from 1 to N is present in the array?</p>\n</blockquote>",
+        "id": 283892230,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881708414\">PR review comment</a>:</p>\n<blockquote>\n<p>If an <code>atomic_load</code> doesn't take an offset in clif for now it's probably ok to emit an <code>i32.add</code> to add in the offset?</p>\n</blockquote>",
+        "id": 283892232,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881710607\">PR review comment</a>:</p>\n<blockquote>\n<p>This got me thinking \"does this need to be an atomic load?\" and I think the answer is no because shared memories never have their base pointer change (so it's write-once only during initialization). That being said though one thing this did remind me of is that the <code>current_length</code> should never be used here. I think it's only used for dynamic memories, so could this have an assert below that the dynamic memory branch is never taken if the memory is shared?</p>\n</blockquote>",
+        "id": 283892233,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881712728\">PR review comment</a>:</p>\n<blockquote>\n<p>I don't think that this is quite right because imported memories are listed in <code>memory_plans</code> (it's all memories in the module). I think that imported memories need to be excluded here?</p>\n</blockquote>",
+        "id": 283892234,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881707164\">PR review comment</a>:</p>\n<blockquote>\n<p>Leaving a note here to be sure to fill this \"TODO\" in</p>\n</blockquote>",
+        "id": 283892235,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881714053\">PR review comment</a>:</p>\n<blockquote>\n<p>Similar to above, I think that the calculation here needs to exclude imported memories first, and then exclude shared memories from the remaining set of memories to figure out the number of owned memories.</p>\n</blockquote>",
+        "id": 283892236,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881711869\">PR review comment</a>:</p>\n<blockquote>\n<p>I think this should instead be an assert that the <code>memory</code> index specified is in-bounds</p>\n</blockquote>",
+        "id": 283892237,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881723850\">PR review comment</a>:</p>\n<blockquote>\n<p>IIRC the reason for passing them explicitly was that it's somewhat tricky to calculate the maximum/minimum converting from u32-or-u64 to <code>usize</code> so by passing them here it's \"pre-validated\" from the results of the previous calculations.</p>\n</blockquote>",
+        "id": 283892238,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881725849\">PR review comment</a>:</p>\n<blockquote>\n<p>Since the outer <code>SharedMemory</code> is boxed up as well, could this perhaps be <code>SharedMemoryInner&lt;T&gt;</code> and the memory here is <code>memory: RwLock&lt;T&gt;</code>?</p>\n</blockquote>",
+        "id": 283892239,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881721466\">PR review comment</a>:</p>\n<blockquote>\n<p>This I think has pretty deep implications which require an audit of callers of this function to ensure they still work correctly. Looking I see:</p>\n<ul>\n<li><code>Instance::memory</code> - this is not ok for shared memories since it does a non-atomic read of the pointer</li>\n<li><code>Instance::set_memory</code> - this is no longer valid and needs to be updated. Callers of this function are:<ul>\n<li><code>Instance::memory_grow</code> - this'll need to be updated since the update only happens for owned memories</li>\n</ul>\n</li>\n<li><code>Instance::get_exported_memory</code> - this is ok but I think callers of this need to be updated to do atomic reads of the length field</li>\n<li><code>Instance::memory_index</code> - this is no longer valid and needs to be updated (or deleted)</li>\n</ul>\n</blockquote>",
+        "id": 283892240,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881730607\">PR review comment</a>:</p>\n<blockquote>\n<p>This growth operation, on success, needs to perform an atomic increment of the <code>LongTermVMMemoryDefinition</code> current length I think?</p>\n</blockquote>",
+        "id": 283892242,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881737238\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this function take <code>MemoryPlan</code> instead of recalculating it here?</p>\n<p>Also, could this internally validate that the plan is <code>Static</code>?</p>\n</blockquote>",
+        "id": 283892243,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881735768\">PR review comment</a>:</p>\n<blockquote>\n<p>This change is actually a bit worrisome to me because the purpose of this argument is to limit memory usage within a <code>Store</code>, but our current strategy of a per-<code>Store</code> memory limiter is not sufficient to protect against shared memories.</p>\n<p>If <code>store</code> is <code>None</code> could this assert that the memory is shared? Additionally I think we'll need to keep a note on a tracking issue for shared memories to figure out how best to limit them since our current <code>ResourceLimiter</code> won't work</p>\n</blockquote>",
+        "id": 283892244,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881070568\">PR review comment</a>:</p>\n<blockquote>\n<p>... or actually, here's an idea.</p>\n<p>Right now we have <code>enum Extern { ..., Memory(Memory), ... }</code> and even shared memories here are represented and wrapped as a <code>Memory</code>. One thing we could do is statically make a distinction between <code>Memory</code> and <code>SharedMemory</code>, meaning that a <code>Memory</code> wouldn't wrap a <code>SharedMemory</code>. That way something like <code>instance.get_memory(...)</code> would fail because the shared memory wouldn't be classified as a <code>Memory</code>. </p>\n<p>This is fine to do as a follow-up PR or just keep in the back of our heads now though. I realize this is a pretty different design from what you've been working on so far.</p>\n</blockquote>",
+        "id": 283892245,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881740881\">PR review comment</a>:</p>\n<blockquote>\n<p>Oh sorry I sort of independently came to a similar conclusion that this would be a problem above before I saw your comment here.</p>\n<p>I think for now let's skip limiting memory growth of shared memories with <code>ResourceLimiter</code> so this would thread through a <code>None</code> or similar (and wherever uses the limiter would assert the store is present if the memory isn't shared).</p>\n<p>Overall we're going to need a different strategy for limiting shared memories since growth would notify a random store which isn't necessarily the right \"store\". I would naively say that we'll need a limiter-per-shared-linear-memory but we can figure that out later, no need to have it covered for now.</p>\n</blockquote>",
+        "id": 283892246,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881705745\">PR review comment</a>:</p>\n<blockquote>\n<p>Given that this is only debuginfo related and debuginfo is off-by-default I think it'd be fine to just return an error here for shared memories and have someone else come along later and figure this out if necessary.</p>\n</blockquote>",
+        "id": 283892248,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881731790\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this include some comments about why it's safe to do this?</p>\n</blockquote>",
+        "id": 283892249,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881713085\">PR review comment</a>:</p>\n<blockquote>\n<p>(only applicable for multi-memory of course, but still something we'll want to handle, and perhaps a good test case to add eventually as well)</p>\n</blockquote>",
+        "id": 283892250,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r881738151\">PR review comment</a>:</p>\n<blockquote>\n<p>Or actually I see now that the downcast into a shared memory might be difficult with that, so could this otherwise be hardcoded as an <code>MmapMemory</code>?</p>\n</blockquote>",
+        "id": 283892251,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653489806
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284034245,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653585661
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284034626,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653585853
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284034755,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1653585939
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284505004,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654015382
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-990815639\">PR review</a>.</p>",
+        "id": 284507952,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654016528
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r885889326\">PR review comment</a>:</p>\n<blockquote>\n<p>Not sure I understand what you mean by \"dynamic memory branch\" here... there is an <code>if is_shared ...</code> above?</p>\n</blockquote>",
+        "id": 284507953,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654016529
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-990978836\">PR review</a>.</p>",
+        "id": 284520347,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654022240
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r886011490\">PR review comment</a>:</p>\n<blockquote>\n<p>Done in <code>grow</code> instead.</p>\n</blockquote>",
+        "id": 284520348,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654022240
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284532703,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654028806
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-991116180\">PR review</a>.</p>",
+        "id": 284533201,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654029091
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r886104449\">PR review comment</a>:</p>\n<blockquote>\n<p><code>defined_memory_index</code> a few lines above was returning <code>Option&lt;...&gt;</code> so I kept the same level of abstraction--<code>defined_memory_index</code> can fail by indexing into the imported memories and this one can fail by not finding an owned memory within the index space. Looking at it again, now I'm wondering if the <code>.skip(...)</code> actually makes the lower part of this incorrect...</p>\n</blockquote>",
+        "id": 284533202,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654029091
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-991129465\">PR review</a>.</p>",
+        "id": 284534501,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654029753
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r886113962\">PR review comment</a>:</p>\n<blockquote>\n<p>Right now there are multiple kinds of memory that could get wrapped into a <code>SharedMemory</code>? (See <code>new_*</code> methods).</p>\n</blockquote>",
+        "id": 284534503,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654029754
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284678969,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654123372
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284765116,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654185266
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284765860,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654185588
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284774426,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654189505
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284776297,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654190131
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284789674,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654196504
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284790304,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654196776
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284791178,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654197185
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284791250,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654197230
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 284812409,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654208304
+    },
+    {
+        "content": "<p><strong>abrown</strong> has marked <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> as ready for review.</p>",
+        "id": 284819603,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654214023
+    },
+    {
+        "content": "<p><strong>abrown</strong> requested <a href=\"https://github.com/alexcrichton\">alexcrichton</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a>.</p>",
+        "id": 284819616,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654214035
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-995094951\">PR review</a>.</p>",
+        "id": 284917922,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-995094951\">PR review</a>.</p>",
+        "id": 284917923,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889073228\">PR review comment</a>:</p>\n<blockquote>\n<p>Can the tests in <code>test_vmmemory_import</code> below be expanded to test the offsets for this field as well?</p>\n</blockquote>",
+        "id": 284917924,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889079406\">PR review comment</a>:</p>\n<blockquote>\n<p>With a split type now I think that this <code>preallocation</code> parameter can be removed since it's always <code>None</code>?</p>\n</blockquote>",
+        "id": 284917925,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889070990\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this perhaps filter for <code>!p.1.memory.shared</code> to calculate <code>num_owned_memories</code>? It's a little non-obvious otherwise what's going on here with the formula below.</p>\n</blockquote>",
+        "id": 284917926,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889096802\">PR review comment</a>:</p>\n<blockquote>\n<p>I think this function should go ahead and return <code>*mut [u8]</code> probably. <code>*const</code> is just as unsafe as <code>*mut</code> here since neither mean anything in this concurrent context.</p>\n</blockquote>",
+        "id": 284917927,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889090141\">PR review comment</a>:</p>\n<blockquote>\n<p>Noting the TODO here</p>\n</blockquote>",
+        "id": 284917928,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889089237\">PR review comment</a>:</p>\n<blockquote>\n<p>I think it's ok to put this <code>use</code> at the top of the module</p>\n</blockquote>",
+        "id": 284917930,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889074638\">PR review comment</a>:</p>\n<blockquote>\n<p>Reading over this again, could this function perhaps be changed to take an <code>OwnedMemoryIndex</code> since those are the only ones we should ever set?</p>\n</blockquote>",
+        "id": 284917931,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889119201\">PR review comment</a>:</p>\n<blockquote>\n<p>This is surprising to me in that <code>vmimport</code> is intended to be a cheap \"read the field\" sort of method rather than one that actually allocates within the provided store. </p>\n<p>I thought we were going to do something where the <code>VMMemoryImport</code> here was stored within the <code>wasmtime_runtime::SharedMemory</code> itself? That would mean that this method would need to push <code>self.0.clone()</code> into the <code>StoreOpaque</code> somewhere to keep a strong reference to the shared memory, but I don't think we otherwise need to allocate a separate <code>VMContext</code> any more per store we're inserting within.</p>\n<p>I know we've waffled a bit on this historically, so maybe I'm forgetting why this wasn't done?</p>\n</blockquote>",
+        "id": 284917932,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889120085\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this <code>memory_id</code> be learned from the <code>memory_plans.push</code> above like before?</p>\n</blockquote>",
+        "id": 284917933,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889117212\">PR review comment</a>:</p>\n<blockquote>\n<p>Yeah this is the correct engine. If the shared memory came from internally within a module it's correct, and if it came from externally it was validated going in to be of the correct engine.</p>\n</blockquote>",
+        "id": 284917934,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889130869\">PR review comment</a>:</p>\n<blockquote>\n<p>I'm still pretty uncomfortable with this, I don't think that we should sometimes apply store-related limiting to shared memories and sometimes not depending on whatever happens to be the context. I don't think stores should cover shared memories at all due to their shared nature, so I think that if a store is available it needs to be intentionally ignored for shared memories.</p>\n</blockquote>",
+        "id": 284917935,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889126531\">PR review comment</a>:</p>\n<blockquote>\n<p>Thinking on this again, is the <code>RwLock</code> really necessary here? (as opposed to a <code>Mutex</code>)</p>\n<p>There aren't that many \"long running\" operations that only need a read lock I think?</p>\n</blockquote>",
+        "id": 284917936,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889125839\">PR review comment</a>:</p>\n<blockquote>\n<p>I'm a little worried that in the case of a shared memory that this growth drops the error on the floor and it doesn't go anywhere. Could you perhaps add a <code>// FIXME</code>?</p>\n<p>(in general I think it would be good to create a general tracking issue (or edit an existing issue) to keep track of all these items related to shared memories, I feel like there's quite a few of follow-ups to be done before everything is \"stable\")</p>\n</blockquote>",
+        "id": 284917937,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889123704\">PR review comment</a>:</p>\n<blockquote>\n<p>Noting the TODO here.</p>\n<p>Additionally instead of using <code>if is_shared</code> you could probably also do:</p>\n<p><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">module</span><span class=\"p\">.</span><span class=\"n\">owned_memory_index</span><span class=\"p\">(</span><span class=\"n\">def_index</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">owned</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"cm\">/* ... */</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"nb\">None</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"cm\">/* shared ... */</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 284917938,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889132560\">PR review comment</a>:</p>\n<blockquote>\n<p>Is it possible to panic here? I think that this <code>VMMemoryDefinition</code> should only ever be used for owned memories by the <code>wasmtime_runtime::Instance</code> to update the state of the memory itself.</p>\n<p>Basically it seems like a bug if this is ever actually called for shared memories.</p>\n</blockquote>",
+        "id": 284917939,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889145479\">PR review comment</a>:</p>\n<blockquote>\n<p>To perhaps stress this a bit more, could the loop happen in wasm itself? The growth loop could also perhaps happen entirely within wasm as well where -1 stores in some region of memory \"stop looping on <code>memory.size</code>\" and both threads return?</p>\n</blockquote>",
+        "id": 284917940,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889133297\">PR review comment</a>:</p>\n<blockquote>\n<p>Can the comment here be expanded a bit? I initially was wary of this since there's nothing atomic about this in terms of concurrent growth, but this is happening inside of a write lock so it should be fine. Additionally this field isn't only read by JIT-generated code but a ton of the runtime support reads this field as well (as I'm sure you're well aware of now)</p>\n</blockquote>",
+        "id": 284917941,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889126909\">PR review comment</a>:</p>\n<blockquote>\n<p>Bumping this comment again</p>\n</blockquote>",
+        "id": 284917942,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889069700\">PR review comment</a>:</p>\n<blockquote>\n<p>The above <code>defined_memory_index</code> is different though where <code>Option</code> isn't out of bounds it means \"that's an imported memory\" (which is the purpose of the function, to classify the index as either imported or locally defined).</p>\n<p>Here I dont think an attempt should be made to handle out-of-bounds behavior. Otherwise the <code>None</code> return value either means \"out of bounds\" or \"not an owned memory index\", and given that nothing should ever be out of bounds internally I don't think it's necessary to handle the out of bounds case.</p>\n</blockquote>",
+        "id": 284917943,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r889131785\">PR review comment</a>:</p>\n<blockquote>\n<p>Although actually, it looks like this function is basically the fusion of <code>Memory::new_dynamic</code> and <code>SharedMemory::wrap</code>, so could this function be deleted entirely and callers get updated to using <code>Memory::new_dynamic</code>? </p>\n<p>Or could this call <code>Memory::new_dynamic</code> and then do the cast back to <code>SharedMemory</code> as an assertion?</p>\n</blockquote>",
+        "id": 284917944,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654281690
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-996932175\">PR review</a>.</p>",
+        "id": 285145027,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654537061
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-996932175\">PR review</a>.</p>",
+        "id": 285145028,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654537061
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890376362\">PR review comment</a>:</p>\n<blockquote>\n<p>A comment here noting that this is the only access to the length field from JIT'd code for a shared memory would be helpful. Specifically I was worried that a dynamically-bounds-checked access could exist and went looking for logic that would generate atomic loads in the <code>heap_addr</code> lowering, or some equivalent change; then realized that we prevent that case by construction, by only allowing <code>Static</code>-type shared memories. Could we document that here?</p>\n</blockquote>",
+        "id": 285145029,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654537061
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890370723\">PR review comment</a>:</p>\n<blockquote>\n<p>This doc-comment seems a little unclear to me: if the result isn't exactly precise at all times, how might it differ? Is it always smaller or equal (because memory can only grow but it may be outdated)? Or something else? It seems we need a stronger statement here to rely on it at all.</p>\n<p>I also wonder if this is necessary vs. a variant that uses <code>Ordering::Acquire</code> and makes a stronger claim? Or in other words, can we justify why a \"fast and imprecise\" variant is needed?</p>\n</blockquote>",
+        "id": 285145030,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654537061
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890368049\">PR review comment</a>:</p>\n<blockquote>\n<p>I'm not sure I fully understand the atomicity guarantees around how the actual growth (making pages accessible) and setting the new size (below) occur. A comment here might be good to have, explaining why it is OK for these to be two separate steps, and what happens if other concurrently-running threads run Wasm that use <code>memory.size</code> and probe pages for accessibility?</p>\n<p>Specifically I'm curious about the case where another thread (i) accesses a memory address, finding that it does not trap, and execution continues; (ii) runs <code>memory.size</code>, and sees that the memory is supposedly smaller than the just-accessed address. This is possible if one imagines this (growing) thread to pause between the <code>grow()</code> above and the atomic store below.</p>\n<p>Do we say that this is a racy Wasm program and so results are undefined? In other words, are all memory accesses that implicitly depend on the memory length actually non-synchronizing, and any Wasm program that depends on a certain access to an address trapping must ensure it synchronizes with any other threads growing the shared memory?</p>\n<p>That seems like a reasonable enough answer to me, but we should (i) document it, and (ii) confirm that it's spec-compliant. And actually I hope that it is our answer, because providing a stronger unit of atomicity seems really hard (pause the world? Or set the new length first, and catch and handle a false out-of-bounds trap by taking a lock on length and re-checking to be sure in the signal handler?).</p>\n</blockquote>",
+        "id": 285145031,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654537061
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890377833\">PR review comment</a>:</p>\n<blockquote>\n<p>I think in the sense of \"make sure we don't feed <code>current_length</code> to the heap-access machinery in Cranelift\"-safety, we could maybe make <code>current_length_offset</code> an <code>Option</code> here, and return <code>None</code> for the shared case. Then below wherever we use it, unwrap it with \"expected current-length field (always present on non-shared memories)\" or something of the sort as an <code>expect</code> error?</p>\n</blockquote>",
+        "id": 285145032,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654537061
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890510746\">PR review comment</a>:</p>\n<blockquote>\n<p>Actually that raises another question for me about atomic orderings which sort of furthers my concerns about using <code>ptr::copy</code> for <code>memory.copy</code> and friends. If one thread witnesses that the shared memory has a particular size I don't know what the guarantees are about witnessing other parts of memory in terms of memory orderings. For example should this be <code>Acquire</code>? Should this be <code>SeqCst</code>? Do wasm modules otherwise need to <code>atomic.fence</code> before calling host functionality or something like that?</p>\n<p>I personally know very little about the atomic memory model for wasm and how it's all intended to work out so there may not be a great answer here. That being said it's almost certainly not wrong to fall back to <code>SeqCst</code> so I might say we should do that to be maximally conservative? </p>\n</blockquote>",
+        "id": 285163883,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654545850
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-997155176\">PR review</a>.</p>",
+        "id": 285163887,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654545852
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 285176963,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654552249
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890603675\">PR review comment</a>:</p>\n<blockquote>\n<p>There's no <code>vmmemory_import_index</code> function to test against... should there be? (I don't think we use the index offset in the JIT-generated code).</p>\n</blockquote>",
+        "id": 285177861,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654552792
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-997294449\">PR review</a>.</p>",
+        "id": 285177862,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654552792
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890604415\">PR review comment</a>:</p>\n<blockquote>\n<p><code>SharedMemory::vmimport</code> uses <code>Memory::_new</code> to calculate a <code>VMMemoryImport</code>.</p>\n</blockquote>",
+        "id": 285178064,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654552884
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-997295517\">PR review</a>.</p>",
+        "id": 285178066,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654552884
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890606423\">PR review comment</a>:</p>\n<blockquote>\n<p>Looking at <code>Tunables</code> (now for the n-th time), I can't really see how we could guarantee that only a static allocation is used.</p>\n</blockquote>",
+        "id": 285178517,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654553124
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-997298324\">PR review</a>.</p>",
+        "id": 285178518,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654553124
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r890609485\">PR review comment</a>:</p>\n<blockquote>\n<p>Welp, not any more after removing the <code>Option</code> from the return of <code>owned_memory_index</code>!</p>\n</blockquote>",
+        "id": 285179148,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654553499
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-997302550\">PR review</a>.</p>",
+        "id": 285179149,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654553499
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 285179281,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654553578
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891249843\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah no you're right, disregard me!</p>\n</blockquote>",
+        "id": 285252427,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654609487
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998185984\">PR review</a>.</p>",
+        "id": 285252428,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654609487
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998189355\">PR review</a>.</p>",
+        "id": 285252708,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654609605
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891252338\">PR review comment</a>:</p>\n<blockquote>\n<p>The <code>vmimport</code> constructor doesn't need to create a <code>Memory</code> through which inserts into the memories table within the <code>Store</code>, so I think that the call to the trampoline helper here can be inlined into <code>vmimport</code> and then the instance handle can be used to extract the memory directly rather than going through <code>Memory</code></p>\n</blockquote>",
+        "id": 285252709,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654609605
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998191077\">PR review</a>.</p>",
+        "id": 285252795,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654609654
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891253409\">PR review comment</a>:</p>\n<blockquote>\n<p>I don't think you'll want to determine that by looking at the tunables but rather by looking at the <code>MemoryPlan</code> that pops out. Additionally though this isn't the best place for the error but rather in <code>wasmtime_runtime::SharedMemory</code> during the constructor you can <code>match</code> on the <code>MemoryPlan</code> and reject <code>Dynamic</code> variants.</p>\n</blockquote>",
+        "id": 285252796,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654609654
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891533133\">PR review comment</a>:</p>\n<blockquote>\n<p>I tried but we aren't there yet: <code>instance.rs</code> uses this function both to setup the <code>vmctx</code> initially in <code>initialize_vmctx</code> and later to replace the <code>VMMemoryDefinition</code> as a part of <code>memory_grow</code>.</p>\n</blockquote>",
+        "id": 285287537,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654623395
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998591285\">PR review</a>.</p>",
+        "id": 285287541,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654623399
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891549263\">PR review comment</a>:</p>\n<blockquote>\n<p>Isn't that a bug though that needs fixing? The write of <code>VMMemoryDefinition</code> isn't atomic so it needs to be synchronized with everything else. I think that <code>memory_grow</code> needs to be updated to only update the local owned context and otherwise rely on the receiver to update?</p>\n</blockquote>",
+        "id": 285290043,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654624466
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998615475\">PR review</a>.</p>",
+        "id": 285290044,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654624466
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998628706\">PR review</a>.</p>",
+        "id": 285291288,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654625008
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891558203\">PR review comment</a>:</p>\n<blockquote>\n<p><a href=\"https://github.com/bytecodealliance/wasmtime/issues/4240\">https://github.com/bytecodealliance/wasmtime/issues/4240</a></p>\n</blockquote>",
+        "id": 285291289,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654625008
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998642271\">PR review</a>.</p>",
+        "id": 285292786,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654625727
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891567938\">PR review comment</a>:</p>\n<blockquote>\n<p>Yeah, the <code>RwLock</code> could be considered overkill here. Looking at <a href=\"https://github.com/WebAssembly/threads/issues/26\">https://github.com/WebAssembly/threads/issues/26</a> shows some different options for implementing the locking around this. Initially I was considering locking everything (even <code>memory.size</code> through a host call) but since the addition of <code>AtomicUsize</code> I migrated towards locking <code>memory.grow</code> and allowing atomic access to the length. The read locks used in this struct could eventually be replaced by atomic loads and this <code>RwLock</code> with a <code>Mutex</code> but at the moment the extra safety seems fine and this type of refactor could be resolved in the tracking issue.</p>\n</blockquote>",
+        "id": 285292787,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654625727
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998651214\">PR review</a>.</p>",
+        "id": 285293765,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654626189
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891574601\">PR review comment</a>:</p>\n<blockquote>\n<blockquote>\n<p>what happens if other concurrently-running threads run Wasm that use memory.size and probe pages for accessibility?</p>\n</blockquote>\n<p>The <code>test_memory_size_accessibility</code> test does exactly that, but not probing beyond the <code>memory.size</code></p>\n<blockquote>\n<p>Do we say that this is a racy Wasm program and so results are undefined?</p>\n</blockquote>\n<p>Conrad's <a href=\"https://github.com/WebAssembly/threads/issues/26#issuecomment-433930711\">summary of the original discussion of this issue</a> is: \"multiple accesses in one thread racing with another thread's memory.grow that are in-bounds only after the grow commits may independently succeed or trap.\" See the discussion above that comment for more details, but my reading is that the weaker semantics that you described are the ones in the spec.</p>\n</blockquote>",
+        "id": 285293766,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654626189
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998676075\">PR review</a>.</p>",
+        "id": 285296149,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654627290
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891591342\">PR review comment</a>:</p>\n<blockquote>\n<p>OK awesome -- just a comment here pointing to that and documenting why it's OK would be great then :-)</p>\n</blockquote>",
+        "id": 285296151,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654627290
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998682814\">PR review</a>.</p>",
+        "id": 285296965,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654627661
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891596115\">PR review comment</a>:</p>\n<blockquote>\n<p>I believe the reason @alexcrichton suggested this relaxed function was for all the cases where the length is retrieved but no synchronization was necessary (i.e., anything related to owned memory). I could certainly make this <code>SeqCst</code> but that doesn't totally make sense for all the owned memory cases. Since, like @cfallin mentioned, <code>current_length()</code> can only differ by appearing smaller than what another thread sees, I will update the documentation comment accordingly. This function should be precise for any owned memories (regardless of what ordering is used) and will be safely imprecise for shared memories but under-estimating (at least until the spec changes to allow memory shrinking in some way).</p>\n</blockquote>",
+        "id": 285296966,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654627661
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 285297657,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654627958
+    },
+    {
+        "content": "<p><strong>abrown</strong> requested <a href=\"https://github.com/alexcrichton\">alexcrichton</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a>.</p>",
+        "id": 285297817,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654628026
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998695367\">PR review</a>.</p>",
+        "id": 285298479,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654628295
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891604840\">PR review comment</a>:</p>\n<blockquote>\n<p>I don't see it. <code>Instance::memory</code> is called by <code>Instance::get_memory</code> which is used by <code>memory_copy</code>, <code>memory_fill</code>, etc. That functionality should still be present for shared memory I think.</p>\n</blockquote>",
+        "id": 285298480,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654628295
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891615706\">PR review comment</a>:</p>\n<blockquote>\n<p>The <code>VMMemoryDefinition</code> is stored on the <code>wasmtime_runtime::SharedMemory</code> already; maybe that's what you mean. Storing the <code>VMMemoryImport</code> would mean that the shared memory is associated with a single instance in a single store... can't these things be shared across stores?</p>\n<p>In any case, this function is only used when importing a shared memory into an instance from <code>OwnedImports::push</code> so it seems like the extra work is only done then. If the above question is answered, perhaps this refactor is a suitable candidate for the shared memory tracking issue?</p>\n</blockquote>",
+        "id": 285299773,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654628887
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998711090\">PR review</a>.</p>",
+        "id": 285299774,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654628887
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998761587\">PR review</a>.</p>",
+        "id": 285304967,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654631452
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891650879\">PR review comment</a>:</p>\n<blockquote>\n<p>Sorry I couldn't place this comment well due to the PR not actually covering the relevant line of code, I mean the <code>set_memory</code> function just below this comment</p>\n</blockquote>",
+        "id": 285304968,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654631452
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998769214\">PR review</a>.</p>",
+        "id": 285305566,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654631802
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891656249\">PR review comment</a>:</p>\n<blockquote>\n<p>Reading over this again, I think this should return an error that this isn't supported because this won't work correctly with the pooling allocator as the lifetime of the linear memory is tied ot the lifetime of the instance, which isn't correct in the case of shared memories.</p>\n</blockquote>",
+        "id": 285305567,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654631803
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891657838\">PR review comment</a>:</p>\n<blockquote>\n<p>Can these asserts be deferred to <code>SharedMemory::wrap</code> and can this method call <code>SharedMemory::wrap</code>? Otherwise <code>Memory::new_dynamic</code> which I believe is called for locally defined memories isn't asserting these invariants (when it needs to be doing so)</p>\n</blockquote>",
+        "id": 285305794,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654631922
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998771487\">PR review</a>.</p>",
+        "id": 285305795,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654631923
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891658945\">PR review comment</a>:</p>\n<blockquote>\n<p>This is a pretty minor point and it can be left to later, but my point here is that this can and probably should be replaced with <code>Mutex</code> outright. I don't think there's any need for the reader/writer aspect of <code>RwLock</code>, only the \"<code>Lock</code>\" part is needed. </p>\n<p>Eventually moving some operations outside the lock entirely I think is somewhat orthogonal. Still good to do but otherwise having <code>RwLock</code> here I think gives the wrong impression that this is somehow optimized or architected to have few writers and many readers.</p>\n</blockquote>",
+        "id": 285305993,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654632009
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998773086\">PR review</a>.</p>",
+        "id": 285305994,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654632009
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998774875\">PR review</a>.</p>",
+        "id": 285306170,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654632105
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891660150\">PR review comment</a>:</p>\n<blockquote>\n<p>Sorry yeah the refactoring you've pushed up now is what I had in mind, still creating a local <code>VMContext</code> per-store but just not pushing that <code>VMContext</code> as a <code>Memory</code> into the <code>Store</code></p>\n</blockquote>",
+        "id": 285306171,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654632105
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891662268\">PR review comment</a>:</p>\n<blockquote>\n<p>One thing to consider here is the effect on the synchronization of this precise field, the current length, but there's also the effects of whether we can see the rest of concurrent memory modifications or such. For example if we read the current length at a particular value what does that mean for reading other pieces of memory?</p>\n<p>I'm not sure what the answer is but I'm pretty sure it's affected by the memory orderings here. I don't know what the desired memory orderings are so I would personally use <code>SeqCst</code> everywhere because I know it's not wrong. Then again <code>SeqCst</code> can also be buggy because it provides too strong of an ordering which means we can't relax it in the future when it turns out we're not supposed to have such a strong ordering.</p>\n<p>Anyway these are also theoretical concerns of mine and don't necessarily need any changes at this time.</p>\n</blockquote>",
+        "id": 285306507,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654632275
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998777911\">PR review</a>.</p>",
+        "id": 285306508,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654632275
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 285307233,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654632677
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998825283\">PR review</a>.</p>",
+        "id": 285311448,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654634799
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891694994\">PR review comment</a>:</p>\n<blockquote>\n<p>Ok, I conditioned the \"replace the memory definition\" code on whether the memory was shared or not which then makes it possible to make this <code>unreachable!</code>. I tried changing <code>set_memory</code> to take an <code>OwnedMemoryIndex</code> but calculating that is not fast: we have to iterate through all of the memories to find the owned ones. We do this already during instantiation because we're iterating through the memories anyways but it seems expensive to do for every <code>memory.grow</code> (we could obviously save off a map of \"defined to owned indexes\" during instantiation but then that means extra space).</p>\n</blockquote>",
+        "id": 285311449,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654634799
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 285311462,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654634811
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998827025\">PR review</a>.</p>",
+        "id": 285311656,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654634899
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891696298\">PR review comment</a>:</p>\n<blockquote>\n<p>Ok, see my comment <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891694994\">here</a>: it's tricky to re-calculate the owned index for every <code>memory.grow</code>.</p>\n</blockquote>",
+        "id": 285311657,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654634899
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998828131\">PR review</a>.</p>",
+        "id": 285311781,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654634963
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891697133\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this be done later as a part of the tracking issue?</p>\n</blockquote>",
+        "id": 285311782,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654634963
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891701010\">PR review comment</a>:</p>\n<blockquote>\n<p>No, it is possible that multiple threads could be asking for <code>byte_size()</code> and this allows those calls to be concurrent. Eventually we could move to using the <code>current_length: AtomicUsize</code> exclusively for <code>byte_size</code> but now that I think of it <code>maximum_byte_size</code> and <code>needs_init</code> still only need read access, not a full lock.</p>\n</blockquote>",
+        "id": 285312371,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654635267
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998833369\">PR review</a>.</p>",
+        "id": 285312372,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654635267
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 285319971,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654639347
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r891760209\">PR review comment</a>:</p>\n<blockquote>\n<p>But we should still be able to create instances in the pooling allocator that contain <code>(memory _ _ shared)</code>, right? I agree that there is something to be fixed here (maybe in the tracking issue?) but it's not clear what that would be--prevent deallocation in the pool for memories once they are shared outside the instance?</p>\n</blockquote>",
+        "id": 285322319,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654640935
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-998914653\">PR review</a>.</p>",
+        "id": 285322320,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654640935
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r892464343\">PR review comment</a>:</p>\n<blockquote>\n<p>In theory that should work yeah but it's currently not sound to do so with the pooling allocator. I think it's fine to return an error and leave a \"FIXME\" for implementing this in the future. For now though I'm trying to make sure that there aren't any known unsoundnesses in the implementation and this is one that needs to be fixed.</p>\n</blockquote>",
+        "id": 285400615,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654698837
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-999881753\">PR review</a>.</p>",
+        "id": 285400616,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654698838
+    },
+    {
+        "content": "<p>abrown updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a> from <code>shared-memory-vmcontext</code> to <code>main</code>.</p>",
+        "id": 285414681,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654704367
+    },
+    {
+        "content": "<p>abrown submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-1000039542\">PR review</a>.</p>",
+        "id": 285414777,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654704417
+    },
+    {
+        "content": "<p>abrown created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r892575149\">PR review comment</a>:</p>\n<blockquote>\n<p>Oh, you said return an error... I used <code>todo!</code>. Does it matter?</p>\n</blockquote>",
+        "id": 285414779,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654704417
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-1000072980\">PR review</a>.</p>",
+        "id": 285417749,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654705626
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r892596507\">PR review comment</a>:</p>\n<blockquote>\n<p>Certainly!</p>\n</blockquote>",
+        "id": 285417750,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654705626
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-1000146045\">PR review</a>.</p>",
+        "id": 285424022,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654708323
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#discussion_r892651532\">PR review comment</a>:</p>\n<blockquote>\n<p>Nah <code>todo!</code> is fine, just something to indicate us to come back to this if anyone stumbles across it.</p>\n</blockquote>",
+        "id": 285424024,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654708324
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187#pullrequestreview-1000149690\">PR review</a>.</p>",
+        "id": 285424199,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654708416
+    },
+    {
+        "content": "<p>alexcrichton merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4187\">PR #4187</a>.</p>",
+        "id": 285424210,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1654708422
+    }
+]

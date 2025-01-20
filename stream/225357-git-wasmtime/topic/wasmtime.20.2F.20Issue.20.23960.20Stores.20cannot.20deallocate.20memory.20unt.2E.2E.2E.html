@@ -1,0 +1,129 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / Issue #960 Stores cannot deallocate memory unt... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.23960.20Stores.20cannot.20deallocate.20memory.20unt.2E.2E.2E.html">wasmtime / Issue #960 Stores cannot deallocate memory unt...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="189699323"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%23960%20Stores%20cannot%20deallocate%20memory%20unt.../near/189699323" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.23960.20Stores.20cannot.20deallocate.20memory.20unt.2E.2E.2E.html#189699323">(Mar 04 2020 at 15:03)</a>:</h4>
+<p>alexcrichton labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/960" target="_blank" title="https://github.com/bytecodealliance/wasmtime/issues/960">Issue #960</a>:</p>
+<blockquote>
+<p>From our discussion today on the wasmtime call the topic of GC, <code>table.set</code>, and <a href="https://github.com/bytecodealliance/wasmtime/issues/954" target="_blank" title="https://github.com/bytecodealliance/wasmtime/issues/954">https://github.com/bytecodealliance/wasmtime/issues/954</a> all came up. It was concluded that <em>today</em> with the MVP you can actually create a cyclic dependency between modules, for example:</p>
+<div class="codehilite"><pre><span></span>(module $a
+  (table (export &quot;table&quot;) 2 2 funcref)
+  (func
+    i32.const 1
+    call_indirect)
+  (elem (i32.const 0) func 0))
+
+(module $b
+  (import &quot;a&quot; &quot;table&quot; (table 2 2 funcref))
+  (func
+    i32.const 0
+    call_indirect)
+  (elem (i32.const 1) func 0))
+</pre></div>
+
+
+<p>These two modules only use MVP features but they have a shared table which cyclically references the two modules.</p>
+<p>Our conclusion from this was that <code>Store</code> is actually a "clique" of instances together, and once you instantiate something you can never deallocate anything until all the instances have gone. Internally this would entail ensuring that all types exported in <code>wasmtime</code> have some sort of handle on their store (basically all of them already do, this isn't hard).</p>
+<p>Implementation-wise I don't think this will be hard to do, but this does have some critical implications I'd like to sort out first:</p>
+<ul>
+<li>
+<p>We need to acknowledge that an <code>Instance</code> will never be fully deallocated until all objects referencing the <code>Store</code> have gone away. This feels like a pretty bad crutch to lean on (but it's not like we have much choice) and is something we would need to document thoroughly. You would basically never want user code generating instances into a <code>Store</code> because it means you could OOM quickly. Instead your instance-creation patterns must be known statically. (this may eventually be different with the whole linking proposal, but this would be the status quo that we would have to document)</p>
+</li>
+<li>
+<p>If we start thinking of <code>Store</code> as a "clique of instances" then I don't think the API is quite aligned for that today. For example if you compile a <code>Module</code> I wouldn't expect that to be tied to a particular store. A <code>Module</code> should have its own compiled memory cached, but this can be instantiated into any <code>Store</code> object since it's just adding new references to the compiled memory in multiple stores (possibly). Furthermore I don't know how to rationalize the thread-safety here. For example an <code>Instance</code> cannot be sent across threads (although this is <a href="https://github.com/bytecodealliance/wasmtime/issues/793" target="_blank" title="https://github.com/bytecodealliance/wasmtime/issues/793">up for debate</a>), but you almost for sure want to share a <code>Module</code> across threads. You may even want multiple threads to be part of a single <code>Store</code>, but if a <code>Store</code> has to have a handle to all of its <code>Instance</code> objects then this is sort of a backwards relation because <code>Store</code> needs to be threadsafe, but it can't be threadsafe because <code>Instance</code> can't be threadsafe.</p>
+</li>
+</ul>
+<p>I think a bunch of this may just boil down to "Alex needs further clarification of what's already there", but I don't really see how <code>Store</code> and <code>Engine</code> map to concepts of what you would want today. I understand they came from v8, but I'm not sure why we want them in our API as well and how it maps to thread safety and such. This is all stuff we need to sort out, though, because the current way we treat multiple stores and instances referencing each other is not memory safe and can easily segfault.</p>
+</blockquote>
+
+
+
+<a name="190742449"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%23960%20Stores%20cannot%20deallocate%20memory%20unt.../near/190742449" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.23960.20Stores.20cannot.20deallocate.20memory.20unt.2E.2E.2E.html#190742449">(Mar 16 2020 at 15:57)</a>:</h4>
+<p>pepyakin <a href="https://github.com/bytecodealliance/wasmtime/issues/960#issuecomment-599616086" target="_blank" title="https://github.com/bytecodealliance/wasmtime/issues/960#issuecomment-599616086">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/960" target="_blank" title="https://github.com/bytecodealliance/wasmtime/issues/960">Issue #960</a>:</p>
+<blockquote>
+<p>I think it came from <a href="https://github.com/WebAssembly/wasm-c-api/blob/master/include/wasm.h" target="_blank" title="https://github.com/WebAssembly/wasm-c-api/blob/master/include/wasm.h">wasm-c-api</a> (which seems to be heavily influenced by v8). It seems that wasm-c-api was inspired by the wasm spec, but in contrast to it, wasm-c-api's <code>Module</code> requires <code>Store</code> for some reason. Looking at their impl, their store is thread-safe in the sense that it is <code>Send</code> but not thread-safe in the sense that multiple threads can use it at the same time.</p>
+<p>So, by this</p>
+<blockquote>
+<p>You may even want multiple threads to be part of a single <code>Store</code></p>
+</blockquote>
+<p>you also mean <code>Send</code>?</p>
+</blockquote>
+
+
+
+<a name="190894833"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%23960%20Stores%20cannot%20deallocate%20memory%20unt.../near/190894833" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.23960.20Stores.20cannot.20deallocate.20memory.20unt.2E.2E.2E.html#190894833">(Mar 17 2020 at 18:53)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/960#issuecomment-600240793" target="_blank" title="https://github.com/bytecodealliance/wasmtime/issues/960#issuecomment-600240793">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/960" target="_blank" title="https://github.com/bytecodealliance/wasmtime/issues/960">Issue #960</a>:</p>
+<blockquote>
+<p>Somehow we're going to want to be able to support threaded wasm where instances are connected to each other via a <code>Memory</code> and they can all instantiate the same <code>Module</code> on multiple threads. That's sort of the bare minimum required, but today we've painted ourselves a bit into a corner where <code>Module</code> stores a <code>Store</code> which is not thread safe inherently because <code>Instance</code> fields should never be dropped until a <code>Store</code> is dropped. Furthermore we also require that all imports come from the same <code>Store</code>, which would cause more issues if we were to try to make targeted fixes.</p>
+<p>We're basically in a corner right now which I dont think makes sense. We need to figure out, probably from scratch, what we want our multithreading story to be. For example what structures are supposed to be shared, what's the idioms we are expecting for multithreaded instances, etc.</p>
+</blockquote>
+
+
+
+<a name="195746103"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%23960%20Stores%20cannot%20deallocate%20memory%20unt.../near/195746103" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.23960.20Stores.20cannot.20deallocate.20memory.20unt.2E.2E.2E.html#195746103">(Apr 29 2020 at 17:47)</a>:</h4>
+<p>alexcrichton closed <a href="https://github.com/bytecodealliance/wasmtime/issues/960" title="https://github.com/bytecodealliance/wasmtime/issues/960">Issue #960</a>:</p>
+<blockquote>
+<p>From our discussion today on the wasmtime call the topic of GC, <code>table.set</code>, and <a href="https://github.com/bytecodealliance/wasmtime/issues/954" title="https://github.com/bytecodealliance/wasmtime/issues/954">https://github.com/bytecodealliance/wasmtime/issues/954</a> all came up. It was concluded that <em>today</em> with the MVP you can actually create a cyclic dependency between modules, for example:</p>
+<div class="codehilite"><pre><span></span><code>(module $a
+  (table (export &quot;table&quot;) 2 2 funcref)
+  (func
+    i32.const 1
+    call_indirect)
+  (elem (i32.const 0) func 0))
+
+(module $b
+  (import &quot;a&quot; &quot;table&quot; (table 2 2 funcref))
+  (func
+    i32.const 0
+    call_indirect)
+  (elem (i32.const 1) func 0))
+</code></pre></div>
+
+
+<p>These two modules only use MVP features but they have a shared table which cyclically references the two modules.</p>
+<p>Our conclusion from this was that <code>Store</code> is actually a "clique" of instances together, and once you instantiate something you can never deallocate anything until all the instances have gone. Internally this would entail ensuring that all types exported in <code>wasmtime</code> have some sort of handle on their store (basically all of them already do, this isn't hard).</p>
+<p>Implementation-wise I don't think this will be hard to do, but this does have some critical implications I'd like to sort out first:</p>
+<ul>
+<li>
+<p>We need to acknowledge that an <code>Instance</code> will never be fully deallocated until all objects referencing the <code>Store</code> have gone away. This feels like a pretty bad crutch to lean on (but it's not like we have much choice) and is something we would need to document thoroughly. You would basically never want user code generating instances into a <code>Store</code> because it means you could OOM quickly. Instead your instance-creation patterns must be known statically. (this may eventually be different with the whole linking proposal, but this would be the status quo that we would have to document)</p>
+</li>
+<li>
+<p>If we start thinking of <code>Store</code> as a "clique of instances" then I don't think the API is quite aligned for that today. For example if you compile a <code>Module</code> I wouldn't expect that to be tied to a particular store. A <code>Module</code> should have its own compiled memory cached, but this can be instantiated into any <code>Store</code> object since it's just adding new references to the compiled memory in multiple stores (possibly). Furthermore I don't know how to rationalize the thread-safety here. For example an <code>Instance</code> cannot be sent across threads (although this is <a href="https://github.com/bytecodealliance/wasmtime/issues/793" title="https://github.com/bytecodealliance/wasmtime/issues/793">up for debate</a>), but you almost for sure want to share a <code>Module</code> across threads. You may even want multiple threads to be part of a single <code>Store</code>, but if a <code>Store</code> has to have a handle to all of its <code>Instance</code> objects then this is sort of a backwards relation because <code>Store</code> needs to be threadsafe, but it can't be threadsafe because <code>Instance</code> can't be threadsafe.</p>
+</li>
+</ul>
+<p>I think a bunch of this may just boil down to "Alex needs further clarification of what's already there", but I don't really see how <code>Store</code> and <code>Engine</code> map to concepts of what you would want today. I understand they came from v8, but I'm not sure why we want them in our API as well and how it maps to thread safety and such. This is all stuff we need to sort out, though, because the current way we treat multiple stores and instances referencing each other is not memory safe and can easily segfault.</p>
+</blockquote>
+
+
+
+<a name="196909240"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%23960%20Stores%20cannot%20deallocate%20memory%20unt.../near/196909240" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.23960.20Stores.20cannot.20deallocate.20memory.20unt.2E.2E.2E.html#196909240">(May 08 2020 at 15:24)</a>:</h4>
+<p>DemiMarie-parity <a href="https://github.com/bytecodealliance/wasmtime/issues/960#issuecomment-625868939" title="https://github.com/bytecodealliance/wasmtime/issues/960#issuecomment-625868939">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/960" title="https://github.com/bytecodealliance/wasmtime/issues/960">Issue #960</a>:</p>
+<blockquote>
+<p>@alexcrichton what about doing some form of garbage collection pass?</p>
+</blockquote>
+
+
+
+<a name="196915154"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%23960%20Stores%20cannot%20deallocate%20memory%20unt.../near/196915154" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.23960.20Stores.20cannot.20deallocate.20memory.20unt.2E.2E.2E.html#196915154">(May 08 2020 at 16:06)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/960#issuecomment-625888584" title="https://github.com/bytecodealliance/wasmtime/issues/960#issuecomment-625888584">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/960" title="https://github.com/bytecodealliance/wasmtime/issues/960">Issue #960</a>:</p>
+<blockquote>
+<p>Indeed that should be able to help clear out memory sooner! That's a pretty major feature though and one we haven't planned on adding any time soon (AFAIK) to wasmtime, so it's aways out if at all.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

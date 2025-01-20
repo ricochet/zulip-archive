@@ -1,0 +1,730 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #4906 Add an overlap checker to ISLE · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html">wasmtime / PR #4906 Add an overlap checker to ISLE</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="298631043"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298631043" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298631043">(Sep 13 2022 at 17:18)</a>:</h4>
+<p>elliottt edited <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>:</p>
+<blockquote>
+<p>Introduce overlap checking for ISLE as the start of addressing #4717.</p>
+<p>The overlap checker detects cases where ISLE rules could fire for the same input. Consider the following example from the x64 lowerings (line numbers added for clarity):</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="nv">13:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">sse_xor_op</span><span class="w"> </span><span class="nv">$F32X4</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">SseOpcode.Xorps</span><span class="p">))</span><span class="w"></span>
+<span class="nv">14:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">sse_xor_op</span><span class="w"> </span><span class="nv">$F64X2</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">SseOpcode.Xorpd</span><span class="p">))</span><span class="w"></span>
+<span class="nv">15:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">sse_xor_op</span><span class="w"> </span><span class="p">(</span><span class="nv">multi_lane</span><span class="w"> </span><span class="nv">_bits</span><span class="w"> </span><span class="nv">_lanes</span><span class="p">))</span><span class="w"> </span><span class="p">(</span><span class="nv">SseOpcode.Pxor</span><span class="p">))</span><span class="w"></span>
+</code></pre></div>
+<p>Rule 15 overlaps separately with rules 13 and 14, but rules 13 and 14 don't overlap with each other. With overlap checking enabled this will be reported as an overlap of all three rules, where the rule on line 15 will be identified as the source of the overlap (error messages could definitely be improved here). In this case the overlap can be resolved by setting a lower priority for rule 3.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">Error</span>:
+  <span class="err">×</span><span class="w"> </span><span class="n">overlap</span><span class="w"> </span><span class="n">error</span>: <span class="nc">rules</span><span class="w"> </span><span class="n">are</span><span class="w"> </span><span class="n">overlapping</span><span class="w"></span>
+<span class="w">  </span><span class="err">│</span><span class="w">   </span><span class="o">../</span><span class="n">x64</span><span class="p">.</span><span class="n">isle</span>:<span class="mi">15</span>:<span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="err">│</span><span class="w">   </span><span class="o">../</span><span class="n">x64</span><span class="p">.</span><span class="n">isle</span>:<span class="mi">13</span>:<span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="err">│</span><span class="w">   </span><span class="o">../</span><span class="n">x64</span><span class="p">.</span><span class="n">isle</span>:<span class="mi">14</span>:<span class="mi">0</span><span class="w"></span>
+</code></pre></div>
+<p>For another example, consider the following:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="nv">1:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">example</span><span class="w"> </span><span class="nv">$F32</span><span class="w"> </span><span class="mi">25</span><span class="p">)</span><span class="w"> </span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+<span class="nv">2:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">example</span><span class="w"> </span><span class="nv">$F32</span><span class="w"> </span><span class="p">(</span><span class="nv">fallible_extractor</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span><span class="w"> </span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+<span class="nv">3:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">example</span><span class="w"> </span><span class="nv">$F64</span><span class="w"> </span><span class="nv">_</span><span class="p">)</span><span class="w"> </span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+</code></pre></div>
+<p>In this case, only the rules on lines 1 and 2 overlap, as we don't know that the fallible extractor won't fire successfully on the input <code>25</code>. As the rule on line 3 has a different leading pattern (<code>$F64</code>) it won't be part of  the overlap group generated.</p>
+<p>However, if the example looks instead like the following:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="nv">1:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">example</span><span class="w"> </span><span class="nv">$F32</span><span class="w"> </span><span class="p">(</span><span class="nv">fallible_extractor</span><span class="w"> </span><span class="mi">25</span><span class="p">))</span><span class="w"> </span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+<span class="nv">2:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">example</span><span class="w"> </span><span class="nv">$F32</span><span class="w"> </span><span class="p">(</span><span class="nv">fallible_extractor</span><span class="w"> </span><span class="mi">31</span><span class="p">))</span><span class="w"> </span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+<span class="nv">3:</span><span class="w"> </span><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">example</span><span class="w"> </span><span class="nv">$F64</span><span class="w"> </span><span class="nv">_</span><span class="p">)</span><span class="w"> </span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+</code></pre></div>
+<p>We consider there to be no overlap in the rules as fallible extractors are expected to be pure.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</li>
+<li>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</li>
+<li>[ ] This PR contains test cases, if meaningful.</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="298634485"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298634485" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298634485">(Sep 13 2022 at 17:38)</a>:</h4>
+<p>elliottt updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="298647753"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647753" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647753">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106204460">PR review</a>.</p>
+
+
+
+<a name="298647754"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647754" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647754">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969911715">PR review comment</a>:</p>
+<blockquote>
+<p>How much trouble would it be to make this a runtime option of some sort?</p>
+</blockquote>
+
+
+
+<a name="298647755"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647755" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647755">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969913882">PR review comment</a>:</p>
+<blockquote>
+<p>How would you feel about a <code>HashSet&lt;RuleId&gt;</code> instead of <code>Vec&lt;bool&gt;</code>? Or, if you want the edges sorted by rule ID, at least a <code>BTreeSet</code>.</p>
+<p>As written, this uses O(n^2) space even if there aren't any errors.</p>
+<p>A cute side benefit is that then you can tag this struct with <code>#[derive(Default)]</code> and use <code>Node::default</code> instead of having to hand-implement <code>Node::new</code>.</p>
+</blockquote>
+
+
+
+<a name="298647756"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647756" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647756">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106204460">PR review</a>.</p>
+
+
+
+<a name="298647757"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647757" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647757">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969922153">PR review comment</a>:</p>
+<blockquote>
+<p>There's a neat idiom if <code>self.edges</code> were a <code>HashSet</code> or <code>BTreeSet</code>: </p>
+<div class="codehilite" data-code-language="suggestion"><pre><span></span><code>        if self.edges.insert(other.0) {
+            self.degree += 1;
+        }
+</code></pre></div>
+<p>The same pattern works for calling <code>edges.remove</code> in <code>remove_edge</code> below.</p>
+</blockquote>
+
+
+
+<a name="298647758"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647758" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647758">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969929464">PR review comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>/// Check for overlapping rules within a single priority group.
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="298647759"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647759" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647759">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969931438">PR review comment</a>:</p>
+<blockquote>
+<p>I'm not sure whether it's an improvement here, but there's a handy macro in the standard library for this pattern:</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>        matches!(
+            self.get_term(id).kind,
+            TermKind::Decl {
+                constructor_kind: Some(ConstructorKind::InternalConstructor),
+                ..
+            },
+        )
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="298647760"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647760" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647760">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969939227">PR review comment</a>:</p>
+<blockquote>
+<p>Assuming that you switch both <code>Node</code> and <code>Errors</code> to using hash-tables, you can implement <code>add_edge</code> concisely like this:</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>        self.nodes.entry(a.0).or_insert_with(Node::new).add_edge(b);
+        self.nodes.entry(b.0).or_insert_with(Node::new).add_edge(a);
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="298647761"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647761" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647761">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969937827">PR review comment</a>:</p>
+<blockquote>
+<p>Is the comment that "the edges are normalized by ordering the rule ids" still true? I'm guessing that's left over from an earlier version.</p>
+<p>Like for <code>Node</code>, I'd prefer <code>HashMap</code> over <code>Vec</code> so there's no heap allocation unless an error is actually found. And like for <code>Node</code> that means you can use <code>#[derive(Default)]</code>.</p>
+</blockquote>
+
+
+
+<a name="298647762"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647762" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647762">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969948006">PR review comment</a>:</p>
+<blockquote>
+<p>I'd suggest making <code>Errors::report</code> consume <code>self</code>, instead of taking it by reference. You don't need it any more afterward, and anyway there's nothing useful in it: all the edges have been deleted.</p>
+</blockquote>
+
+
+
+<a name="298647763"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647763" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647763">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969978878">PR review comment</a>:</p>
+<blockquote>
+<p>Does this guarantee that the degree is monotonically decreasing? I can't quite pin it down but I feel like there's some situation where higher-degree rules can reduce some other rule's degree to the point that by the time you get there, it has lower degree than later rules (but still non-zero degree).</p>
+<p>Here's someplace I'd actually be happier with an O(n^2) algorithm: Iterate over the rules to find one that currently has maximum degree (perhaps with <code>Iterator::max_by_key</code>), process it, and repeat. As long as <code>n</code> here is the number of rules that actually have overlaps, rather than the total number of rules, a quadratic algorithm is free in the expected case where we've already fixed all the overlaps.</p>
+</blockquote>
+
+
+
+<a name="298647764"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647764" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647764">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969954767">PR review comment</a>:</p>
+<blockquote>
+<p>The <code>Errors::remove_edges</code> method is only called by <code>report</code>. I'd suggest inlining it there, and here's why:</p>
+<p>If you change <code>Errors</code> to contain a <code>HashMap</code>, then you could establish an invariant that every node in the map has non-zero degree. That's useful because <code>Errors::is_empty</code> can just call <code>HashMap::is_empty</code>, and <code>Errors::report</code> doesn't need to filter the set of nodes to find non-empty ones.</p>
+<p>That invariant automatically holds initially and after any sequence of calls to <code>add_edge</code>. But <code>remove_edges</code> breaks that invariant unless you're careful. Still, you don't need the invariant once you start looping over the overlaps in <code>report</code>, so if you inline this there then you don't have to be careful about the invariant.</p>
+</blockquote>
+
+
+
+<a name="298647765"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647765" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647765">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969957922">PR review comment</a>:</p>
+<blockquote>
+<p>I don't think there's a good idiom for "loop over all pairs in this slice", but I found this version of it confusing for a moment. Maybe this instead?</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>        let mut rows = &amp;matrix.rows[..];
+        while let Some((rule, rest)) = rows.split_first() {
+            for other in rest {
+                self.add_edge(rule.rule, other.rule);
+            }
+            rows = others;
+        }
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="298647766"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647766" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647766">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969982732">PR review comment</a>:</p>
+<blockquote>
+<p>I think <code>errors.report</code> will correctly return an empty vector if there are no errors, so I don't think you need the <code>is_empty</code> check up front. Also I think Rust will let you match directly on the returned vector:</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>    match errors.report(&amp;env) {
+        [] =&gt; Ok(()),
+        [e] =&gt; Err(e),
+        errors =&gt; Err(Error::Errors(errors)),
+    }
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="298647768"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298647768" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298647768">(Sep 13 2022 at 18:57)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969966675">PR review comment</a>:</p>
+<blockquote>
+<p>I think <code>sort_unstable_by_key</code> should do fine here, and it lets you avoid temporary heap allocations for the cached keys. You can impose a total order for the sort by using the pair of <code>(degree, id)</code> as the sort key, so stable sort isn't important. Neither is the order that you iterate over nodes when building the <code>rules</code> vector, so it's okay for <code>self.nodes</code> to be a <code>HashMap</code>.</p>
+</blockquote>
+
+
+
+<a name="298652220"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298652220" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298652220">(Sep 13 2022 at 19:23)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106339064">PR review</a>.</p>
+
+
+
+<a name="298652221"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298652221" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298652221">(Sep 13 2022 at 19:23)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970004546">PR review comment</a>:</p>
+<blockquote>
+<p>I used a HashSet to begin with, and it was considerably slower when building without <code>--release</code>. The switch to this dense representation made the runtime go from 55s for the x64 lowering down to about 10s. One thought I had was that the vector could be an <code>Option&lt;Vec&lt;Bool&gt;&gt;</code> where it would only allocate the bool vector if there was overlap present involving that rule. Another thought I had was that something like c++'s specialization of <code>std::vector&lt;bool&gt;</code> would be really nice here.</p>
+</blockquote>
+
+
+
+<a name="298653060"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298653060" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298653060">(Sep 13 2022 at 19:28)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106344821">PR review</a>.</p>
+
+
+
+<a name="298653063"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298653063" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298653063">(Sep 13 2022 at 19:28)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970008660">PR review comment</a>:</p>
+<blockquote>
+<p>The motivation for improving performance when building without <code>--release</code> is that cranelift currently builds the isle source without <code>--release</code> in the cranelift-codegen <a href="http://build.rs">build.rs</a>.</p>
+</blockquote>
+
+
+
+<a name="298659582"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298659582" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298659582">(Sep 13 2022 at 20:07)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970038213">PR review comment</a>:</p>
+<blockquote>
+<p>You don't need to wrap the <code>Vec</code> in an <code>Option</code>; <code>Vec::new()</code> already doesn't heap-allocate, so you can just use <code>Vec::is_empty</code> as your flag instead of <code>Some</code>/<code>None</code>. And yeah, I keep wanting to use the <code>bitvec</code> crate for bit-packed boolean vectors, but we don't use it anywhere else and we don't add dependencies if we can help it.</p>
+<p>But also: wat? How could HashSet be that much slower? I feel like there must have been something else going on. (While trying to come up with hypotheses that might explain the difference, I worked out that the HashSet is smaller than the <code>Vec&lt;bool&gt;</code> as long as a rule overlaps with less than 11% of the other rules, but that doesn't seem likely to answer the question.)</p>
+<p>Also, in the long run I don't want to optimize for the case where there are a bunch of overlap errors if doing that makes things worse when there aren't any errors. While we're fixing the current backlog of overlaps, of course, it's reasonable to try to keep the debug loop short. But on the other hand, we can use <code>--release</code> builds of islec for that, right?</p>
+</blockquote>
+
+
+
+<a name="298659583"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298659583" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298659583">(Sep 13 2022 at 20:07)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106387550">PR review</a>.</p>
+
+
+
+<a name="298661667"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298661667" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298661667">(Sep 13 2022 at 20:22)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106404886">PR review</a>.</p>
+
+
+
+<a name="298661668"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298661668" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298661668">(Sep 13 2022 at 20:22)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970050043">PR review comment</a>:</p>
+<blockquote>
+<p>My assumption about why the vector is faster is that all the allocation is done up front. I don't know the specifics of how <code>HashSet</code> is implemented under the hood, but a lot of insertions to different rows could cause an allocation for each insertion, right?</p>
+<p>I agree that it's not worth over-optimizing for the case where we have lots of overlap, but we're talking about 1MB of memory to track the overlaps in the x64 lowerings. Paired with the one-off allocation strategy when we need to start adding overlap edges, it feels like this is a reasonable strategy to keep, but if you'd rather go back to the <code>HashSet</code> I'm not opposed.</p>
+</blockquote>
+
+
+
+<a name="298689672"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298689672" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298689672">(Sep 14 2022 at 01:22)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106623994">PR review</a>.</p>
+
+
+
+<a name="298689673"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298689673" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298689673">(Sep 14 2022 at 01:22)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970210761">PR review comment</a>:</p>
+<blockquote>
+<p>For anyone else following this: After a bunch of profiling with Trevor, we've learned that the <code>Errors::overlap_error</code> method is getting called super frequently, to the point that many of the x64 rules are getting marked millions of times each. So tiny differences in how long that method takes get multiplied out to big runtime differences, which is why two data structures show significantly different performance despite both supporting O(1) access. Even the bounds-checks in the vector version have a measurable impact, if I remember the <code>perf</code> report correctly.</p>
+<p>It looks like wildcard handling is currently exponential. We investigated ways to reduce that and Trevor has some things he's planning to try. I think fixing this may not only improve runtime but also fix some false positives in the overlap check.</p>
+</blockquote>
+
+
+
+<a name="298887655"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/298887655" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#298887655">(Sep 15 2022 at 01:06)</a>:</h4>
+<p>elliottt updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299030095"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299030095" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299030095">(Sep 15 2022 at 18:41)</a>:</h4>
+<p>elliottt updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299035209"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299035209" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299035209">(Sep 15 2022 at 19:10)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972337795">PR review comment</a>:</p>
+<blockquote>
+<p>I've changed it so that the feature controls whether or not the overlaps are considered errors. It currently only prints the number of overlaps when the feature is disabled, would you prefer that it always prints the errors out even if they're not going to fail the build?</p>
+</blockquote>
+
+
+
+<a name="299035210"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299035210" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299035210">(Sep 15 2022 at 19:10)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109715444">PR review</a>.</p>
+
+
+
+<a name="299035330"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299035330" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299035330">(Sep 15 2022 at 19:11)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109716334">PR review</a>.</p>
+
+
+
+<a name="299035331"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299035331" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299035331">(Sep 15 2022 at 19:11)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972338445">PR review comment</a>:</p>
+<blockquote>
+<p>I reworked the overlap checking to work over pairs of related rules instead, which is much faster and reported more accurate overlap information.</p>
+</blockquote>
+
+
+
+<a name="299036041"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299036041" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299036041">(Sep 15 2022 at 19:16)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109721714">PR review</a>.</p>
+
+
+
+<a name="299036042"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299036042" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299036042">(Sep 15 2022 at 19:16)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972342187">PR review comment</a>:</p>
+<blockquote>
+<p>Nah, printing just the overlap count is fine, I think.</p>
+</blockquote>
+
+
+
+<a name="299037605"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299037605" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299037605">(Sep 15 2022 at 19:26)</a>:</h4>
+<p>elliottt updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299038004"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299038004" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299038004">(Sep 15 2022 at 19:29)</a>:</h4>
+<p>elliottt updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299038886"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299038886" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299038886">(Sep 15 2022 at 19:34)</a>:</h4>
+<p>elliottt updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299038946"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299038946" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299038946">(Sep 15 2022 at 19:34)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109741315">PR review</a>.</p>
+
+
+
+<a name="299038947"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299038947" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299038947">(Sep 15 2022 at 19:34)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972355724">PR review comment</a>:</p>
+<blockquote>
+<p>Great idea!</p>
+</blockquote>
+
+
+
+<a name="299039012"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299039012" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299039012">(Sep 15 2022 at 19:35)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109741880">PR review</a>.</p>
+
+
+
+<a name="299039013"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299039013" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299039013">(Sep 15 2022 at 19:35)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972356078">PR review comment</a>:</p>
+<blockquote>
+<p>I could go either way on this, do you feel strongly about switching to the macro?</p>
+</blockquote>
+
+
+
+<a name="299042249"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299042249" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299042249">(Sep 15 2022 at 19:58)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109764997">PR review</a>.</p>
+
+
+
+<a name="299042250"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299042250" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299042250">(Sep 15 2022 at 19:58)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972371613">PR review comment</a>:</p>
+<blockquote>
+<p>I think this is a bad name for this type now, how about <code>Patterns</code>?</p>
+</blockquote>
+
+
+
+<a name="299053336"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299053336" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299053336">(Sep 15 2022 at 21:19)</a>:</h4>
+<p><strong>elliottt</strong> has marked <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> as ready for review.</p>
+
+
+
+<a name="299213877"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299213877" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299213877">(Sep 16 2022 at 17:58)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1110997479">PR review</a>.</p>
+
+
+
+<a name="299213878"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299213878" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299213878">(Sep 16 2022 at 17:58)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1110997479">PR review</a>.</p>
+
+
+
+<a name="299213881"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299213881" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299213881">(Sep 16 2022 at 17:58)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973242223">PR review comment</a>:</p>
+<blockquote>
+<p>As far as I can tell, this field is never read and can be removed, along with the <code>is_single_constructor_enum</code> method. I'm puzzled why you didn't get a build warning about this...</p>
+<p>Once you do that I believe <code>Variant</code> and <code>Extractor</code> are treated the same way everywhere so you can merge them. I'm assuming that the same <code>TermId</code> is never used both for an enum variant and for an extractor.</p>
+</blockquote>
+
+
+
+<a name="299213882"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299213882" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299213882">(Sep 16 2022 at 17:58)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973236666">PR review comment</a>:</p>
+<blockquote>
+<p>I do not feel strongly about that, nope!</p>
+</blockquote>
+
+
+
+<a name="299213883"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299213883" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299213883">(Sep 16 2022 at 17:58)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973237495">PR review comment</a>:</p>
+<blockquote>
+<p>This is immediately converted back to an iterator by its only caller, so I'd return <code>impl Iterator&lt;Item = RuleId&gt;</code> instead of calling <code>.collect()</code>.</p>
+</blockquote>
+
+
+
+<a name="299240817"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299240817" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299240817">(Sep 16 2022 at 21:00)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1111217851">PR review</a>.</p>
+
+
+
+<a name="299240818"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299240818" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299240818">(Sep 16 2022 at 21:00)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973389312">PR review comment</a>:</p>
+<blockquote>
+<blockquote>
+<p>As far as I can tell, this field is never read and can be removed, along with the <code>is_single_constructor_enum</code> method. I'm puzzled why you didn't get a build warning about this...</p>
+</blockquote>
+<p>This was originally when I was going to try to reason about the interaction of single-constructor enums to know that no other case was ever possible. I'm not sure there's anything we can do with that information now, so it should be removed.</p>
+<blockquote>
+<p>Once you do that I believe <code>Variant</code> and <code>Extractor</code> are treated the same way everywhere so you can merge them. I'm assuming that the same <code>TermId</code> is never used both for an enum variant and for an extractor.</p>
+</blockquote>
+<p>We'd still need to be able to differentiate between a Variant and an Extractor for the case where the match fails: in that case the variant means that the two don't overlap, while the extractor could still potentially fire.</p>
+</blockquote>
+
+
+
+<a name="299241037"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299241037" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299241037">(Sep 16 2022 at 21:02)</a>:</h4>
+<p>elliottt updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299243316"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299243316" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299243316">(Sep 16 2022 at 21:23)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1111233765">PR review</a>.</p>
+
+
+
+<a name="299243318"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299243318" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299243318">(Sep 16 2022 at 21:23)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973400764">PR review comment</a>:</p>
+<blockquote>
+<p>Yeah, I figured that out after writing this comment. <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span> </p>
+</blockquote>
+
+
+
+<a name="299638675"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299638675" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299638675">(Sep 19 2022 at 20:20)</a>:</h4>
+<p>jameysharp updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299658803"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299658803" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299658803">(Sep 19 2022 at 23:00)</a>:</h4>
+<p>jameysharp updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299661221"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299661221" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299661221">(Sep 19 2022 at 23:25)</a>:</h4>
+<p>jameysharp updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="299664005"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/299664005" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#299664005">(Sep 19 2022 at 23:57)</a>:</h4>
+<p>jameysharp updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>
+
+
+
+<a name="300031119"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300031119" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300031119">(Sep 21 2022 at 20:05)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116026861">PR review</a>.</p>
+
+
+
+<a name="300031121"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300031121" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300031121">(Sep 21 2022 at 20:05)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116026861">PR review</a>.</p>
+
+
+
+<a name="300031122"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300031122" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300031122">(Sep 21 2022 at 20:05)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r976939862">PR review comment</a>:</p>
+<blockquote>
+<p>Do we need to flatten the <code>and</code>s here? E.g. what happens if I have a left-hand side like</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">rule</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nv">f</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">and</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nb">and</span><span class="w"> </span><span class="p">(</span><span class="nv">g</span><span class="w"> </span><span class="nv">_</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">h</span><span class="w"> </span><span class="nv">_</span><span class="p">))</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nv">k</span><span class="w"> </span><span class="nv">_</span><span class="p">)))</span><span class="w"></span>
+<span class="w">  </span><span class="nv">rhs</span><span class="p">)</span><span class="w"></span>
+</code></pre></div>
+<p>?</p>
+</blockquote>
+
+
+
+<a name="300031475"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300031475" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300031475">(Sep 21 2022 at 20:07)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116029578">PR review</a>.</p>
+
+
+
+<a name="300031476"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300031476" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300031476">(Sep 21 2022 at 20:07)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r976941685">PR review comment</a>:</p>
+<blockquote>
+<p>We would need to do that, except we decided to flatten those earlier in the pipeline, and merged that in #4915.</p>
+</blockquote>
+
+
+
+<a name="300034929"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300034929" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300034929">(Sep 21 2022 at 20:30)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r976958505">PR review comment</a>:</p>
+<blockquote>
+<p>Oh, excellent! I somehow missed that. Thanks!</p>
+</blockquote>
+
+
+
+<a name="300034930"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300034930" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300034930">(Sep 21 2022 at 20:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116054095">PR review</a>.</p>
+
+
+
+<a name="300034984"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300034984" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300034984">(Sep 21 2022 at 20:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116054493">PR review</a>.</p>
+
+
+
+<a name="300039771"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/300039771" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#300039771">(Sep 21 2022 at 21:08)</a>:</h4>
+<p>elliottt merged <a href="https://github.com/bytecodealliance/wasmtime/pull/4906">PR #4906</a>.</p>
+
+
+
+<a name="305654018"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305654018" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305654018">(Oct 23 2022 at 11:53)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152298416">PR review</a>.</p>
+
+
+
+<a name="305654019"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305654019" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305654019">(Oct 23 2022 at 11:53)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002697557">PR review comment</a>:</p>
+<blockquote>
+<p>This adds a lot of dependencies to Cranelift. Is the overlap checking really so expensive that paralleling it makes a lot of difference?</p>
+</blockquote>
+
+
+
+<a name="305654356"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305654356" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305654356">(Oct 23 2022 at 11:57)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152298909">PR review</a>.</p>
+
+
+
+<a name="305654357"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305654357" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305654357">(Oct 23 2022 at 11:57)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002698188">PR review comment</a>:</p>
+<blockquote>
+<p>I just checked it. Takes less than half a second total even when not parallelizing. Will open a PR to remove rayon.</p>
+</blockquote>
+
+
+
+<a name="305685545"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305685545" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305685545">(Oct 23 2022 at 17:15)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002741596">PR review comment</a>:</p>
+<blockquote>
+<p>We depend on rayon elsewhere in cranelift, which is why we added it to the overlap checker. Were you removing it completely from cranelift?</p>
+</blockquote>
+
+
+
+<a name="305685546"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305685546" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305685546">(Oct 23 2022 at 17:15)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152337393">PR review</a>.</p>
+
+
+
+<a name="305685999"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305685999" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305685999">(Oct 23 2022 at 17:21)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152337952">PR review</a>.</p>
+
+
+
+<a name="305686000"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305686000" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305686000">(Oct 23 2022 at 17:21)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002742315">PR review comment</a>:</p>
+<blockquote>
+<p>wasmtime-cranelift depends on rayon, but cranelift itself doesn't apart from cranelift-isle because of this PR. <a href="https://github.com/bjorn3/rustc_codegen_cranelift/commit/266e96785ab71834b917bf474f130a6d8fdecd4b">https://github.com/bjorn3/rustc_codegen_cranelift/commit/266e96785ab71834b917bf474f130a6d8fdecd4b</a> reverted cg_clif back to cranelift 0.88.1 from before this PR. This commit removes rayon from cg_clif's Cargo.lock.</p>
+</blockquote>
+
+
+
+<a name="305693376"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305693376" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305693376">(Oct 23 2022 at 18:46)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002752347">PR review comment</a>:</p>
+<blockquote>
+<p>Ah I see. My assumption had been that since it was in <code>cranelift/Cargo.toml</code> that it would be okay to rely on it in isle.</p>
+</blockquote>
+
+
+
+<a name="305693377"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305693377" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305693377">(Oct 23 2022 at 18:46)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152346156">PR review</a>.</p>
+
+
+
+<a name="305695952"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305695952" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305695952">(Oct 23 2022 at 19:06)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152348016">PR review</a>.</p>
+
+
+
+<a name="305695954"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305695954" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305695954">(Oct 23 2022 at 19:06)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002754734">PR review comment</a>:</p>
+<blockquote>
+<p>FWIW <code>cranelift/Cargo.toml</code> defines the crate for <code>cranelift-tools</code>, the CLI utility; we do want to keep dependencies of <code>cranelift-codegen</code> as minimal as possible, and since <code>cranelift-isle</code> is a build-dep of that I'd consider the same policy to apply. Sorry for not catching this earlier!</p>
+</blockquote>
+
+
+
+<a name="305904856"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305904856" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305904856">(Oct 24 2022 at 20:04)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1153707110">PR review</a>.</p>
+
+
+
+<a name="305904857"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234906%20Add%20an%20overlap%20checker%20to%20ISLE/near/305904857" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234906.20Add.20an.20overlap.20checker.20to.20ISLE.html#305904857">(Oct 24 2022 at 20:04)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1003702782">PR review comment</a>:</p>
+<blockquote>
+<p>If I remember correctly, when we added the rayon dependency, overlap checking was dramatically slower, so parallelism shaved a lot of time off the wasmtime build. But by the time we actually merged overlap checking to <code>main</code>, we'd fixed its performance, so rayon didn't matter any more; we just didn't re-evaluate it at that point.</p>
+<p>So thank you for #5101: it's a good change.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

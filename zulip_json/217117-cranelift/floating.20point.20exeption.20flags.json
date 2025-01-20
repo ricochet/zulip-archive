@@ -1,0 +1,188 @@
+[
+    {
+        "content": "<p>Any plans to provide an instruction to read out the floating point exception flags?</p>",
+        "id": 381516410,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691074876
+    },
+    {
+        "content": "<p>I'd like to get <code>core::arch::asm!(\"mrs {flags}, fpsr\", flags = out(reg) fpsr)</code> (for aarc64) as a cranlift opcode, essentially</p>",
+        "id": 381534633,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691078015
+    },
+    {
+        "content": "<p>what's tricky is that even if I implement this using a call to a native function, cranelift reorders it wrt to floating point operation that I'm trying to get the flags for, because it doesn't model any side effects for them</p>",
+        "id": 381539890,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691078979
+    },
+    {
+        "content": "<p>the <code>fence</code> instruction doesn't - as expected - prevent the reordering... if only there was a <code>fence_all_the_things</code> instruction.</p>",
+        "id": 381540815,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691079143
+    },
+    {
+        "content": "<p>in principle we could design opcodes/abstractions that lower to this; but it's a bit tricky for a few reasons:</p>\n<ul>\n<li>CLIF is architecture-independent and deterministic; a concept such as \"aarch64 FP status flags\" would need to be locked down into a specific definition (\"Z flag set if ...\") and we'd have the question of how to polyfill this on other architectures</li>\n<li>We don't have implicit state that flows between opcodes, and relying on this will result in things that only work by accident, or not (as you've seen!). We represent result flow as explicit dataflow, so we'd render flags as a second output of FP instructions, if we built an abstraction for this. Something like <code>fadd_with_flags</code> or thereabouts</li>\n</ul>",
+        "id": 381541451,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691079272
+    },
+    {
+        "content": "<p>Ah, the aarch instruction was just for example, the exceptions are part of IEEE 754: <a href=\"https://www.gnu.org/software/libc/manual/html_node/FP-Exceptions.html\">https://www.gnu.org/software/libc/manual/html_node/FP-Exceptions.html</a> - they're available on x86 and risc-v as well</p>",
+        "id": 381544079,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691079813
+    },
+    {
+        "content": "<p>But the dataflow point is fair... it would be nice if there was a way to prevent the reordering though... I assume putting it in its own basic block won't fool cranelift?</p>",
+        "id": 381544634,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691079926
+    },
+    {
+        "content": "<p>The best thing I can think of is to write all live floating point variables to a dummy memory location and then issue a <code>fence</code> instruction</p>",
+        "id": 381546421,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691080269
+    },
+    {
+        "content": "<p>\"fooling\" cranelift is going about things the wrong way here (and <code>fence</code> doesn't mean what you're implying it to mean above -- it's not a fence for all instructions, just for memory ops): depending implicitly on some ordering and picking up register state that just happened to be left by an earlier instruction is asking for disaster, and is invalid CLIF</p>",
+        "id": 381546964,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691080380
+    },
+    {
+        "content": "<p>yeah, the egraph pass is pretty aggressive about ignoring which basic block a pure instruction was originally specified in. that said, if you pass the result of the floating-point op to your function call, I think it'll usually do what you want; the exception would be if some other side-effecting instruction transitively uses that same result and appears before the function call, but you can ensure that doesn't happen, especially if you have the function call return its argument and only use the value from there. basically you can simulate the two-result <code>fadd_with_flags</code> instruction Chris described by using a function call, except that it will be fully serialized with respect to any other side effects so this impedes optimization. it should be useful for a proof of concept though</p>",
+        "id": 381547180,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1691080427
+    },
+    {
+        "content": "<p>I don't think a \"real\" <code>fadd_with_flags</code> would be much work to do, in fact probably less than the effort to try to fool the compiler and work around the issues you're finding above</p>",
+        "id": 381547491,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691080486
+    },
+    {
+        "content": "<p>basically one would need to add <code>mrs</code> to the assembler library (new <code>MInst</code> variant), <code>fadd_with_flags</code> to CLIF, and a lowering that takes <code>fadd_with_flags</code> to <code>fadd</code> + <code>mrs ...</code></p>",
+        "id": 381547639,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691080515
+    },
+    {
+        "content": "<p>I guess it's worth noting that multi-result instructions impede optimization today anyway and behave like side-effecting instructions, so actually I think just calling a library function is a pretty reasonable plan</p>",
+        "id": 381548078,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1691080596
+    },
+    {
+        "content": "<p>No I understand fence is just memory, that's what the \"as expected\" implied above, but the idea is that by writing all live fp variables to a dummy memory location and then issuing a fence, that would make that memory write depend on the fp operations, which then wouldn't be reordered past the memory fence</p>",
+        "id": 381549270,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691080839
+    },
+    {
+        "content": "<p>yeah, putting both the fadd itself and the flags fetch inside a library function is the most reasonable plan if one doesn't do <code>fadd_with_flags</code></p>",
+        "id": 381549455,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691080877
+    },
+    {
+        "content": "<p>re: multi-result insts and impeding opts, I... don't know if we have any opts on <code>fadd</code> currently? E.g. we have <code>TODO: fadd</code> (<a href=\"https://github.com/bytecodealliance/wasmtime/blob/615d697a0ba11df4fccf36fefa29d0fc42c27064/cranelift/codegen/src/opts/cprop.isle#L176\">here</a>) in <code>cprop.isle</code> <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 381549797,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691080951
+    },
+    {
+        "content": "<p>Just to be clear, I'd definitely not want to fool the compiler, and it's good to hear that it reorders as much as it does</p>",
+        "id": 381549816,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691080956
+    },
+    {
+        "content": "<p>ok, yeah, that store-then-fence scheme would <em>work</em>, but would likely be awfully slow, slower than a library call at least</p>",
+        "id": 381550071,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691081010
+    },
+    {
+        "content": "<p>hang on, are you trying to check whether a single operation failed, or do you just want to know after a series of operations whether any of them failed?</p>",
+        "id": 381550879,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1691081180
+    },
+    {
+        "content": "<p>I guess an <code>fpfence</code> instruction could be a pragmatic solution: prevents reordering of fp operations that same way <code>fence</code> prevents reordering or loads and stores</p>",
+        "id": 381551007,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691081212
+    },
+    {
+        "content": "<p>eh, that's a very intrusive change to the compiler though</p>",
+        "id": 381551190,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691081255
+    },
+    {
+        "content": "<p>and also breaks our \"dataflow goes through values\" principle (this is important for verification too, fwiw)</p>",
+        "id": 381551261,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691081272
+    },
+    {
+        "content": "<p>if you just want to know whether any of the preceding ops failed, then all you need is a data dependency that includes all those ops</p>",
+        "id": 381551393,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1691081288
+    },
+    {
+        "content": "<p>(intrusive because: we don't reason about fences at all when moving code; rather, we just never move loads/stores)</p>",
+        "id": 381551442,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691081296
+    },
+    {
+        "content": "<p>(so the fence's purpose is really to communicate to the microarchitecture)</p>",
+        "id": 381551593,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691081331
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"504918\">@Jamey Sharp</span> yeah, that what I was trying to describe with my \"write all pending fp operations to memory, then fence\" idea</p>",
+        "id": 381551625,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691081339
+    },
+    {
+        "content": "<p>okay, so Chris probably won't like this but a no-op that doesn't emit any code but has the side-effect of ensuring that its operand has been computed would do the trick</p>",
+        "id": 381552352,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1691081506
+    },
+    {
+        "content": "<p>you could also do this by returning all the relevant values from a function and checking the exception status after the return. there are a bunch of ways to serialize things like this</p>",
+        "id": 381552943,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1691081624
+    },
+    {
+        "content": "<p>Jamey correctly predicts my status of liking-or-not-liking this idea :-) (but I'll note, I had also suggested a \"force\" op for something a while back, so it's a perennially tempting tool)</p>\n<p>If the goal is to hack together a prototype, it seems workable. For an upstreamable patch I think the multi-output-instruction idea is the one we'd most seriously consider</p>",
+        "id": 381554111,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691081826
+    },
+    {
+        "content": "<p>Ok, thanks. Good feedback, nothing unexpected, but also no silver bullet... The multi-output instruction doesn't map well to how HW actually work though and implementing C99 <code>fetestexcept</code> will be suboptimal.</p>",
+        "id": 381557008,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1691082341
+    },
+    {
+        "content": "<p>happy to discuss further in an issue if/when you get to the point of laying out the design options!</p>",
+        "id": 381559053,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691082770
+    }
+]

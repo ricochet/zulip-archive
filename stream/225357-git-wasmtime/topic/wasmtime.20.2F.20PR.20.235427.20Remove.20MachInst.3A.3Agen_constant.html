@@ -1,0 +1,182 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #5427 Remove MachInst::gen_constant · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html">wasmtime / PR #5427 Remove MachInst::gen_constant</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="315665740"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315665740" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315665740">(Dec 13 2022 at 19:14)</a>:</h4>
+<p>uweigand opened <a href="https://github.com/bytecodealliance/wasmtime/pull/5427">PR #5427</a> from <code>no-getconstant</code> to <code>main</code>:</p>
+<blockquote>
+<p>This addresses the problem described in issue <a href="https://github.com/bytecodealliance/wasmtime/issues/4426">https://github.com/bytecodealliance/wasmtime/issues/4426</a> that targets currently have to duplicate code to emit constants between the ISLE logic and the <code>gen_constant</code> callback.</p>
+<p>The PR is split into a series of commits:</p>
+<h3>aarch64: constant generation cleanup</h3>
+<ul>
+<li>Add support for MOVZ and MOVN generation via ISLE.</li>
+<li>Handle <code>f32const</code>, <code>f64const</code>, and <code>nop</code> instructions via ISLE.</li>
+<li>No longer call <code>Inst::gen_constant</code> from <code>lower.rs</code>.</li>
+</ul>
+<p>Note that this (and future patches in the series) causes some changes in code generation where a different (but semantically equivalent) instruction is used.  This is because the ISLE and Rust implementation of constant generation have already diverged somewhat.  The new generated code seems preferable to me according to the Arm ISA documentation.</p>
+<h3>riscv64: constant generation cleanup</h3>
+<ul>
+<li>Handle <code>f32const</code> and <code>f64const</code> instructions via ISLE.</li>
+</ul>
+<h3>s390x: constant generation cleanup</h3>
+<ul>
+<li>Fix rule priorities for <code>imm</code> term.</li>
+<li>Only handle 32-bit stack offsets; no longer use <code>load_constant64</code>.</li>
+</ul>
+<h3>x64: constant generation cleanup</h3>
+<ul>
+<li>No longer call <code>Inst::gen_constant</code> from <code>lower.rs</code> or <code>abi.rs</code>.</li>
+</ul>
+<h3>Refactor <code>LowerBackend::lower</code> to return <code>InstOutput</code></h3>
+<p>No longer write to the per-insn output registers; instead, return an <code>InstOutput</code> vector of temp registers holding the outputs.</p>
+<p>This will allow calling <code>LowerBackend::lower</code> multiple times for the same instruction, e.g. to rematerialize constants.</p>
+<p>When emitting the primary copy of the instruction during lowering, writing to the per-insn registers is now done in <code>lower_clif_block</code>.</p>
+<p>As a result, the ISLE <code>lower_common</code> routine is no longer needed.  In addition, the <code>InsnOutput</code> type and all code related to it can be removed as well.</p>
+<h3>Refactor <code>IsleContext</code> to hold a <code>LowerBackend</code> reference</h3>
+<p>Remove the <code>triple</code>, <code>flags</code>, and <code>isa_flags</code> fields that are copied from <code>LowerBackend</code> to each <code>IsleContext</code>, and instead just hold a reference to <code>LowerBackend</code> in <code>IsleContext</code>.</p>
+<p>This will allow calling <code>LowerBackend::lower</code> from within callbacks in <code>src/machinst/isle.rs</code>, e.g. to rematerialize constants.</p>
+<p>To avoid having to pass <code>LowerBackend</code> references through multiple functions, eliminate the <code>lower_insn_to_regs</code> subroutines in those targets that still have them, and just inline into the main <code>lower</code> routine.  This also eliminates <code>lower_inst.rs</code> on <code>aarch64</code> and <code>riscv64</code>.</p>
+<p>Replace all accesses to the removed <code>IsleContext</code> fields by going through the <code>LowerBackend</code> reference.</p>
+<h3>Remove <code>MachInst::gen_constant</code></h3>
+<p>After the various cleanups in earlier patches in this series, the only remaining user of <code>gen_constant</code> is <code>put_value_in_regs</code> in <code>Lower</code>.  This can now be removed, and instead constant rematerialization can be performed in the <code>put_in_regs</code> ISLE callback by simply directly calling <code>LowerBackend::lower</code> on the instruction defining the constant (using a different output register).</p>
+<p>Since <code>put_value_in_regs</code> no longer performs rematerialization anywhere, the check for egraph mode can be removed, which in turn makes the <code>Lower::flags</code> member obsolete.</p>
+<p>Care needs to be taken that other calls directly to the <code>Lower::put_value_in_regs</code> routine now handle the fact that no more rematerialization is performed.  All such calls in target code already historically handle constants themselves. The remaining call site in the ISLE <code>gen_call_common</code> helper can be redirected to the ISLE <code>put_in_regs</code> callback.</p>
+<p>The existing target implementations of <code>gen_constant</code> are then unused and can be removed.  (In some target there may still be further opportunities to remove duplication between ISLE and some local Rust code - this can be left to future patches.)</p>
+<p>CC @cfallin @jameysharp @elliottt @fitzgen </p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="315672188"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315672188" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315672188">(Dec 13 2022 at 19:46)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#pullrequestreview-1216318043">PR review</a>.</p>
+
+
+
+<a name="315672189"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315672189" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315672189">(Dec 13 2022 at 19:46)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#pullrequestreview-1216318043">PR review</a>.</p>
+
+
+
+<a name="315672191"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315672191" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315672191">(Dec 13 2022 at 19:46)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#discussion_r1047658429">PR review comment</a>:</p>
+<blockquote>
+<p>Does this mean that we now have this rematerialization behavior unconditionally, i.e. we lost the not-egraph-mode condition? (I see that in your commit message but it's slightly unclear if it's replaced by a check anywhere else that I might be missing.) The reason for this was that the egraph-based mid-end does its own rematerialization handling, and will replicate iconsts/fconsts into different blocks as appropriate, so we want to avoid this redundant behavior. (Ultimately once egraph-based optimization is on by default we can remove this remat code here entirely.)</p>
+</blockquote>
+
+
+
+<a name="315675921"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315675921" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315675921">(Dec 13 2022 at 20:05)</a>:</h4>
+<p>uweigand updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5427">PR #5427</a> from <code>no-getconstant</code> to <code>main</code>.</p>
+
+
+
+<a name="315675934"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315675934" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315675934">(Dec 13 2022 at 20:05)</a>:</h4>
+<p>uweigand created <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#discussion_r1047679021">PR review comment</a>:</p>
+<blockquote>
+<p>Ah, I see, I may have misinterpreted the logic.  I've added the egraphs check back here.</p>
+</blockquote>
+
+
+
+<a name="315675935"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315675935" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315675935">(Dec 13 2022 at 20:05)</a>:</h4>
+<p>uweigand submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#pullrequestreview-1216342919">PR review</a>.</p>
+
+
+
+<a name="315680543"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315680543" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315680543">(Dec 13 2022 at 20:32)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#pullrequestreview-1216380651">PR review</a>.</p>
+
+
+
+<a name="315680544"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315680544" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315680544">(Dec 13 2022 at 20:32)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#discussion_r1047710397">PR review comment</a>:</p>
+<blockquote>
+<p>Is there any case where lower_branch is expected to return temporary registers? If not can this assertion be moved into lower_branch and the return value turned back into ()?</p>
+</blockquote>
+
+
+
+<a name="315681508"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315681508" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315681508">(Dec 13 2022 at 20:38)</a>:</h4>
+<p>uweigand submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#pullrequestreview-1216388784">PR review</a>.</p>
+
+
+
+<a name="315681509"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315681509" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315681509">(Dec 13 2022 at 20:38)</a>:</h4>
+<p>uweigand created <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#discussion_r1047719631">PR review comment</a>:</p>
+<blockquote>
+<p>Well, I thought it more important to keep lower_branch just a pass-through to generated_code::constructor_lower_branch now (like the main lower routine).  Ideally, the lower_branch ISLE term would have a Unit result instead of InstOutput, but that would require a few further changes (like the side_effect constructor no longer works etc.), so I didn't want to do it as part of this patch.   I guess this could be done as a follow-up?</p>
+</blockquote>
+
+
+
+<a name="315682215"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315682215" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315682215">(Dec 13 2022 at 20:43)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#discussion_r1047724832">PR review comment</a>:</p>
+<blockquote>
+<p>Yeah, I think that's a reasonable cleanup to do in another PR.</p>
+</blockquote>
+
+
+
+<a name="315682216"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315682216" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315682216">(Dec 13 2022 at 20:43)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#pullrequestreview-1216394045">PR review</a>.</p>
+
+
+
+<a name="315682647"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315682647" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315682647">(Dec 13 2022 at 20:46)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5427#pullrequestreview-1216397097">PR review</a>.</p>
+
+
+
+<a name="315684949"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235427%20Remove%20MachInst%3A%3Agen_constant/near/315684949" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235427.20Remove.20MachInst.3A.3Agen_constant.html#315684949">(Dec 13 2022 at 21:00)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/5427">PR #5427</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

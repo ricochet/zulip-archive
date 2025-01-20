@@ -1,0 +1,243 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #5926 cranelift: Merge `bitcasts` into `loads` · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html">wasmtime / PR #5926 cranelift: Merge `bitcasts` into `loads`</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="339548692"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339548692" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339548692">(Mar 04 2023 at 12:44)</a>:</h4>
+<p>afonso360 opened <a href="https://github.com/bytecodealliance/wasmtime/pull/5926">PR #5926</a> from <code>delete-bitcasts</code> to <code>main</code>:</p>
+<blockquote>
+<p><span aria-label="wave" class="emoji emoji-1f44b" role="img" title="wave">:wave:</span> Hey,</p>
+<p>I was looking at some wasmtime generated CLIF, and noticed that wasmtime emits a <code>bitcast</code> after SIMD loads. That's okay, but it prevents the loads being merged into some ops. So I decided to have a go at trying to remove these.</p>
+<p>The rule works, which is nice, but It doesn't seem to delete the previous load, which I assume is some sort of correctness rule embedded in the mid end? This optimization looks correct to me, but I might be wrong!</p>
+<hr>
+<p>For this example CLIF:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">b</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="nc">i32x4</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">ss0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">explicit_slot</span><span class="w"> </span><span class="mi">16</span>
+
+<span class="n">block0</span>:
+    <span class="nc">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stack_addr</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">ss0</span>
+<span class="w">    </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="n">i8x16</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">notrap</span><span class="w"> </span><span class="n">aligned</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bitcast</span><span class="p">.</span><span class="n">i32x4</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iabs</span><span class="w"> </span><span class="n">v2</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">v3</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>We now merge the load into the iabs:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w"> </span><span class="mi">10</span>:   <span class="mi">66</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">38</span><span class="w"> </span><span class="mi">1</span><span class="n">e</span><span class="w"> </span><span class="mi">00</span><span class="w">          </span><span class="n">pabsd</span><span class="w">   </span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">),</span><span class="w"> </span><span class="o">%</span><span class="n">xmm0</span>
+</code></pre></div>
+<p>Where we used to do a <code>load</code> + <code>pabsd</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">   </span><span class="n">c</span>:   <span class="nc">f3</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">6</span><span class="n">f</span><span class="w"> </span><span class="mi">10</span><span class="w">             </span><span class="n">movdqu</span><span class="w">  </span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">),</span><span class="w"> </span><span class="o">%</span><span class="n">xmm2</span>
+<span class="w">  </span><span class="mi">10</span>:   <span class="mi">66</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">38</span><span class="w"> </span><span class="mi">1</span><span class="n">e</span><span class="w"> </span><span class="n">c2</span><span class="w">          </span><span class="n">pabsd</span><span class="w">   </span><span class="o">%</span><span class="n">xmm2</span><span class="p">,</span><span class="w"> </span><span class="o">%</span><span class="n">xmm0</span>
+</code></pre></div>
+<p>In practice this doesn't help Wasmtime that much for SSE ops, since they require the loads to be aligned, but it does for VEX/EVEX ops.</p>
+</blockquote>
+
+
+
+<a name="339549399"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339549399" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339549399">(Mar 04 2023 at 12:48)</a>:</h4>
+<p>afonso360 edited <a href="https://github.com/bytecodealliance/wasmtime/pull/5926">PR #5926</a> from <code>delete-bitcasts</code> to <code>main</code>:</p>
+<blockquote>
+<p><span aria-label="wave" class="emoji emoji-1f44b" role="img" title="wave">:wave:</span> Hey,</p>
+<p>I was looking at some wasmtime generated CLIF, and noticed that wasmtime emits a <code>bitcast</code> after SIMD loads. That's okay, but it prevents the loads being merged into some ops. So I decided to have a go at trying to remove these.</p>
+<p>The rule works, which is nice, but It doesn't seem to delete the previous load, which I assume is some sort of correctness rule embedded in the mid end? This optimization looks correct to me, but I might be wrong!</p>
+<hr>
+<p>For this example CLIF:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">b</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="nc">i32x4</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">ss0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">explicit_slot</span><span class="w"> </span><span class="mi">16</span>
+
+<span class="n">block0</span>:
+    <span class="nc">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stack_addr</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">ss0</span>
+<span class="w">    </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="n">i8x16</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">notrap</span><span class="w"> </span><span class="n">aligned</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bitcast</span><span class="p">.</span><span class="n">i32x4</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iabs</span><span class="w"> </span><span class="n">v2</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">v3</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>We now merge the load into the iabs:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w"> </span><span class="mi">10</span>:   <span class="mi">66</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">38</span><span class="w"> </span><span class="mi">1</span><span class="n">e</span><span class="w"> </span><span class="mi">00</span><span class="w">          </span><span class="n">pabsd</span><span class="w">   </span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">),</span><span class="w"> </span><span class="o">%</span><span class="n">xmm0</span>
+</code></pre></div>
+<p>Where we used to do a <code>load</code> + <code>pabsd</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">   </span><span class="n">c</span>:   <span class="nc">f3</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">6</span><span class="n">f</span><span class="w"> </span><span class="mi">10</span><span class="w">             </span><span class="n">movdqu</span><span class="w">  </span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">),</span><span class="w"> </span><span class="o">%</span><span class="n">xmm2</span>
+<span class="w">  </span><span class="mi">10</span>:   <span class="mi">66</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">38</span><span class="w"> </span><span class="mi">1</span><span class="n">e</span><span class="w"> </span><span class="n">c2</span><span class="w">          </span><span class="n">pabsd</span><span class="w">   </span><span class="o">%</span><span class="n">xmm2</span><span class="p">,</span><span class="w"> </span><span class="o">%</span><span class="n">xmm0</span>
+</code></pre></div>
+<p>In practice this doesn't help Wasmtime that much for SSE ops, since they require the loads to be aligned, but it should for VEX/EVEX ops.</p>
+</blockquote>
+
+
+
+<a name="339551050"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339551050" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339551050">(Mar 04 2023 at 12:59)</a>:</h4>
+<p>afonso360 edited <a href="https://github.com/bytecodealliance/wasmtime/pull/5926">PR #5926</a> from <code>delete-bitcasts</code> to <code>main</code>:</p>
+<blockquote>
+<p><span aria-label="wave" class="emoji emoji-1f44b" role="img" title="wave">:wave:</span> Hey,</p>
+<p>I was looking at some wasmtime generated CLIF, and noticed that wasmtime emits a <code>bitcast</code> after SIMD loads. That's okay, but it prevents the loads being merged into some ops. So I decided to have a go at trying to remove these.</p>
+<p>The rule works, which is nice, but It <a href="https://github.com/bytecodealliance/wasmtime/actions/runs/4331044775/jobs/7562649279#step:15:913">doesn't seem to delete the previous load</a>, which I assume is some sort of correctness rule embedded in the mid end? This optimization looks correct to me, but I might be wrong!</p>
+<hr>
+<p>For this example CLIF:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">b</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="nc">i32x4</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">ss0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">explicit_slot</span><span class="w"> </span><span class="mi">16</span>
+
+<span class="n">block0</span>:
+    <span class="nc">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stack_addr</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">ss0</span>
+<span class="w">    </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="n">i8x16</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">notrap</span><span class="w"> </span><span class="n">aligned</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bitcast</span><span class="p">.</span><span class="n">i32x4</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iabs</span><span class="w"> </span><span class="n">v2</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">v3</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>We now merge the load into the iabs:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w"> </span><span class="mi">10</span>:   <span class="mi">66</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">38</span><span class="w"> </span><span class="mi">1</span><span class="n">e</span><span class="w"> </span><span class="mi">00</span><span class="w">          </span><span class="n">pabsd</span><span class="w">   </span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">),</span><span class="w"> </span><span class="o">%</span><span class="n">xmm0</span>
+</code></pre></div>
+<p>Where we used to do a <code>load</code> + <code>pabsd</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">   </span><span class="n">c</span>:   <span class="nc">f3</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">6</span><span class="n">f</span><span class="w"> </span><span class="mi">10</span><span class="w">             </span><span class="n">movdqu</span><span class="w">  </span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">),</span><span class="w"> </span><span class="o">%</span><span class="n">xmm2</span>
+<span class="w">  </span><span class="mi">10</span>:   <span class="mi">66</span><span class="w"> </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">38</span><span class="w"> </span><span class="mi">1</span><span class="n">e</span><span class="w"> </span><span class="n">c2</span><span class="w">          </span><span class="n">pabsd</span><span class="w">   </span><span class="o">%</span><span class="n">xmm2</span><span class="p">,</span><span class="w"> </span><span class="o">%</span><span class="n">xmm0</span>
+</code></pre></div>
+<p>In practice this doesn't help Wasmtime that much for SSE ops, since they require the loads to be aligned, but it should for VEX/EVEX ops.</p>
+</blockquote>
+
+
+
+<a name="339607321"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339607321" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339607321">(Mar 04 2023 at 20:04)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#pullrequestreview-1325111006">PR review</a>.</p>
+
+
+
+<a name="339607322"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339607322" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339607322">(Mar 04 2023 at 20:04)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#pullrequestreview-1325111006">PR review</a>.</p>
+
+
+
+<a name="339607323"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339607323" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339607323">(Mar 04 2023 at 20:04)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#discussion_r1125518905">PR review comment</a>:</p>
+<blockquote>
+<p>I think <code>i8x16</code> here is a typo (and what CI is tripping over), but CI also indicates:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="n">filecheck</span><span class="w"> </span><span class="n">failed</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">line</span><span class="w"> </span><span class="mi">32</span>:
+    #<span class="mi">0</span><span class="w"> </span><span class="n">check</span>: <span class="nc">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="nc">i8x16</span><span class="p">)</span>:
+    #<span class="mi">1</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span>#<span class="mi">2</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">load_bitcast</span><span class="p">(</span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="n">fast</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Missed</span><span class="w"> </span>#<span class="mi">0</span>: <span class="err">\</span><span class="n">bblock0</span><span class="err">\</span><span class="p">(</span><span class="n">v0</span>: <span class="nc">i8x16</span><span class="err">\</span><span class="p">)</span>:
+    <span class="o">&gt;</span><span class="w"> </span><span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">)</span>:
+    <span class="o">&gt;</span><span class="w">     </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="n">i8x16</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">little</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v4</span><span class="w"> </span>-&gt; <span class="nc">v3</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="k">return</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>which look like the original load isn't actually being replaced but rather a second load is added?</p>
+<p>If that's the case there may be something special about egraphs trying to preserve effectful operations which may need some extra help here getting bypassed?</p>
+</blockquote>
+
+
+
+<a name="339607324"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339607324" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339607324">(Mar 04 2023 at 20:04)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#discussion_r1125519026">PR review comment</a>:</p>
+<blockquote>
+<p>FWIW the reason for this is that the load instruction for wasm is simply <code>v128.load</code> so we don't know what type is necessary for clif, so <code>i8x16</code> is always chosen (IIRC). Each op in clif, though, is specifically typed so if it flows into something that needs <code>f32x4</code> then the bitcast is required.</p>
+<p>That being said I think this is a clever optimization to work around that limitation of wasm translation!</p>
+</blockquote>
+
+
+
+<a name="339607326"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339607326" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339607326">(Mar 04 2023 at 20:04)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#discussion_r1125530595">PR review comment</a>:</p>
+<blockquote>
+<p>I've been sitting here trying to wrap my head around endianness and lane casts and how it affects s390x and I'll admit I still don't fully grok the implications of this. Natively it seems like having the same endianness is what's required here, but I might also natively think that "well just take the bitcast's endianness and use that on the load" although I'm not certin that's right.</p>
+<p>To help assist with assurances here, though, could you also add some runtests which trigger this optimization and work before/after your PR?</p>
+</blockquote>
+
+
+
+<a name="339613727"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339613727" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339613727">(Mar 04 2023 at 21:27)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#pullrequestreview-1325127471">PR review</a>.</p>
+
+
+
+<a name="339613728"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339613728" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339613728">(Mar 04 2023 at 21:27)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#discussion_r1125562092">PR review comment</a>:</p>
+<blockquote>
+<p>Yeah, that makes sense, I'll add that info to the comment.</p>
+</blockquote>
+
+
+
+<a name="339614659"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339614659" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339614659">(Mar 04 2023 at 21:41)</a>:</h4>
+<p>afonso360 updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5926">PR #5926</a> from <code>delete-bitcasts</code> to <code>main</code>.</p>
+
+
+
+<a name="339614681"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339614681" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339614681">(Mar 04 2023 at 21:41)</a>:</h4>
+<p>afonso360 updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5926">PR #5926</a> from <code>delete-bitcasts</code> to <code>main</code>.</p>
+
+
+
+<a name="339615412"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339615412" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339615412">(Mar 04 2023 at 21:52)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#pullrequestreview-1325129325">PR review</a>.</p>
+
+
+
+<a name="339615413"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339615413" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339615413">(Mar 04 2023 at 21:52)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#discussion_r1125564394">PR review comment</a>:</p>
+<blockquote>
+<blockquote>
+<p>I think i8x16 here is a typo</p>
+</blockquote>
+<p>Oops, that's right!</p>
+<blockquote>
+<p>which look like the original load isn't actually being replaced but rather a second load is added?</p>
+<p>If that's the case there may be something special about egraphs trying to preserve effectful operations which may need some extra help here getting bypassed?</p>
+</blockquote>
+<p>Yeah, I noticed that but I really don't know how to fix that... I'm not very familiar with the egraphs stuff behind the curtains.</p>
+</blockquote>
+
+
+
+<a name="339974447"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339974447" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339974447">(Mar 06 2023 at 21:52)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#pullrequestreview-1327189993">PR review</a>.</p>
+
+
+
+<a name="339974448"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339974448" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339974448">(Mar 06 2023 at 21:52)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#pullrequestreview-1327189993">PR review</a>.</p>
+
+
+
+<a name="339974449"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/339974449" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#339974449">(Mar 06 2023 at 21:52)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/5926#discussion_r1127032123">PR review comment</a>:</p>
+<blockquote>
+<p>We can't currently write egraph rules that will replace an instruction unless it has exactly one result <code>Value</code>, which is why <code>store</code> doesn't work here. I recently removed the other instructions from <code>clif_opt.isle</code> because rules using them would never fire. We've been talking about how to do this but don't have a concrete plan yet.</p>
+<p>This restriction is primarily because our egraph identifies equivalence classes of <code>Value</code>s, rather than identifying equivalent instructions. It's also because it's harder to define what equivalence means for instructions with side effects, such as <code>store</code>.</p>
+</blockquote>
+
+
+
+<a name="340104634"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235926%20cranelift%3A%20Merge%20%60bitcasts%60%20into%20%60loads%60/near/340104634" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235926.20cranelift.3A.20Merge.20.60bitcasts.60.20into.20.60loads.60.html#340104634">(Mar 07 2023 at 13:07)</a>:</h4>
+<p>afonso360 closed without merge <a href="https://github.com/bytecodealliance/wasmtime/pull/5926">PR #5926</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

@@ -1,0 +1,362 @@
+[
+    {
+        "content": "<p>frank-emrich opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a> from <code>frank-emrich:stack_switch</code> to <code>bytecodealliance:main</code>:</p>\n<blockquote>\n<p>This PR adds a new CLIF instruction for switching stacks. While the primary motivation is to support the <a href=\"https://github.com/WebAssembly/stack-switching\">Wasm stack switching proposal</a> currently under development, the CLIF instruction here is lower level and thus intended to be useful for general-purpose stackful context switching (such as implementing coroutines, fibers, etc independently from the Wasm stack switching proposal).<br>\nThis PR only adds support for the instruction on x64 Linux, but I'm planning to add support for more platforms over time. The design of the instruction should be sufficiently abstract to support all the other platforms.</p>\n<p>While work is currently under way to implement Wasm stack switching <a href=\"https://github.com/wasmfx/wasmfxtime\">here</a> and indeed uses the CLIF instruction introduced by this PR successfully, it seems worthwhile just upstreaming the CLIF instruction by itself. The proposal is not fully finalized yet, and this CLIF instruction seems useful on its own and independent from the remainder of the Wasm proposal.</p>\n<p>Concretely, the CLIF instruction looks as follows:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">out_payload</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">stack_switch</span><span class=\"p\">(</span><span class=\"n\">store_context_ptr</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">load_context_ptr</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">in_payload</span><span class=\"p\">)</span>\n</code></pre></div>\n<p>This causes the following to happen:</p>\n<ol>\n<li>The current execution context is saved: The current frame pointer, stack pointer and PC <em>after</em> the <code>stack_switch</code> instruction are stored at <code>store_context_ptr</code>. All other registers are marked as clobbered and thus spilled by regalloc as needed.</li>\n<li>We load a new <code>(SP, FP, PC)</code> triple from <code>load_context_ptr</code>, indicating the stack/context to switch to. We assume that we are either switching to a stack that was either previously switched away from by another <code>stack_switch</code>, or it's a newly initialized stack.</li>\n<li>The value <code>in_payload</code> is passed over to the other stack. In other words, if the instruction above switches from some stack A to another stack B, then the return value of the <code>stack_switch</code> instruction previously executed on B will be <code>in_payload</code>.</li>\n<li>Execution continues on stack B.</li>\n<li>If we ever switch back to stack A, the value <code>out_payload</code> above (i.e., the return value of the <code>stack_switch</code> executed when leaving stack <code>A</code>) is the payload argument passed to the corresponding switch.</li>\n</ol>\n<p>A few additional notes:</p>\n<ul>\n<li><code>store_context_ptr</code> and <code>load_context_ptr</code> can be seen as pointers to what is conceptually a three-element struct, containing SP, FP, PC.</li>\n<li>The pointers <code>store_context_ptr</code> and <code>load_context_ptr</code> are allowed to be equal. In particular, in steps 1 and 2 above, we ensure to actually load all required data from <code>load_context_ptr</code> before storing to <code>store_context_ptr</code>.</li>\n<li>As mentioned above, there are two cases in step 2: We either switch to code where a matching <code>stack_switch</code> was executed, or to a new stack<ul>\n<li>If we switch back to (right behind) a previous <code>stack_switch</code> instruction, then regalloc has spilled all subsequently needed SSA values for us, no need to manually restore any context besides SP, FP, PC.</li>\n<li>If we are executing on a new stack, we assume that execution starts inside a stack-switch aware trampoline</li>\n</ul>\n</li>\n<li>Payloads are currently hard-coded to be a single, word-sized value. That may seem arbitrary, but it's simply what's needed for our current implementation of Wasm stack switching on top of this CLIF instruction. It could later be extended to more general cases, if necessary.</li>\n<li>The stack switching implemented here is \"one-shot\": If you execute a <code>stack_switch</code> to switch from a stack A to a stack B, we can only switch back to A once (unless we subsequently execute another <code>stack_switch</code> on A again).<br>\n  This is different from <code>setjmp</code>/<code>longjmp</code>, where we may store the context once using <code>setjmp</code> and then return to it multiple times using <code>longjmp</code> without needing to call <code>setjmp</code> again.</li>\n</ul>\n</blockquote>",
+        "id": 456600254,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722869835
+    },
+    {
+        "content": "<p>frank-emrich updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 456626926,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722871352
+    },
+    {
+        "content": "<p>frank-emrich <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2269342967\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>I'm marking this as \"ready for review\" now, but I have a few questions about things that will probably require additional fixes before this is actually ready:</p>\n<ol>\n<li>\n<p>Currently, the instruction is lowered by very simple rules in <code>codegen/src/isa/x64/lower.isle</code>. However, the emitted code is only valid for x64 Linux, not x64 Windows.<br>\n   This means that I should probably do something similar to function calls, where my instruction is lowered using an external <code>gen_stack_switch</code> function. What's the cleanest way to simply refuse lowering on x64 Windows for the time being?</p>\n</li>\n<li>\n<p>The layout of the data read and written by the instruction is described in the new file <code>codegen/src/isa/x64/inst/stack_switch.rs</code>, given that the information in that file is platform-specific. However, I'm not sure if that's the right place for that file. I imagine that the content of that file will either be split up in the future, or move somewhere else to collect the layout information for all platforms.</p>\n</li>\n<li>When emitting code for the new instruction on x64, we need two temporary registers. Currently, this is done without regalloc (see my comment in <code>emit.rs</code>): If I try to add any early def to my <code>StackSwitch</code> <code>MInst</code> to get temporary registers, <code>regalloc2</code> fails with <code>TooManyLiveRegs</code>. I suspect this is just a result of the rather unique set of constraints on <code>StackSwitch</code>. I'm curious if there's an existing issue I could mention, a more elegant workaround than what I'm currently doing, or if I should open a new issue regarding this in the <code>regalloc2</code> repo.</li>\n<li>\n<p>In <code>instructions.rs</code>, I'm giving <code>stack_switch</code> all kinds of scary side effects (namely, <code>.other_side_effects()</code>, <code>.can_load()</code>, <code>.can_store()</code>), given that it continues execution elsewhere, where arbitrary things may happen.<br>\n  I'm wondering what a more accurate description of the side effects would be. The <code>.call()</code> side effect seems related, but I was unsure if using that would have unintended consequences.</p>\n</li>\n<li>\n<p>I've added a filetest for the new instruction but it turned out quite monstrous: It uses <code>stack_switch</code> in two functions where we create enough SSA values to exceed the number of available registers before the switch, and then use all of them after the stack switch. I've manually verified the generated assembly, but I'm wondering if people prefer having a shorter test case that makes it easier to verify the assembly for the stack switching itself.</p>\n</li>\n<li>My <code>StackSwitch</code> <code>MInst</code> takes its inputs as <code>Gpr</code>s. These values all end up in registers during code emission anyway, but I was wondering if it would be more idiomatic to make the <code>MInst</code> use <code>GprMem</code> or <code>RegMem</code>, then deal with moving things into registers during emission.<br>\n</li>\n</ol>\n</blockquote>",
+        "id": 456628342,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722871590
+    },
+    {
+        "content": "<p><strong>frank-emrich</strong> has marked <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a> as ready for review.</p>",
+        "id": 456628623,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722871639
+    },
+    {
+        "content": "<p><strong>frank-emrich</strong> requested <a href=\"https://github.com/abrown\">abrown</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 456628629,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722871639
+    },
+    {
+        "content": "<p><strong>frank-emrich</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers\">wasmtime-compiler-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 456628630,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722871639
+    },
+    {
+        "content": "<p>frank-emrich edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>This PR adds a new CLIF instruction for switching stacks. While the primary motivation is to support the <a href=\"https://github.com/WebAssembly/stack-switching\">Wasm stack switching proposal</a> currently under development, the CLIF instruction here is lower level and thus intended to be useful for general-purpose stackful context switching (such as implementing coroutines, fibers, etc independently from the Wasm stack switching proposal).<br>\nThis PR only adds support for the instruction on x64 Linux, but I'm planning to add support for more platforms over time. The design of the instruction should be sufficiently abstract to support all the other platforms.</p>\n<p>While work is currently under way to implement Wasm stack switching in Wasmtime <a href=\"https://github.com/wasmfx/wasmfxtime\">here</a> and indeed uses the CLIF instruction introduced by this PR successfully, it seems worthwhile just upstreaming the CLIF instruction by itself. The proposal is not fully finalized yet, and this CLIF instruction seems useful on its own and independent from the remainder of the Wasm proposal.</p>\n<p>Concretely, the CLIF instruction looks as follows:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">out_payload</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">stack_switch</span><span class=\"p\">(</span><span class=\"n\">store_context_ptr</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">load_context_ptr</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">in_payload</span><span class=\"p\">)</span>\n</code></pre></div>\n<p>This causes the following to happen:</p>\n<ol>\n<li>The current execution context is saved: The current frame pointer, stack pointer and PC <em>after</em> the <code>stack_switch</code> instruction are stored at <code>store_context_ptr</code>. All other registers are marked as clobbered and thus spilled by regalloc as needed.</li>\n<li>We load a new <code>(SP, FP, PC)</code> triple from <code>load_context_ptr</code>, indicating the stack/context to switch to. We assume that we are either switching to a stack that was either previously switched away from by another <code>stack_switch</code>, or it's a newly initialized stack.</li>\n<li>The value <code>in_payload</code> is passed over to the other stack. In other words, if the instruction above switches from some stack A to another stack B, then the return value of the <code>stack_switch</code> instruction previously executed on B will be <code>in_payload</code>.</li>\n<li>Execution continues on stack B.</li>\n<li>If we ever switch back to stack A, the value <code>out_payload</code> above (i.e., the return value of the <code>stack_switch</code> executed when leaving stack <code>A</code>) is the payload argument passed to the corresponding switch.</li>\n</ol>\n<p>A few additional notes:</p>\n<ul>\n<li><code>store_context_ptr</code> and <code>load_context_ptr</code> can be seen as pointers to what is conceptually a three-element struct, containing SP, FP, PC.</li>\n<li>The pointers <code>store_context_ptr</code> and <code>load_context_ptr</code> are allowed to be equal. In particular, in steps 1 and 2 above, we ensure to actually load all required data from <code>load_context_ptr</code> before storing to <code>store_context_ptr</code>.</li>\n<li>As mentioned above, there are two cases in step 2: We either switch to code where a matching <code>stack_switch</code> was executed, or to a new stack<ul>\n<li>If we switch back to (right behind) a previous <code>stack_switch</code> instruction, then regalloc has spilled all subsequently needed SSA values for us, no need to manually restore any context besides SP, FP, PC.</li>\n<li>If we are executing on a new stack, we assume that execution starts inside a stack-switch aware trampoline</li>\n</ul>\n</li>\n<li>Payloads are currently hard-coded to be a single, word-sized value. That may seem arbitrary, but it's simply what's needed for our current implementation of Wasm stack switching on top of this CLIF instruction. It could later be extended to more general cases, if necessary.</li>\n<li>The stack switching implemented here is \"one-shot\": If you execute a <code>stack_switch</code> to switch from a stack A to a stack B, we can only switch back to A once (unless we subsequently execute another <code>stack_switch</code> on A again).<br>\n  This is different from <code>setjmp</code>/<code>longjmp</code>, where we may store the context once using <code>setjmp</code> and then return to it multiple times using <code>longjmp</code> without needing to call <code>setjmp</code> again.</li>\n</ul>\n</blockquote>",
+        "id": 456630712,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722872017
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/fitzgen\">fitzgen</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 456891450,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722959680
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2273869774\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>Super excited for this! Haven't taken a look at the actual code yet, but here are some answers to the questions in your comment above.</p>\n<blockquote>\n<p>However, the emitted code is only valid for x64 Linux, not x64 Windows. ... What's the cleanest way to simply refuse lowering on x64 Windows for the time being?</p>\n</blockquote>\n<p>Will the lowering work for all posix right now or only Linux? Will macos work, for example? We should be precise about the correctness condition here.</p>\n<p>Cranelift doesn't generally care what OS it is targeting beyond calling conventions and a few other ABI details here and there, and AFAIK we've never needed OS-specific lowering rules before, so this is sort of untrodded ground.</p>\n<p>A <code>TargetIsa</code> does have a <code>triple</code> method, which returns a <code>target_lexicon::Triple</code>, which in turn has an <code>operating_system</code> member. You could try plumbing that stuff through to an external partial constructor for use in ISLE <code>if-let</code>s.</p>\n<blockquote>\n<p>The layout of the data read and written by the instruction is described in the new file <code>codegen/src/isa/x64/inst/stack_switch.rs</code>, given that the information in that file is platform-specific. However, I'm not sure if that's the right place for that file. I imagine that the content of that file will either be split up in the future, or move somewhere else to collect the layout information for all platforms.</p>\n</blockquote>\n<p>I think describing the layout of that data would be best done in the documentation for the new instruction itself.</p>\n<p>I haven't looked at the actual code in this PR, but I'd expect that the only platform-specific bits would be pointer size, and otherwise we are always saving SP, optionally FP when frame pointers are enabled, and PC. Is that assumption incorrect? Are we, or will we be, saving more/fewer values on different platforms?</p>\n<p>I also would expect that we wouldn't actually need to explicitly define all the details of this data and its layout. I'd imagine we would only say that it has a given size and alignment, and is otherwise only valid to be manipulated via the <code>stack_switch</code> instruction. That is, it should be opaque to the host.</p>\n<p>But maybe something like stack walking means that the runtime needs to be able to peek inside this data, and we can't keep it opaque to the host?</p>\n<blockquote>\n<p>When emitting code for the new instruction on x64, we need two temporary registers. Currently, this is done without regalloc (see my comment in <code>emit.rs</code>): If I try to add any early def to my <code>StackSwitch</code> <code>MInst</code> to get temporary registers, <code>regalloc2</code> fails with <code>TooManyLiveRegs</code>. I suspect this is just a result of the rather unique set of constraints on <code>StackSwitch</code>. I'm curious if there's an existing issue I could mention, a more elegant workaround than what I'm currently doing, or if I should open a new issue regarding this in the <code>regalloc2</code> repo.</p>\n</blockquote>\n<p>I think we've had similar-ish issues opened in the past for <code>regalloc2</code>. None the less, I'd recommend opening an issue there and we can dedupe it if necessary. That will also get eyes on the problem from folks who are more familiar with our register allocator than I am.</p>\n<blockquote>\n<p>In <code>instructions.rs</code>, I'm giving <code>stack_switch</code> all kinds of scary side effects (namely, <code>.other_side_effects()</code>, <code>.can_load()</code>, <code>.can_store()</code>), given that it continues execution elsewhere, where arbitrary things may happen.<br>\nI'm wondering what a more accurate description of the side effects would be. The <code>.call()</code> side effect seems related, but I was unsure if using that would have unintended consequences.</p>\n</blockquote>\n<p>I think we also want to have the <code>call()</code> side effect because, for these instructions, we will want to do <code>call</code>-related things like</p>\n<ul>\n<li>clear all memory aliasing info, assuming that external code we \"call\" could alias anything</li>\n<li>treat the instruction as a GC safepoint, spill GC refs to the stack, and emit a stack map for this location</li>\n<li>etc...</li>\n</ul>\n<blockquote>\n<p>I've added a filetest for the new instruction but it turned out quite monstrous: It uses <code>stack_switch</code> in two functions where we create enough SSA values to exceed the number of available registers before the switch, and then use all of them after the stack switch. I've manually verified the generated assembly, but I'm wondering if people prefer having a shorter test case that makes it easier to verify the assembly for the stack switching itself.</p>\n</blockquote>\n<p>I don't think having a big filetest is a problem in itself per se, but I think we should also have a very basic filetest that is effectively just the <code>stack_switch</code> instruction and its disassembly. Basically, a function that takes all the <code>stack_switch</code> operands as arguments and returns the <code>out_payload</code>, and is just a single basic block with a single <code>stack_switch</code> instruction. This gives us a smoke test for the basic lowering and its disassembly.</p>\n<blockquote>\n<p>My <code>StackSwitch</code> <code>MInst</code> takes its inputs as <code>Gpr</code>s. These values all end up in registers during code emission anyway, but I was wondering if it would be more idiomatic to make the <code>MInst</code> use <code>GprMem</code> or <code>RegMem</code>, then deal with moving things into registers during emission.</p>\n</blockquote>\n<p>Things like <code>GprMem</code> are useful for x64 instructions like <code>add</code> where one of the operands can naturally be either in memory or a register. When we are lowering an <code>add</code> with a memory operand, we don't force the memory into a register during emission, we emit an instruction that operates directly on the memory. It wouldn't make sense to take a <code>GprMem</code> operand for <code>add</code> if the x64 instruction(s) we emit can't operate directly on memory.</p>\n<p>So for the x64 <code>MInst.StackSwitch</code> instruction, my questions would be:</p>\n<ol>\n<li>Can the instruction sequence it emits operate directly on memory, or must they have the operand in a register?</li>\n<li>Is the emitted instruction sequence accessing the value once or multiple times?</li>\n</ol>\n<p>If the answer to these questions are \"can operate directly on memory\" and \"accessing the value once\" then I'd say a <code>GprMem</code> makes sense. Otherwise, I think a <code>Gpr</code> is the way to go.</p>\n<p>FWIW, it is also fine to start with just <code>Gpr</code> operands and then investigate whether it makes sense to upgrade to a <code>GprMem</code> in follow up PRs.</p>\n</blockquote>",
+        "id": 457151642,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723048371
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2225713179\">PR review</a>:</p>\n<blockquote>\n<p>Looking good! I think that, with the guard rails where we only lower this instruction on target OSes for which it will work, and the various nitpicks below addressed, this will be good to merge.</p>\n</blockquote>",
+        "id": 457161382,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723052240
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2225713179\">PR review</a>:</p>\n<blockquote>\n<p>Looking good! I think that, with the guard rails where we only lower this instruction on target OSes for which it will work, and the various nitpicks below addressed, this will be good to merge.</p>\n</blockquote>",
+        "id": 457161383,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723052240
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1707442699\">PR review comment</a>:</p>\n<blockquote>\n<p>Somewhere in here we should mention the one-shottedness of this instruction, and how resuming a context twice can result in UB due to spilled values being overwritten by the first resumption, etc...</p>\n<p>It might even be worth naming this instruction <code>one_shot_stack_switch</code>.</p>\n<p>I think we should also clarify that, while this instruction performs loads and stores, those memory operations are always assumed to be aligned, non-trapping, and otherwise valid. This instruction performs no validation itself. It is as if these memory operations had <code>MemFlags::trusted()</code> attached to them. Therefore, it is the user's responsibility to ensure that these assumptions are upheld.</p>\n</blockquote>",
+        "id": 457161384,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723052240
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1707523401\">PR review comment</a>:</p>\n<blockquote>\n<p>Is there any reason <code>rdi</code> was chosen in particular? Not that it is a bad choice or anything, I'm just wondering if there are constraints on the register we choose (or even if we <em>have</em> to choose a fixed register?) that we should document here in case we ever want to change it.</p>\n</blockquote>",
+        "id": 457161385,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723052240
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1707468443\">PR review comment</a>:</p>\n<blockquote>\n<p>This is a fantastic hack</p>\n</blockquote>",
+        "id": 457161386,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723052240
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1707528610\">PR review comment</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>            Err(PccError::UnimplementedInst)\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 457161387,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723052240
+    },
+    {
+        "content": "<p>frank-emrich <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2274180787\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>Thanks for your answers and looking at the code! I'll look into the things you suggested.</p>\n<p>In the meantime, some more thoughts regarding the layout of the contexts: On most platforms, the context can indeed look like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">struct</span><span class=\"w\"> </span><span class=\"nc\">ControlContext</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"n\">stack_pointer</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"n\">frame_pointer</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"n\">instruction_pointer</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>However, there are two reasons for why the layout may be different somewhere:</p>\n<h3>1. Additional info needed on Windows</h3>\n<p>On Windows, I think we would have to update data inside the \"Thread Information Block\" (the stuff we briefly talked about with Ryan Hunt at the Pittsburgh CG meeting). I haven't looked too deeply into it, but it looks like it contains pointers to the beginning and end of the currently active stack, which we would need to update when switching. That means that I suspect we would have to add these to the <code>ControlContext</code> on Windows.</p>\n<p>In any case, it looks like we would need Windows-specific lowering rules for <code>x64</code>, just to emit the logic for updating the Thread Information Block.</p>\n<h3>2. Frame pointer walking</h3>\n<p>There's another issue that I've briefly mentioned in a comment in the new file <code>stack_switch.rs</code>, but haven't provided much detail on (mostly because it requires dumping a bunch of extra info on you, sorry!):</p>\n<p>I made sure that the <code>ControlContext</code> above is laid out in a way so that it can appear inside a frame pointer chain. This is so that for stack switching approaches where you do have parent-child relationships between stacks, these are reflected in the stack trace you get just from frame pointer walking, by creating a single continuous chain crossing stacks. In other words, tools like <code>lldb</code> show you the frames of the active stack, but also the frames in its parent.<br>\n(There's been a recent development in the Wasm stack switching subgroup making it very likely that at least for <em>Wasm</em> stack switching, we will end up with a proposal where there are parent-child relationships between all the active stacks.)</p>\n<p>Concretely, in our implementation of Wasm stack switching, this is achieved like this:<br>\nImagine we have allocated memory from <code>0x1000</code> to <code>0xB000</code> which we want to use for a new stack <code>S</code>. We store a <code>ControlContext</code> at the very top of that allocation at <code>0xAFE8</code>, with the actual stack space starting below it. When starting execution in the new stack, we will then have <code>RSP = 0xAFE0</code> in the trampoline that kicks off execution inside stack <code>S</code> (e.g., the trampoline calls the Wasm function that we actually want to run inside that stack).</p>\n<p>The main idea is now that we make sure that the <code>ControlContext</code> at <code>0xAFE8</code> always contains the information about the <em>parent</em> of stack <code>S</code>, meaning that whenever we switch from some other stack <code>X</code> to <code>S</code>, we write information about stack <code>X</code> (which then becomes the parent of <code>S</code>) into the <code>ControlContext</code> at <code>0xAFE8</code>.</p>\n<p>The last missing ingredient for creating the frame pointer chain is that when  we are running the trampoline that kicks of execution inside stack S, we set <code>RBP</code> to <code>0xAFF0</code>, which is the address of the frame pointer field inside the control context.<br>\nThis means that while the trampoline is the bottom-most stack frame inside <code>S</code>, when passing the trampoline while walking the frame pointer chain we actually get to where <code>X</code> <code>stack_switch</code>-ed to <code>S</code>: At <code>0xAFF0</code> we stored the frame pointer of <code>X</code>, and the layout of <code>ControlContext</code> puts the PC saved for <code>X</code> right next to it, exactly where <code>lldb</code> and friends would expect it.</p>\n<p><strong>Long story short</strong>: It's quite neat to make sure that <code>ControlContext</code> has just the right layout to enable this trick. It allows users of the <code>stack_switch</code> instruction to get frame pointer walking across stacks entirely for free \"simply\" by carefully laying out where the contexts are actually stored and setting <code>RBP</code> correctly. If they don't care  or implement a stack switching approach where there are no parents, nothing is lost. But to make this possible, the layout of the <code>ControlContext</code> suddenly depends on not just the ISA, but whatever your platform dictates about stack layout (in particular, where to find the return address relative to the frame pointer).</p>\n<p>Luckily, the layout above (i.e., frame pointer right next to PC) works on all platforms supported by Cranelift, except s390x: On the latter, there's an offset of 14 words between where the FP and PC are stored.<br>\nSo on that platform my plan was to make the <code>ControlContext</code> look like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">struct</span><span class=\"w\"> </span><span class=\"nc\">S390XControlContext</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"n\">frame_pointer</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"n\">stack_pointer</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"n\">padding</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">12</span><span class=\"p\">],</span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"n\">instruction_pointer</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>(Or just give up on frame pointer walking there)</p>\n<p>So at least it seems that within the same ISA, all OSes sufficiently agree on the stack layout so that the frame pointer walking causes no extra hassle.</p>\n<h2>Documenting the layout</h2>\n<blockquote>\n<p>I also would expect that we wouldn't actually need to explicitly define all the details of this data and its layout. I'd imagine we would only say that it has a given size and alignment, and is otherwise only valid to be manipulated via the <code>stack_switch</code> instruction. That is, it should be opaque to the host.</p>\n<p>But maybe something like stack walking means that the runtime needs to be able to peek inside this data, and we can't keep it opaque to the host?</p>\n</blockquote>\n<p>Yes, the layout of the <code>ControlContext</code> can be kept mostly opaque, except for stack creation. As long as you only create and consume these contexts with <code>stack_switch</code>, you really don't need to know anything about them besides their size and (boring) alignment requirements. </p>\n<p>The only situation where you <em>do</em> need to know about the layout is when initializing a new stack:  You need to create a corresponding <code>ControlContext</code> that when <code>stack_switch</code>-ed to executes the right trampoline on the new stack. That's why my idea was basically to leave details about the layout of the context out of the documentation of the instruction in <code>instruction.rs</code>, but at least have some platform-specific documentation elsewhere.</p>\n<p>Alternatively, we could add a <code>stack_init</code> instruction, or instructions that act like getters and setters on the context.</p>\n</blockquote>",
+        "id": 457181962,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723058296
+    },
+    {
+        "content": "<p>frank-emrich updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 459469270,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723208747
+    },
+    {
+        "content": "<p>frank-emrich updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 459488441,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723213614
+    },
+    {
+        "content": "<p>frank-emrich submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2230363974\">PR review</a>.</p>",
+        "id": 459490367,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723214122
+    },
+    {
+        "content": "<p>frank-emrich created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1711584216\">PR review comment</a>:</p>\n<blockquote>\n<p>Ha, good question! I've added a few comments now about why this needs to be a fixed register: We only have a single payload and pass it in a register when doing a <code>stack_switch</code> to another <code>stack_switch</code> on another stack. But in order for that to work, the two involved <code>stack_switch</code> instructions need to agree on the register used for this, similar to a calling convention.</p>\n<p>(In a perfect world I would extend the payload handling to arbitrarily many values of different types and make sure that the \"calling convention\" for that is exactly the same as for functions. If you do that, you don't have to reshuffle any arguments when switching to a new stack where the payloads given to the <code>stack_switch</code> become the arguments of the function to run on the new stack. But that would drastically increase the complexity and it's questionable how big the performance benefit would be)<br>\n</p>\n</blockquote>",
+        "id": 459490372,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723214122
+    },
+    {
+        "content": "<p>frank-emrich submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2230366778\">PR review</a>.</p>",
+        "id": 459490798,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723214204
+    },
+    {
+        "content": "<p>frank-emrich created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1711586379\">PR review comment</a>:</p>\n<blockquote>\n<p>I've extended the documentation of this instruction now. Still not specifying the actual layout itself, but mentioned the one-shottedness and the fact that the instruction does not check the pointers or data.</p>\n</blockquote>",
+        "id": 459490800,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723214204
+    },
+    {
+        "content": "<p>frank-emrich <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2278136189\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>I've implemented the restriction to only lower <code>stack_switch</code> on Linux now: Strictly speaking, it's each individual OS rather than the ISA that may require additional things needing to be done when switching stacks (see my remarks on Windows in my huge previous comment). I do believe that my current implementation would actually work on x64 macOS, but haven't tested it. So I would just stay on the safe side and make the support OS-dependent (instead of, say, allowing anything Unix-like), with the only allowed one being Linux for now.</p>\n<p>I've implemented this using a partial constructor <code>on_linux</code>. The controversial bit may be that I'm now copying the <code>Triple</code> into every <code>machinst::Callee</code>. Is that acceptable?</p>\n</blockquote>",
+        "id": 459495471,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723215145
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2230770506\">PR review</a>.</p>",
+        "id": 459538563,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723226353
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1711901967\">PR review comment</a>:</p>\n<blockquote>\n<p>Gotcha, that makes sense. Thanks!</p>\n</blockquote>",
+        "id": 459538564,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723226353
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2278462905\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<blockquote>\n<p>only allowed one being Linux for now.</p>\n</blockquote>\n<p>SGTM</p>\n<blockquote>\n<p>The controversial bit may be that I'm now copying the <code>Triple</code> into every <code>machinst::Callee</code>. Is that acceptable?</p>\n</blockquote>\n<p>It doesn't seem ideal. Do we not already have access to a <code>&amp;dyn TargetIsa</code> in the <code>LowerContext</code>?</p>\n</blockquote>",
+        "id": 459538795,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723226407
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2278471753\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<blockquote>\n<p>Do we not already have access to a <code>&amp;dyn TargetIsa</code> in the <code>LowerContext</code>?</p>\n</blockquote>\n<p>The <code>IsleContext</code> contains a <code>B: LowerBackend</code> which for x64 is a <code>X64Backend</code> which contains a <code>Triple</code> already, and all the other <code>LowerBackend</code> implementations also contain a <code>Triple</code>. I think we could add a <code>fn triple(&amp;self) -&gt; &amp;Triple</code> trait method to <code>LowerBackend</code> and then reuse that in the <code>IsleContext</code>'s implementation of the partial constructor.</p>\n</blockquote>",
+        "id": 459540039,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723226659
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2230843604\">PR review</a>.</p>",
+        "id": 459550153,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723228951
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1711981410\">PR review comment</a>:</p>\n<blockquote>\n<p>There is no other place in Cranelift that looks at the target OS when determining how to lower clif ir. Even TLS handling chooses the right variant for the target OS using a codegen flag rather than by looking at the OS in the triple. Using the right calling conventions is done by the producer of the clif ir. </p>\n</blockquote>",
+        "id": 459550154,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723228952
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2230852356\">PR review</a>.</p>",
+        "id": 459551026,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723229350
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1711990548\">PR review comment</a>:</p>\n<blockquote>\n<p>I think I agree here: philosophically, this is if not quite literally calling-convention related, certainly like an OS-interface detail that should be \"baked into\" the CLIF as CLIF is ordinarily explicit about such details. Can we check the triple in the Wasm translation (i.e., the wasmtime <code>FuncEnvironment</code> hook called by <code>cranelift-wasm</code>, or wherever else this instruction is generated) and fail if on the wrong platform?</p>\n<p>This is also a little more future-looking in the sense that there may be <em>Wasmtime</em> details at some future point related to stack-switching (e.g., what if we add our own stack-protection mitigations or have some custom kind of stack-growth scheme or ...) -- we wouldn't want to hardcode that into Cranelift lowering in the same way OS details are here.</p>\n</blockquote>",
+        "id": 459551027,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723229351
+    },
+    {
+        "content": "<p>cfallin edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1711990548\">PR review comment</a>.</p>",
+        "id": 459551063,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723229374
+    },
+    {
+        "content": "<p>frank-emrich submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2233679825\">PR review</a>.</p>",
+        "id": 461029109,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723484608
+    },
+    {
+        "content": "<p>frank-emrich created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1714163558\">PR review comment</a>:</p>\n<blockquote>\n<p>Just to recap the context sprinkled through this PR: The reason why we need to do something platform/OS-specific here eventually is that Windows requires us to update parts of the <a href=\"https://en.wikipedia.org/wiki/Win32_Thread_Information_Block\">Thread Information Block</a> when switching stacks. Unfortunately, what exactly needs to be done is undocumented, so I've not done it, yet. The \"plain\" stack switching I implemented in this PR was supposed to work only on Linux, but from what I can tell should work on x64 macOS, too.</p>\n<p>@bjorn3:</p>\n<p>Following what you said, I guess one approach would be to make the lowering of <code>stack_switch</code> more similar to that of <code>tls_value</code>. I'd imagine this would look as follows:</p>\n<ul>\n<li>Create a <code>StackSwitchMode</code> enum with <code>Default</code> and  <code>UpdateTib</code> variants.</li>\n<li>Encode a value of that type in <code>shared_settings::Flags</code> and also add it as a field to the <code>StackSwitch</code> <code>MInst</code>.</li>\n<li>When emitting code for <code>StackSwitch</code>, check the value of the <code>StackSwitchMode</code> flag and act accordingly.</li>\n</ul>\n<p>I'm also happy to have more than one <code>MInst</code> for stack switching, and lower the <code>stack_switch</code> CLIF instruction to one of them, based on the value of <code>StackSwitchMode</code>. That would mirror <code>tls_value</code> more closely, but I'm inclined to avoid that: The core stack switching code is always the same, we just sometimes need to emit some extra code on top of that.</p>\n<p>Finally, what I described above would be the medium-term solution once I've implemented Windows support. For the time being I would just add a <code>None</code> variant to <code>StackSwitchMode</code>, use that on Windows, and panic if we see it when emitting code for <code>StackSwitch</code>.</p>\n<p>@cfallin:</p>\n<blockquote>\n<p>Can we check the triple in the Wasm translation (i.e., the wasmtime <code>FuncEnvironment</code> hook called by <code>cranelift-wasm</code>, or wherever else this instruction is generated) and fail if on the wrong platform?</p>\n</blockquote>\n<p>Did you mean for this to be just a solution for the current issue of me wanting to fail if not on Linux? Or did you mean to also use this approach (i.e., resolving differences at the Wasm -&gt; CLIF stage) in the future when we want to generate slightly different code on different OS-es?</p>\n<p>In the latter case, are you suggesting to have multiple stack switching CLIF instructions, for the case with and without the TIB update, then choose between them during the Wasm translation? Or are you suggesting to have a single CLIF instruction for the stack switching itself, but then emit some additional CLIF on Windows (say, some additional loads and stores) around the <code>stack_switch</code> during the Wasm translation?</p>\n<p>I fully agree that for things like stack growing there's a good chance that in the future, we'd need some more customization of the generated code (e.g., customize stack probing, function preludes, ...).</p>\n</blockquote>",
+        "id": 461029110,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723484608
+    },
+    {
+        "content": "<p>frank-emrich edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1714163558\">PR review comment</a>.</p>",
+        "id": 461029306,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723484677
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2233704146\">PR review</a>.</p>",
+        "id": 461031327,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723485445
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1714178594\">PR review comment</a>:</p>\n<blockquote>\n<blockquote>\n<p>Did you mean for this to be just a solution for the current issue of me wanting to fail if not on Linux? Or did you mean to also use this approach (i.e., resolving differences at the Wasm -&gt; CLIF stage) in the future when we want to generate slightly different code on different OS-es?</p>\n</blockquote>\n<p>Both, I think -- basically, any sort of difference of behavior on that level should be reified in the CLIF, rather than implicit; that's how we've handled things like TLS and other platform dependencies.</p>\n<blockquote>\n<p>In the latter case, are you suggesting to have multiple stack switching CLIF instructions, for the case with and without the TIB update, then choose between them during the Wasm translation? Or are you suggesting to have a single CLIF instruction for the stack switching itself, but then emit some additional CLIF on Windows (say, some additional loads and stores) around the <code>stack_switch</code> during the Wasm translation?</p>\n</blockquote>\n<p>One or the other, depending on what is actually needed? I don't have enough context to actually specify the full design; that's something we can discuss further; only that we should make it explicit <em>somehow</em>. If one platform requires a superset of the work that another platform does, factoring out the common bit as one instruction and adding more logic at the CLIF level seems reasonable. On the other hand it's totally reasonable to have <code>stack_switch_windows</code> and <code>stack_switch_sysv</code> instructions IMHO; again see how we did TLS, with separate instructions for ELF and Mach-O cases.</p>\n</blockquote>",
+        "id": 461031330,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723485445
+    },
+    {
+        "content": "<p>frank-emrich submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2233736591\">PR review</a>.</p>",
+        "id": 461034400,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723486551
+    },
+    {
+        "content": "<p>frank-emrich created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1714197624\">PR review comment</a>:</p>\n<blockquote>\n<blockquote>\n<p>On the other hand it's totally reasonable to have <code>stack_switch_windows</code> and <code>stack_switch_sysv</code> instructions IMHO; again see how we did TLS, with separate instructions for ELF and Mach-O cases.</p>\n</blockquote>\n<p>Ah, I think that's where my confusion came from: For TLS, there is a single CLIF instruction, which is then lowered one of  several per-platform <code>MInst</code>s (but based on a flag in the backend, not some ad hoc OS check like I did). I'm happy to do it like that, which would be similar to what I described in my response to @bjorn3.</p>\n<p>I'd prefer that over moving the TIB update out of the <code>stack_switch</code> (CLIF) instruction itself.</p>\n</blockquote>",
+        "id": 461034401,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723486552
+    },
+    {
+        "content": "<p><strong>frank-emrich</strong> requested <a href=\"https://github.com/alexcrichton\">alexcrichton</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 462337407,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723639335
+    },
+    {
+        "content": "<p>frank-emrich updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 462337408,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723639335
+    },
+    {
+        "content": "<p><strong>frank-emrich</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers\">wasmtime-core-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 462337409,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723639335
+    },
+    {
+        "content": "<p>frank-emrich <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2288651950\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>I've reworked the platform dependence logic based now, inspired by what happens for TLS:<br>\nThere's a new enum <code>StackSwitchModel</code> with values <code>None</code>, <code>Basic</code>, and <code>UpdateWindowsTib</code>. A value of that is saved in the backend <code>Flags</code>.<br>\nThis value is then used when lowering a <code>stack_switch</code> CLIF instruction: If <code>None</code>, we cannot lower them. If <code>Basic</code>, we lower to <code>stack_switch_basic</code>. In the future, it will be the case that  <code>UpdateWindowsTib</code> causes lowering to a new dedicated <code>MInst</code> (like <code>StackSwitchUpdateWindowsTib</code>), but currently this will behave like <code>None</code> (i.e., we fail to lower).<br>\n</p>\n</blockquote>",
+        "id": 462338537,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723639724
+    },
+    {
+        "content": "<p>frank-emrich <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2288662056\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>@alexcrichton For some reason the automated reviewer assignment was triggered again, maybe because this PR is now touching a non-Cranelift file.</p>\n</blockquote>",
+        "id": 462339430,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723640023
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2299638359\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>Do others have more thoughts on this? This all looks reaosnable enough to me to land, but I'd want to be sure to run by others too.</p>\n</blockquote>",
+        "id": 463795202,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724183118
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2249035461\">PR review</a>:</p>\n<blockquote>\n<p>LGTM with one final nitpick below</p>\n</blockquote>",
+        "id": 463806036,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724185697
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1723940274\">PR review comment</a>:</p>\n<blockquote>\n<p>Rather than making this an extractor from a type, can we make it a partial constructor?</p>\n<p>Then the use would look like</p>\n<p><div class=\"codehilite\" data-code-language=\"Common Lisp\"><pre><span></span><code><span class=\"p\">(</span><span class=\"nv\">lower</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">stack_switch</span><span class=\"w\"> </span><span class=\"nv\">store_context_ptr</span><span class=\"w\"> </span><span class=\"nv\">load_context_ptr</span><span class=\"w\"> </span><span class=\"nv\">in_payload</span><span class=\"p\">)</span>\n<span class=\"w\">       </span><span class=\"p\">(</span><span class=\"nv\">if-let</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">stack_switch_model</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">StackSwitchModel.Basic</span><span class=\"p\">))</span>\n<span class=\"w\">       </span><span class=\"o\">...</span><span class=\"p\">)</span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 463806037,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724185697
+    },
+    {
+        "content": "<p>frank-emrich updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 464012805,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724237364
+    },
+    {
+        "content": "<p>frank-emrich submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2250469558\">PR review</a>.</p>",
+        "id": 464013433,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724237629
+    },
+    {
+        "content": "<p>frank-emrich created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1724851866\">PR review comment</a>:</p>\n<blockquote>\n<p>Done, but you meant <code>(if-let (StackSwitchModel.Basic) (stack_switch_model))</code>, right?</p>\n<p>Is there a particular reason for making it a <em>partial</em> constructor? Following what's happening for TLS I gave my <code>StackSwitchModel</code> enum a <code>None</code> variant to indicate that no model was set, but that means that the <code>stack_switch_model</code> constructor can be total, or am I missing something?</p>\n</blockquote>",
+        "id": 464013435,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724237629
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2251935303\">PR review</a>.</p>",
+        "id": 464168169,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724273978
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1725748973\">PR review comment</a>:</p>\n<blockquote>\n<p>I might be wrong, but I had thought that you can only use partial constructors in <code>if-let</code>s. Might be worth removing the <code>None</code> variant from <code>StackSwitchModel</code>, if so.</p>\n</blockquote>",
+        "id": 464168172,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724273978
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2251985190\">PR review</a>.</p>",
+        "id": 464174889,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724276193
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2303054235\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>I think this is in a good enough place that we can land it and then continue with any further improvements in follow ups. Thanks @frank-emrich!</p>\n</blockquote>",
+        "id": 464174944,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724276222
+    },
+    {
+        "content": "<p>frank-emrich updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 464175219,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724276361
+    },
+    {
+        "content": "<p>frank-emrich submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#pullrequestreview-2251989154\">PR review</a>.</p>",
+        "id": 464175241,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724276380
+    },
+    {
+        "content": "<p>frank-emrich created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#discussion_r1725783586\">PR review comment</a>:</p>\n<blockquote>\n<p>I tried it, and turning <code>stack_switch_model</code> into a total constructor seems to just work.<br>\nI don't understand the magic mechanism for configuring what goes into the backend  <code>Flags</code> in detail, but from what I can tell it does not allow you to store something logically equivalent to <code>Option&lt;StackSwitchModel&gt;</code> in there, so keeping the <code>None</code> variant in <code>StackSwitchModel</code> itself seems like the way to go.</p>\n</blockquote>",
+        "id": 464175242,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724276381
+    },
+    {
+        "content": "<p>frank-emrich <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2303061725\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>Oops, it looks like I responded to your comment and added a new commit in parallel to you approving things. But I think it should be uncontroversial, I kept <code>None</code> and made <code>stack_switch_model</code> total.</p>\n</blockquote>",
+        "id": 464176196,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724276588
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078#issuecomment-2303064129\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>:</p>\n<blockquote>\n<p>Yeah, LGTM</p>\n</blockquote>",
+        "id": 464176659,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724276708
+    },
+    {
+        "content": "<p>fitzgen merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/9078\">PR #9078</a>.</p>",
+        "id": 464177621,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1724277137
+    }
+]

@@ -1,0 +1,89 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #5796 Cranelift: idempotent instructions... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235796.20Cranelift.3A.20idempotent.20instructions.2E.2E.2E.html">wasmtime / issue #5796 Cranelift: idempotent instructions...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="328135031"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235796%20Cranelift%3A%20idempotent%20instructions.../near/328135031" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235796.20Cranelift.3A.20idempotent.20instructions.2E.2E.2E.html#328135031">(Feb 16 2023 at 00:37)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/issues/5796">issue #5796</a>:</p>
+<blockquote>
+<p>@jameysharp brought to my attention an interesting case:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">test</span><span class="w"> </span><span class="n">optimize</span>
+<span class="n">set</span><span class="w"> </span><span class="n">opt_level</span><span class="o">=</span><span class="n">speed</span>
+<span class="n">target</span><span class="w"> </span><span class="n">x86_64</span>
+
+<span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">f</span><span class="p">(</span><span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span> <span class="p">{</span>
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">v2</span>: <span class="kt">i32</span><span class="p">)</span>:
+  <span class="nc">brif</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">block1</span><span class="p">,</span><span class="w"> </span><span class="n">block2</span>
+
+<span class="n">block1</span>:
+  <span class="nc">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">udiv</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="n">v2</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v3</span>
+
+<span class="n">block2</span>:
+  <span class="nc">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">udiv</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="n">v2</span>
+<span class="w">  </span><span class="n">brif</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="n">block3</span><span class="p">,</span><span class="w"> </span><span class="n">block4</span>
+
+<span class="n">block3</span>:
+  <span class="nc">return</span><span class="w"> </span><span class="n">v4</span>
+
+<span class="n">block4</span>:
+  <span class="nc">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>When run through the egraph framework, the <code>udiv</code> is sunk from <code>block2</code> to two copies in <code>block3</code> and <code>block4</code>. This is code-motion of a side-effect that is actually, strictly speaking, incorrect. It won't cause a program that doesn't trap to trap, or a program that traps to not trap, but it may affect <em>which</em> trap is seen first and/or which side-effects occur prior to the trap.</p>
+<p>The basic issue is that we sort of treat idempotent operators as both pure -- so GVN'able -- but also as having a location, so remaining in the side-effect skeleton. This combines with the use of an ordinary map, <em>not</em> a scoped hashmap, for GVN'ing. That choice was valid when we processed only pure operators, which "float" outside of control flow and so have no need to limit their visibility to dominated blocks. But in the above program, the GVN map gets an entry when we see <code>v3</code> in <code>block1</code>, then we visit <code>block2</code>, see the GVN-map entry, rewrite <code>v4</code> to <code>v3</code>, and remove the second <code>udiv</code>. Elaboration will then place copies of the udiv back in <code>block3</code> and <code>block4</code> as the value is used, because it already exists in the layout elsewhere. So we never use a value outside of its defined range (i.e., defs still dominate uses), but we <em>do</em> lose information about where the def occurs.</p>
+<p>@jameysharp and I were at first thinking we could add a scoped hashmap to <em>not</em> dedup <code>v3</code> and <code>v4</code> to the same value, but actually this is suboptimal: the whole point of interning nodes in the egraph is to share the work of optimizing them once. And an idempotent op <em>is</em> mostly like a fully pure op, so we should be able to mostly reason about it in this shared way, <em>except</em> for where its side effects must have been made visible.</p>
+<p>A key insight for a better solution is: one can see any idempotent op as an <em>actual pure op</em>, with <em>two</em> outputs, the original and a "has trapped" flag; combined with an actual side-effecting op on the "has trapped" flag. We don't want to actually rewrite in this form. But in principle, the side-effect is separable in that way, and that gives us the GVN semantics that we desire.</p>
+<p>The proposal is this: let idempotent ops GVN as pure ops do. Unconditionally remove them from the side-effect skeleton (the <code>Layout</code>). But in their place in the <code>Layout</code>, insert a <code>force</code> pseudo-inst that uses the GVN'd value. The only purpose of this pseudo-op is to ensure that the value is computed at the given location during elaboration.</p>
+<p>This would give the desired behavior for the program above: it would retain the <code>udiv</code> in both <code>block1</code> and <code>block2</code>, and would neither hoist nor lower it, while still GVN'ing both to one value that could be reasoned about / rewritten once.</p>
+</blockquote>
+
+
+
+<a name="338993483"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235796%20Cranelift%3A%20idempotent%20instructions.../near/338993483" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235796.20Cranelift.3A.20idempotent.20instructions.2E.2E.2E.html#338993483">(Mar 02 2023 at 02:46)</a>:</h4>
+<p>cfallin closed <a href="https://github.com/bytecodealliance/wasmtime/issues/5796">issue #5796</a>:</p>
+<blockquote>
+<p>@jameysharp brought to my attention an interesting case:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">test</span><span class="w"> </span><span class="n">optimize</span>
+<span class="n">set</span><span class="w"> </span><span class="n">opt_level</span><span class="o">=</span><span class="n">speed</span>
+<span class="n">target</span><span class="w"> </span><span class="n">x86_64</span>
+
+<span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">f</span><span class="p">(</span><span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span> <span class="p">{</span>
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">v2</span>: <span class="kt">i32</span><span class="p">)</span>:
+  <span class="nc">brif</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">block1</span><span class="p">,</span><span class="w"> </span><span class="n">block2</span>
+
+<span class="n">block1</span>:
+  <span class="nc">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">udiv</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="n">v2</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v3</span>
+
+<span class="n">block2</span>:
+  <span class="nc">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">udiv</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="n">v2</span>
+<span class="w">  </span><span class="n">brif</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="n">block3</span><span class="p">,</span><span class="w"> </span><span class="n">block4</span>
+
+<span class="n">block3</span>:
+  <span class="nc">return</span><span class="w"> </span><span class="n">v4</span>
+
+<span class="n">block4</span>:
+  <span class="nc">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>When run through the egraph framework, the <code>udiv</code> is sunk from <code>block2</code> to two copies in <code>block3</code> and <code>block4</code>. This is code-motion of a side-effect that is actually, strictly speaking, incorrect. It won't cause a program that doesn't trap to trap, or a program that traps to not trap, but it may affect <em>which</em> trap is seen first and/or which side-effects occur prior to the trap.</p>
+<p>The basic issue is that we sort of treat idempotent operators as both pure -- so GVN'able -- but also as having a location, so remaining in the side-effect skeleton. This combines with the use of an ordinary map, <em>not</em> a scoped hashmap, for GVN'ing. That choice was valid when we processed only pure operators, which "float" outside of control flow and so have no need to limit their visibility to dominated blocks. But in the above program, the GVN map gets an entry when we see <code>v3</code> in <code>block1</code>, then we visit <code>block2</code>, see the GVN-map entry, rewrite <code>v4</code> to <code>v3</code>, and remove the second <code>udiv</code>. Elaboration will then place copies of the udiv back in <code>block3</code> and <code>block4</code> as the value is used, because it already exists in the layout elsewhere. So we never use a value outside of its defined range (i.e., defs still dominate uses), but we <em>do</em> lose information about where the def occurs.</p>
+<p>@jameysharp and I were at first thinking we could add a scoped hashmap to <em>not</em> dedup <code>v3</code> and <code>v4</code> to the same value, but actually this is suboptimal: the whole point of interning nodes in the egraph is to share the work of optimizing them once. And an idempotent op <em>is</em> mostly like a fully pure op, so we should be able to mostly reason about it in this shared way, <em>except</em> for where its side effects must have been made visible.</p>
+<p>A key insight for a better solution is: one can see any idempotent op as an <em>actual pure op</em>, with <em>two</em> outputs, the original and a "has trapped" flag; combined with an actual side-effecting op on the "has trapped" flag. We don't want to actually rewrite in this form. But in principle, the side-effect is separable in that way, and that gives us the GVN semantics that we desire.</p>
+<p>The proposal is this: let idempotent ops GVN as pure ops do. Unconditionally remove them from the side-effect skeleton (the <code>Layout</code>). But in their place in the <code>Layout</code>, insert a <code>force</code> pseudo-inst that uses the GVN'd value. The only purpose of this pseudo-op is to ensure that the value is computed at the given location during elaboration.</p>
+<p>This would give the desired behavior for the program above: it would retain the <code>udiv</code> in both <code>block1</code> and <code>block2</code>, and would neither hoist nor lower it, while still GVN'ing both to one value that could be reasoned about / rewritten once.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

@@ -1,0 +1,116 @@
+[
+    {
+        "content": "<p>koute opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a> from <code>main_cow_instance_reuse</code> to <code>main</code>:</p>\n<blockquote>\n<p>This PR adds a new copy-on-write based instance reuse mechanism on Linux.</p>\n<h2>Usage</h2>\n<p>The general idea is - you instantiate your instance once, and then you can reset its state back to how it was when it was initially instantiated.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"c1\">// Initialize a new instance. This is done only once.</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Store</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">engine</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">());</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">instance_pre</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">linker</span><span class=\"p\">.</span><span class=\"n\">instantiate_pre</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">module</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">instance</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">instance_pre</span><span class=\"p\">.</span><span class=\"n\">instantiate_reusable</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"k\">loop</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"c1\">// Call methods, modify memory, modify the table, etc.</span>\n<span class=\"w\">        </span><span class=\"n\">use_instance</span><span class=\"p\">(</span><span class=\"n\">instance</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"c1\">// Reset the instance to its initial state.</span>\n<span class=\"w\">        </span><span class=\"n\">instance</span><span class=\"p\">.</span><span class=\"n\">reset</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<h2>How does it work?</h2>\n<p>After the instance is instantiated a snapshot of its state is taken. Tables and globals are simply cloned into a spare <code>Vec</code>, while the memory is copied into an <code>memfd</code> and remapped inplace in a copy-on-write fashion. Then when <code>reset</code> is called the tables and the globals are restored by simply copying them back over, and the memory is reset using <code>madvise(MADV_DONTNEED)</code> which either clears the memory (for those pages which are not mapped to the <code>memfd</code>) or restores the original contents (for those pages which <em>are</em> mapped to the <code>memfd</code>).</p>\n<h2>Benchmarks</h2>\n<p>In our benchmarks this is currently the fastest way to call into a WASM module assuming you rarely need to instantiate it from scratch.</p>\n<p>![call_empty_function](<a href=\"https://user-images.githubusercontent.com/246574/149503025-f3d56896-5181-4fa0-8b26-ea9ba03fbeb2.png\">https://user-images.githubusercontent.com/246574/149503025-f3d56896-5181-4fa0-8b26-ea9ba03fbeb2.png</a>)</p>\n<p>![dirty_1mb_of_memory](<a href=\"https://user-images.githubusercontent.com/246574/149503033-0c7c48ad-64e4-4bb0-a0d4-dfaf2223cd9c.png\">https://user-images.githubusercontent.com/246574/149503033-0c7c48ad-64e4-4bb0-a0d4-dfaf2223cd9c.png</a>)</p>\n<p>Legend:<br>\n- <code>instance_pooling_with_uffd</code>: create a fresh instance with <code>InstanceAllocationStrategy::Pooling</code> strategy <em>with</em> <code>uffd</code> turned on<br>\n- <code>instance_pooling_without_uffd</code>: create a fresh instance with <code>InstanceAllocationStrategy::Pooling</code> strategy <em>without</em> <code>uffd</code> turned on<br>\n- <code>recreate_instance</code>: create a fresh instance with <code>InstanceAllocationStrategy::OnDemand</code> strategy<br>\n- <code>native_instance_reuse</code>: this PR<br>\n- <code>interpreted</code>: just for our own reference; an instance created through the <a href=\"https://github.com/paritytech/wasmi\"><code>wasmi</code></a> crate<br>\n- <code>legacy_instance_reuse</code>: just for our own reference; this is what we're currently using - it is an instance spawned with <code>InstanceAllocationStrategy::OnDemand</code> strategy and then reused after manually clearing its memory and restoring its data segments and globals</p>\n<p>The two of the benchmarks shown here are:<br>\n- <code>call_empty_function</code>: an empty function is called in a loop, resetting (or recreating) the instance after each call<br>\n- <code>dirty_1mb_of_memory</code>: a function which dirties 1MB of memory and then returns is called in a loop, resetting (or recreating) the instance after each call</p>\n<p>The measurements are <em>only</em> for the main thread; thread count on the bottom signifies how many other threads were running in the background doing exactly the same thing as the main thread, e.g. for 4 threads there was 1 thread (the main thread) being benchmarked while other 3 threads were running in the background.</p>\n<p>For your reference the benchmarks used to generate these graphs can be found here:</p>\n<p><code>https://github.com/koute/substrate/tree/master_wasmtime_benchmarks</code></p>\n<p>Which can be run like this after cloning the repository:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">$</span><span class=\"w\"> </span><span class=\"n\">cd</span><span class=\"w\"> </span><span class=\"n\">substrate</span><span class=\"o\">/</span><span class=\"n\">client</span><span class=\"o\">/</span><span class=\"n\">executor</span><span class=\"o\">/</span><span class=\"n\">benches</span><span class=\"w\"></span>\n\n#<span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">instance_pooling_with_uffd</span><span class=\"err\">`</span><span class=\"w\"></span>\n<span class=\"cp\">$</span><span class=\"w\"> </span><span class=\"n\">FORCE_WASMTIME_INSTANCE_POOLING</span><span class=\"o\">=</span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"n\">rustup</span><span class=\"w\"> </span><span class=\"n\">run</span><span class=\"w\"> </span><span class=\"n\">nightly</span><span class=\"o\">-</span><span class=\"mi\">2021</span><span class=\"o\">-</span><span class=\"mi\">11</span><span class=\"o\">-</span><span class=\"mi\">01</span><span class=\"o\">-</span><span class=\"n\">x86_64</span><span class=\"o\">-</span><span class=\"n\">unknown</span><span class=\"o\">-</span><span class=\"n\">linux</span><span class=\"o\">-</span><span class=\"n\">gnu</span><span class=\"w\"> </span><span class=\"n\">cargo</span><span class=\"w\"> </span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">features</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span><span class=\"p\">,</span><span class=\"n\">sc</span><span class=\"o\">-</span><span class=\"n\">executor</span><span class=\"o\">-</span><span class=\"n\">wasmtime</span><span class=\"o\">/</span><span class=\"n\">uffd</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"w\"> </span><span class=\"n\">with_recreate_instance</span><span class=\"w\"></span>\n\n#<span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">instance_pooling_without_uffd</span><span class=\"err\">`</span><span class=\"w\"></span>\n<span class=\"cp\">$</span><span class=\"w\"> </span><span class=\"n\">FORCE_WASMTIME_INSTANCE_POOLING</span><span class=\"o\">=</span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"n\">rustup</span><span class=\"w\"> </span><span class=\"n\">run</span><span class=\"w\"> </span><span class=\"n\">nightly</span><span class=\"o\">-</span><span class=\"mi\">2021</span><span class=\"o\">-</span><span class=\"mi\">11</span><span class=\"o\">-</span><span class=\"mi\">01</span><span class=\"o\">-</span><span class=\"n\">x86_64</span><span class=\"o\">-</span><span class=\"n\">unknown</span><span class=\"o\">-</span><span class=\"n\">linux</span><span class=\"o\">-</span><span class=\"n\">gnu</span><span class=\"w\"> </span><span class=\"n\">cargo</span><span class=\"w\"> </span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">features</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"w\"> </span><span class=\"n\">with_recreate_instance</span><span class=\"w\"></span>\n\n#<span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">recreate_instance</span><span class=\"err\">`</span><span class=\"w\"></span>\n<span class=\"n\">FORCE_WASMTIME_INSTANCE_POOLING</span><span class=\"o\">=</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"n\">rustup</span><span class=\"w\"> </span><span class=\"n\">run</span><span class=\"w\"> </span><span class=\"n\">nightly</span><span class=\"o\">-</span><span class=\"mi\">2021</span><span class=\"o\">-</span><span class=\"mi\">11</span><span class=\"o\">-</span><span class=\"mi\">01</span><span class=\"o\">-</span><span class=\"n\">x86_64</span><span class=\"o\">-</span><span class=\"n\">unknown</span><span class=\"o\">-</span><span class=\"n\">linux</span><span class=\"o\">-</span><span class=\"n\">gnu</span><span class=\"w\"> </span><span class=\"n\">cargo</span><span class=\"w\"> </span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">features</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"w\"> </span><span class=\"n\">with_recreate_instance</span><span class=\"w\"></span>\n\n#<span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">native_instance_reuse</span><span class=\"err\">`</span><span class=\"w\"></span>\n<span class=\"n\">rustup</span><span class=\"w\"> </span><span class=\"n\">run</span><span class=\"w\"> </span><span class=\"n\">nightly</span><span class=\"o\">-</span><span class=\"mi\">2021</span><span class=\"o\">-</span><span class=\"mi\">11</span><span class=\"o\">-</span><span class=\"mi\">01</span><span class=\"o\">-</span><span class=\"n\">x86_64</span><span class=\"o\">-</span><span class=\"n\">unknown</span><span class=\"o\">-</span><span class=\"n\">linux</span><span class=\"o\">-</span><span class=\"n\">gnu</span><span class=\"w\"> </span><span class=\"n\">cargo</span><span class=\"w\"> </span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">features</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"n\">bench</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"w\"> </span><span class=\"n\">native_instance_reuse</span><span class=\"w\"></span>\n</code></pre></div>\n<p>(The rustc version is just for reference as to what I used. Also please forgive the hacky way the benchmarks have to be launched for instance pooling; we don't intend to keep this codepath, so I quckly hacked it in only for the benchmarks.)</p>\n<p>The benchmarks were run on the following machine:</p>\n<p>AMD Threadripper 3970x (32-core)<br>\n64GB of RAM<br>\nLinux 5.14.16</p>\n<h2>Possible future work (missing features)</h2>\n<ul>\n<li>Add support for other OSes (this is Linux-only for now)</li>\n<li>Add support for imported memories (this only supports modules which do <em>not</em> import memory)</li>\n<li>Add support for taking snapshots at an arbitrary points in time (it always takes a snapshot right after instantiation)</li>\n<li>Add the ability to customize what is restored on reset (it always resets everything)</li>\n<li>Add address-space pooling to make the initial initialization faster (for cases where new modules are frequently instantiated from scratch)<br>\n</li>\n</ul>\n</blockquote>",
+        "id": 267999965,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642158762
+    },
+    {
+        "content": "<p>koute updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a> from <code>main_cow_instance_reuse</code> to <code>main</code>.</p>",
+        "id": 268000767,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642159252
+    },
+    {
+        "content": "<p>koute submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#pullrequestreview-852812214\">PR review</a>.</p>",
+        "id": 268001409,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642159658
+    },
+    {
+        "content": "<p>koute created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#discussion_r784769563\">PR review comment</a>:</p>\n<blockquote>\n<p>I'm pretty sure this is necessary for correctness, but when I comment it out nothing fails. Any idea how I could write a test which would verify that this is here?</p>\n</blockquote>",
+        "id": 268001410,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642159658
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#pullrequestreview-852812388\">PR review</a>.</p>",
+        "id": 268001425,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642159671
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#discussion_r784769672\">PR review comment</a>:</p>\n<blockquote>\n<p>This doesn't work if <code>/proc</code> isn't mounted. In addition it doesn't check <code>/proc</code> is actually a mounted procfs. Rustix has code to check if the <code>/proc</code> is sane. It doesn't seem like it is exported though.</p>\n</blockquote>",
+        "id": 268001426,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642159671
+    },
+    {
+        "content": "<p>programmerjake created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#discussion_r784957464\">PR review comment</a>:</p>\n<blockquote>\n<p>why not just pass by value?</p>\n</blockquote>",
+        "id": 268032464,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642175752
+    },
+    {
+        "content": "<p>programmerjake submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#pullrequestreview-853080661\">PR review</a>.</p>",
+        "id": 268032465,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642175752
+    },
+    {
+        "content": "<p>koute updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a> from <code>main_cow_instance_reuse</code> to <code>main</code>.</p>",
+        "id": 268245115,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642410881
+    },
+    {
+        "content": "<p>koute submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#pullrequestreview-854063121\">PR review</a>.</p>",
+        "id": 268245171,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642410935
+    },
+    {
+        "content": "<p>koute created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#discussion_r785766397\">PR review comment</a>:</p>\n<blockquote>\n<p>A remnant from before when I had a different implementation where <code>MemorySource</code> was heavier so it wasn't <code>Copy</code>.</p>\n<p>Fixed!</p>\n</blockquote>",
+        "id": 268245173,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642410935
+    },
+    {
+        "content": "<p>koute updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a> from <code>main_cow_instance_reuse</code> to <code>main</code>.</p>",
+        "id": 268247397,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642412165
+    },
+    {
+        "content": "<p>koute submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#pullrequestreview-854090303\">PR review</a>.</p>",
+        "id": 268247587,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642412279
+    },
+    {
+        "content": "<p>koute created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691#discussion_r785785859\">PR review comment</a>:</p>\n<blockquote>\n<p>Good point.</p>\n<p>I've made a PR to <code>rustix</code> here to export it: <a href=\"https://github.com/bytecodealliance/rustix/pull/174\">https://github.com/bytecodealliance/rustix/pull/174</a></p>\n</blockquote>",
+        "id": 268247588,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642412279
+    },
+    {
+        "content": "<p>koute updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a> from <code>main_cow_instance_reuse</code> to <code>main</code>.</p>",
+        "id": 268254308,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642416591
+    },
+    {
+        "content": "<p>koute updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a> from <code>main_cow_instance_reuse</code> to <code>main</code>.</p>",
+        "id": 268258243,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642418971
+    },
+    {
+        "content": "<p>koute updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a> from <code>main_cow_instance_reuse</code> to <code>main</code>.</p>",
+        "id": 268261014,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642420736
+    },
+    {
+        "content": "<p>koute updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a> from <code>main_cow_instance_reuse</code> to <code>main</code>.</p>",
+        "id": 268379476,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1642506787
+    },
+    {
+        "content": "<p>koute closed without merge <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">PR #3691</a>.</p>",
+        "id": 272926694,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1645610435
+    }
+]

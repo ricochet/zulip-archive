@@ -1,0 +1,122 @@
+[
+    {
+        "content": "<p>I am caching (instance, store) tuple. I want to minimize my allocation as much as possible. So for every wasm exported function call, I preallocate a large chunk of memory and any time host wants to send the data to module, this chunk is used. I am thinking of extending this for the lifetime of the instance, is it possible to do so ? My question is if while caching I allocate memory and store it's pointer, will the allocated memory be valid across subsequent wasm function calls if I use the same instance and store ?</p>",
+        "id": 484798092,
+        "sender_full_name": "spino17",
+        "timestamp": 1732741093
+    },
+    {
+        "content": "<p>That sounds like a possible ABI. It's completely up to you to decide how your host code and your guest code cooperate -- if they both agree to use a single long-lived buffer to exchange data, that's fine.</p>\n<p>Note that if the Wasm memory grows, the <em>host</em>-side address (the actual native address in the process) may change. So you would want to keep around the Wasm/guest-side address and access guest memory via the safe Rust APIs when needed.</p>",
+        "id": 484799476,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1732741769
+    },
+    {
+        "content": "<p>Thanks <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> for the response. My only doubt after reading the above message is how will new allocators inside WASM module know about the already allocated memory from the previous runs ? each run of exported wasm function I assume would setup up new allocator right ?</p>",
+        "id": 484802058,
+        "sender_full_name": "spino17",
+        "timestamp": 1732742951
+    },
+    {
+        "content": "<p>It's hard to really say more -- this design is up to you. You've specified that you'll pre-allocate guest memory -- presumably by calling a function in the guest? Maybe you want to pass a pointer to that same buffer each time you call the guest, then, I'm not sure. Or perhaps you could use global state in the guest.</p>\n<p>The distinction I'm trying to draw is that this is purely a contract issue between your code (host side) and your code (guest side); Wasmtime doesn't care how you allocate guest memory; so you can invent whatever convention you want. E.g. \"each run ... would setup new allocator right?\" is a question we can't answer, because you're asking us what <em>your</em> code is doing. You can make it do whatever you want!</p>\n<p>If you have questions about specific existing guest language runtimes and how they might interact with all this, we can try to help. With wasi-libc for example, you probably want to call the guest's <code>malloc</code>, then keep that pointer around and reuse it by passing it into each call.</p>",
+        "id": 484802872,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1732743388
+    },
+    {
+        "content": "<p>ohh okay, I understand what you saying <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> . My bad, to clarify the guest language is Rust and the target is wasm32-unknown-unknown I am compiling it to and I am exporting a function called __new which allocates a manuallydrop Vec&lt;u8&gt; and I pass ptr to it around while making allocations to pass data from host to guest</p>",
+        "id": 484803675,
+        "sender_full_name": "spino17",
+        "timestamp": 1732743859
+    },
+    {
+        "content": "<p>so specifically my question would be then, whether this ptr would be valid and pointing to the same allocated buffer when I execute subsequent WASM functions using the same instance and store ?</p>",
+        "id": 484803768,
+        "sender_full_name": "spino17",
+        "timestamp": 1732743923
+    },
+    {
+        "content": "<p>Gotcha -- yes, the <em>Wasm</em> pointer will continue to be valid as long as the instance is alive. Note this is an offset into the Wasm heap. The <em>host-side</em> pointer that corresponds to where that data is stored in the host process may change, because the storage location of the Wasm heap may move when we resize it. But you can always use the Wasm pointer together with the Store and Memory to get at the current contents.</p>\n<p>So to summarize: store the <code>Instance</code>, <code>Store</code>, and a <code>u32</code> corresponding to the Wasm address. Hopefully that makes sense?</p>",
+        "id": 484805175,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1732744685
+    },
+    {
+        "content": "<p>If you don't need this buffer to be resizeable (and note that if you <em>do</em> resize it, the old pointer may become invalid), consider using <code>Box&lt;[u8]&gt;</code>, plus <a href=\"https://doc.rust-lang.org/std/boxed/struct.Box.html#method.into_raw\">Box::into_raw</a> to turn it into a raw pointer you can pass to the host.  That pointer should remain valid until the guest uses <a href=\"https://doc.rust-lang.org/std/boxed/struct.Box.html#method.from_raw\">Box::from_raw</a> to reclaim (and possibly drop) it.</p>\n<p>Or even just use <a href=\"https://doc.rust-lang.org/std/alloc/fn.alloc.html\">alloc</a> directly if you only ever plan to access the buffer via the raw pointer.</p>",
+        "id": 484806324,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1732745215
+    },
+    {
+        "content": "<p>ohh much thanks <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> for clearing this up! I guess the allocator and globals of the guest binary would belong to the Instance I presume that's why it remembers the allocated memory in subsequent exported function calls ?</p>",
+        "id": 484843482,
+        "sender_full_name": "spino17",
+        "timestamp": 1732771690
+    },
+    {
+        "content": "<p>thanks <span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> for this detail. I should definitely put a check and evict the stored offset when memory resizes! If I understand it correct the function is  </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">memory</span><span class=\"p\">.</span><span class=\"n\">grow</span><span class=\"p\">(</span><span class=\"n\">caller</span><span class=\"p\">.</span><span class=\"n\">as_context_mut</span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">num_pages</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">u64</span><span class=\"p\">)</span>\n</code></pre></div>\n<p>right ? This is the only way memory might resize correct ?</p>",
+        "id": 484843708,
+        "sender_full_name": "spino17",
+        "timestamp": 1732771851
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"750586\">spino17</span> <a href=\"#narrow/channel/217126-wasmtime/topic/Preallocation.20of.20memory.20across.20instance.20life/near/484843482\">said</a>:</p>\n<blockquote>\n<p>ohh much thanks @Chris Fallin for clearing this up! I guess the allocator and globals of the guest binary would belong to the Instance I presume that's why it remembers the allocated memory in subsequent exported function calls ?</p>\n</blockquote>\n<p>Basically yeah -- to make it more precise, a <code>malloc</code>-like allocator typically keeps its state in global variables (in the C/Rust sense) which for a Wasm target are compiled to accesses to specific addresses in the Wasm heap, and in data structures pointed to from those variables. So malloc's \"next block to allocate from\" data might be a <code>Block*</code> at some arbitrary Wasm address <code>0x1020</code> or something like that. As long as the instance exists, the data in the heap remains there; so when you next call into the guest, it has the same <code>malloc</code> state.</p>\n<blockquote>\n<p><code>\nmemory.grow(caller.as_context_mut(), num_pages as u64)\n</code></p>\n<p>right ? This is the only way memory might resize correct ?</p>\n</blockquote>\n<p>The main way memory will grow is usually by action of the guest -- the <code>memory.grow</code> Wasm opcode grows the heap. A malloc implementation will use this under the hood to grow memory as more is needed.</p>",
+        "id": 484975750,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1732821345
+    },
+    {
+        "content": "<p>so <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> if guest resize the memory then my stored offset might get invalid and I have no way to know it ?</p>",
+        "id": 484976374,
+        "sender_full_name": "spino17",
+        "timestamp": 1732821717
+    },
+    {
+        "content": "<p>The \"offset\" (offset into heap, Wasm pointer) is still valid; the <em>host-side</em> pointer may not be. This bit from my earlier message above is hopefully useful:</p>\n<blockquote>\n<p>the <em>Wasm</em> pointer will continue to be valid as long as the instance is alive. Note this is an offset into the Wasm heap. The <em>host-side</em> pointer that corresponds to where that data is stored in the host process may change, because the storage location of the Wasm heap may move when we resize it. But you can always use the Wasm pointer together with the Store and Memory to get at the current contents.</p>\n</blockquote>",
+        "id": 484977021,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1732822096
+    },
+    {
+        "content": "<p>ahh ohh okay, got it! yeah I get this offset by calling a wasm exported function called __new which allocates a manually drop Vec&lt;u8&gt; and returns it's pointer and this is the pointer I am storing along with instance and store so I believe this will still be valid</p>",
+        "id": 484977146,
+        "sender_full_name": "spino17",
+        "timestamp": 1732822198
+    },
+    {
+        "content": "<p>Yes. The key bit to realize is that the two sides (host and guest) have different notions of \"pointer\". To the code inside the Wasm module, the \"offset into the heap\" <em>is</em> the pointer: this <code>u32</code> is what Rust or C pass around as actual memory addresses. It's only outside the Wasm module, in the host code, that you see it as an \"offset\". Wasm pointers (offsets) are as stable as the guest's memory allocation code defines them to be.</p>",
+        "id": 484978152,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1732822752
+    },
+    {
+        "content": "<p>so this means that if I use Wasm pointers (offsets) to index into MemoryView at any point of time before or after resize, it will be pointing to the same expected memory buffer ?</p>",
+        "id": 484978305,
+        "sender_full_name": "spino17",
+        "timestamp": 1732822850
+    },
+    {
+        "content": "<p>given I use only save APIs available</p>",
+        "id": 484978337,
+        "sender_full_name": "spino17",
+        "timestamp": 1732822869
+    },
+    {
+        "content": "<p>Yes, exactly</p>",
+        "id": 484978364,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1732822901
+    },
+    {
+        "content": "<p>ahh this makes the whole picture clear about this and Wasmtime in general ! much thanks <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> for keeping up the patience to answer these queries, really you have helped me avoiding weeks of head-scratching. Much appreciated and thanks again :)</p>",
+        "id": 484978555,
+        "sender_full_name": "spino17",
+        "timestamp": 1732823030
+    },
+    {
+        "content": "<p>No problem, best of luck!</p>",
+        "id": 484978868,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1732823228
+    }
+]

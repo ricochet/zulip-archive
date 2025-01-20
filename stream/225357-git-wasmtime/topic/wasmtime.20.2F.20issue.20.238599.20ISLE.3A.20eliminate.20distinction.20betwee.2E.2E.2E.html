@@ -1,0 +1,111 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #8599 ISLE: eliminate distinction betwee... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238599.20ISLE.3A.20eliminate.20distinction.20betwee.2E.2E.2E.html">wasmtime / issue #8599 ISLE: eliminate distinction betwee...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="438145641"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238599%20ISLE%3A%20eliminate%20distinction%20betwee.../near/438145641" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238599.20ISLE.3A.20eliminate.20distinction.20betwee.2E.2E.2E.html#438145641">(May 12 2024 at 01:02)</a>:</h4>
+<p>jameysharp opened <a href="https://github.com/bytecodealliance/wasmtime/issues/8599">issue #8599</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>ISLE terms should just be functions, from any number of arguments to any number of results. Internal terms should all be defined using <code>rule</code>. Terms with exactly one argument can be used in pattern matches like extractors are today; all terms can be used on the right-hand side of a rule or if-let, like constructors are today. Possibly a form of type-directed overloading should be added to the language to allow the current pattern of using the same term name for both constructor and extractor.</p>
+<h4>Benefit</h4>
+<ul>
+<li>Simplify the trie-again and serialized representations of ISLE rules. The current distinction between constructor and extractor makes no difference to code generation.</li>
+<li>Using <code>rule</code> to define "extractors" allows a form of "or-patterns" (#6128), without requiring us to figure out how priorities should interact when these patterns are inlined as internal extractors are today.</li>
+</ul>
+<h4>Implementation</h4>
+<p>I'd start by unifying constructors and extractors in the trie-again representation and ensuring that the generated code doesn't change.</p>
+<p>Then maybe introduce something like <code>(overload iadd extract_iadd construct_iadd)</code> to declare that when the term <code>iadd</code> is used, whichever of <code>extract_iadd</code> or <code>construct_iadd</code> has the right type for that context should be used instead. I'm less sure about this.</p>
+<p>Next, extend constructor terms to allow multiple results. A pattern binding the result of such a term needs some extra syntactic care to handle tuples. Semantically, though, we can approximate this today by wrapping up multiple results in an enum with a single variant, so I think we should just make the language support it directly.</p>
+<p>Finally, remove the restriction that patterns can only use extractors and expressions can only use constructors, and replace <code>(extractor ...)</code> with <code>(rule ...)</code>. Optionally, we could add an <code>inline</code> flag on terms and use it for all current extractors to ensure we still generate the same code, since internal extractors are currently inlined automatically. It is difficult to define inlining for all current combinations of ISLE features, though.</p>
+<h4>Alternatives</h4>
+<p>There are so many alternatives. Let's talk about it…</p>
+</blockquote>
+
+
+
+<a name="438147874"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238599%20ISLE%3A%20eliminate%20distinction%20betwee.../near/438147874" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238599.20ISLE.3A.20eliminate.20distinction.20betwee.2E.2E.2E.html#438147874">(May 12 2024 at 01:43)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/8599#issuecomment-2106084294">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8599">issue #8599</a>:</p>
+<blockquote>
+<p>I definitely think this would be a welcome change! As you know I've been saying similar things for a while; my take is that extractors can be lowered somehow to a sugar on constructors and if-lets, now that we have them. This kind of fulfills the original dream (that I had had, anyway!) of a simple core Prolog-like semantics of matching steps in the backtracking phase (originally LHS) prior to committing.</p>
+<p>My take on a core calculus would be:</p>
+<ul>
+<li>Rewrite any mention of a term in the LHS into a dual (that can be specified) that flips args and returns -- "apply" to "unapply".</li>
+<li>Turn this application into an if-let clause.</li>
+<li>Build surface syntax-level desugaring of the <code>extractor</code> definition form into a definition of an ordinary rule and the "dual" declaration.</li>
+</ul>
+<p>Then we can accept the existing language as-is; and as a next step, devise additional surface syntax for or-patterns and other things as needed.</p>
+<p>Concretely I imagine the existing surface syntax example (slight liberties assumed in unifying inst-helper signatures to include <code>ty</code> everywhere)</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">inst_data</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData</span><span class="p">)</span><span class="w"> </span><span class="nv">Inst</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extern</span><span class="w"> </span><span class="nv">extractor</span><span class="w"> </span><span class="nv">inst_data</span><span class="w"> </span><span class="nv">inst_data</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">iadd</span><span class="w"> </span><span class="p">(</span><span class="nv">Type</span><span class="w"> </span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span><span class="w"> </span><span class="nv">Inst</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span><span class="w"> </span><span class="p">(</span><span class="nv">iadd</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.BinaryOp</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Iadd</span><span class="p">)</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)))</span>
+
+<span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">lower</span><span class="w"> </span><span class="p">(</span><span class="nv">iadd</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+<span class="w">  </span><span class="p">(</span><span class="nv">do_the_isa_thing</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+</code></pre></div>
+<p>would desugar into core syntax something like:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">inst_data</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData</span><span class="p">)</span><span class="w"> </span><span class="nv">Inst</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">inst_data_dual</span><span class="w"> </span><span class="p">(</span><span class="nv">Inst</span><span class="p">)</span><span class="w"> </span><span class="nv">InstructionData</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">dual</span><span class="w"> </span><span class="nv">inst_data</span><span class="w"> </span><span class="nv">inst_data_dual</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extern</span><span class="w"> </span><span class="nv">inst_data_dual</span><span class="w"> </span><span class="nv">inst_data</span><span class="p">)</span><span class="w">  </span><span class="c1">;; note that extern no longer specifies etor/ctor</span>
+<span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">iadd</span><span class="w"> </span><span class="p">(</span><span class="nv">Type</span><span class="w"> </span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span><span class="w"> </span><span class="nv">Inst</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">iadd_dual</span><span class="w"> </span><span class="p">(</span><span class="nv">Inst</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">Type</span><span class="w"> </span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">dual</span><span class="w"> </span><span class="nv">iadd</span><span class="w"> </span><span class="nv">iadd_dual</span><span class="p">)</span>
+
+<span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">iadd_dual</span><span class="w"> </span><span class="nv">inst</span><span class="p">)</span><span class="w">  </span><span class="c1">;; all rules have simple bindings only in argument positions</span>
+<span class="w">  </span><span class="p">(</span><span class="nv">if-let</span><span class="w"> </span><span class="nv">instdata</span><span class="w"> </span><span class="p">(</span><span class="nv">inst_data_dual</span><span class="w"> </span><span class="nv">inst</span><span class="p">))</span><span class="w"> </span><span class="c1">;; inst_data_dual used here because original pattern used `inst_data` and in etor position we rewrite by looking up the dual</span>
+<span class="w">  </span><span class="p">(</span><span class="nv">if-let</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.BinaryOp</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Iadd</span><span class="p">)</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="nv">instdata</span><span class="p">)</span>
+<span class="w">  </span><span class="p">(</span><span class="nv">tuple</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+
+<span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">lower</span><span class="w"> </span><span class="nv">inst</span><span class="p">)</span>
+<span class="w">  </span><span class="p">(</span><span class="nv">if-let</span><span class="w"> </span><span class="p">(</span><span class="nv">tuple</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">iadd_dual</span><span class="w"> </span><span class="nv">inst</span><span class="p">))</span>
+<span class="w">  </span><span class="p">(</span><span class="nv">do_the_isa_thing</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+</code></pre></div>
+<p>It looks a little verbose but it has really nice properties: simple args only on toplevel rules; only "structural destructuring" (as it were?) of tuples and true enums in left-hand sides of if-lets; all invocations to other rules that can fail in right-hand sides of if-lets; and after the prelude of if-lets, a sequence of constructor calls as normal. And finally and most importantly: <em>all</em> forms in a rule that are invocations are invocations to a "constructor", so we can stop calling them that and just call them terms :-)</p>
+<p>(To be maximally clear, I see my sketch here as adding onto your points above; strong +1 to tuple-returns, and the implementation details in the trie-again IR; this is mostly sketching my ideas in the place where you noted "less sure about [<code>overload</code>]".)</p>
+</blockquote>
+
+
+
+<a name="438209292"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238599%20ISLE%3A%20eliminate%20distinction%20betwee.../near/438209292" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238599.20ISLE.3A.20eliminate.20distinction.20betwee.2E.2E.2E.html#438209292">(May 12 2024 at 20:14)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/8599#issuecomment-2106362881">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8599">issue #8599</a>:</p>
+<blockquote>
+<p>Ah, you're filling in two things I was unsure of: term overloading and a syntax for terms with multiple return values.</p>
+<p>Regarding <code>dual</code>, that works for me. I gather it's purely syntactic: If a term is used in a pattern, then its dual is looked up instead. I find some appeal in type-directed overloading instead of syntax-directed, especially in conjunction with the existing support for implicit conversions, but this does the job and I can run with it.</p>
+<p>I'd like to tweak it a little bit though: If a term currently has only an extractor, like <code>inst_data</code> or the lowering version of <code>iadd</code>, then I don't want to have a <code>dual</code> declaration for it. I think we can just allow terms that have only one parameter to be used in patterns. If a <code>dual</code> declaration exists for that term, then rewrite to it, but otherwise use the original term itself. Then the main sugar here is that rewriting an extractor-only term into the core version of <code>decl</code> has the parameters swapped with the results.</p>
+<p>I think the "core" form should be a subset of the full language, so that we can use it directly when we want to. That might mean picking a different name for the core version of <code>decl</code> so the existing version's syntax can coexist with it. (Bikeshedding the name: how about <code>term</code> instead of <code>decl</code>?) We might choose to incrementally migrate existing ISLE source to parts of the core syntax; I'd certainly find <code>term</code>/<code>dual</code> less confusing than the current syntax for extractors, which always feel "backwards" to me.</p>
+<p>As for tuple syntax: I had noticed that we need some sort of special form for matching tuples, like your suggested <code>(tuple ...)</code>. I like your suggestion better than my idea, which was that you'd use the term name again: <code>(if-let (iadd_dual ty x y) (iadd_dual inst))</code>. And syntactically I was thinking we could get away without a special form for constructing tuples, because we could allow multiple expressions on the right-hand side of a rule, but I like the consistency of your approach. In particular, explicitly constructing a tuple as an expression means it can be on the right-hand side of a <code>let</code> expression, and that allows us to use the same impure binding in multiple tuple fields, which we could not do with <code>if-let</code>.</p>
+<p>Also while we're at it I'd like to make our <code>Unit</code> type and <code>unit</code> external constructor into simply 0-tuples, <code>()</code> and <code>(tuple)</code> respectively.</p>
+<p>I'm intrigued that you want the core syntax to prohibit function calls in patterns. We have to do that internally when building up the "serialized" representation just before generating Rust source, but the "trie-again" representation doesn't make that distinction, and it's not too hard to build that representation from our current surface syntax. So I'm not sure what that restriction on the core syntax would buy us.</p>
+<p>By the way, we absolutely need some kind of inlining for some "extractor" terms or our pattern-matching efficiency will be completely shot. We have to be able to see that <code>iadd</code> and <code>imul</code> both match different enum variants on the result of the same <code>inst_data</code> call or we'll test all variants in some sequence on every instruction. We might gain something by inlining some existing constructors that are used in <code>if-let</code> right now too.</p>
+<p>To summarize, I think a reasonable synthesis of our proposals is:</p>
+<ul>
+<li>Add <code>(tuple ...)</code> syntax in both expressions and patterns, and allow the result type in <code>decl</code> to be a tuple type, though such terms can't declare either internal or external extractors.</li>
+<li>Add <code>term</code> declarations, which are like <code>decl</code> but only support "constructors". When <code>extern</code> is used with <code>term</code>, it does not support any flags, which have equivalents specified on the <code>term</code> instead, or the <code>constructor</code>/<code>extractor</code> keywords. Allow <code>term</code> declarations to be used in patterns if they have exactly one parameter.</li>
+<li>Add an <code>inline</code> flag to <code>term</code>. Not all terms can be inlined right now; we'll have to figure out the exact rules for when we want to allow this flag. As an alternative, we could add a <code>pub</code> flag indicating that a term is meant to be called externally, or just a <code>noinline</code> flag, and for everything else, inline anything we can. Or something in between?</li>
+<li>Add <code>dual</code> declarations; if a pattern uses a term that has a <code>dual</code> declaration then invoke the associated dual term instead. Otherwise if the term was declared with <code>decl</code> then use its extractor, or if it was declared with <code>term</code> then just use it.</li>
+<li>Turn <code>decl</code>, <code>extractor</code>, and <code>extern constructor/extractor</code> into syntactic sugar for various combinations of <code>term</code>, <code>dual</code>, <code>extern</code>, and <code>rule</code>. Or perhaps just rewrite these at the source level and delete support for them.</li>
+</ul>
+<p>Introducing <code>term</code> alone would allow us to convert a variety of simple extractor predicates from Rust to ISLE; more if we also add <code>tuple</code>. Adding <code>inline</code> as well and implementing it when constructing the trie-again representation would be semantically visible because it would make the overlap check more precise and allow us to remove a bunch of rule priorities. Lots of incremental benefits from doing different parts of this work.</p>
+</blockquote>
+
+
+
+<a name="438215914"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238599%20ISLE%3A%20eliminate%20distinction%20betwee.../near/438215914" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238599.20ISLE.3A.20eliminate.20distinction.20betwee.2E.2E.2E.html#438215914">(May 12 2024 at 22:13)</a>:</h4>
+<p><a href="https://github.com/jameysharp">jameysharp</a> added the isle label to <a href="https://github.com/bytecodealliance/wasmtime/issues/8599">Issue #8599</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

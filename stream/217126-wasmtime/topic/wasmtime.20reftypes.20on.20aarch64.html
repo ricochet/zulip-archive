@@ -1,0 +1,247 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime reftypes on aarch64 · wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/index.html">wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html">wasmtime reftypes on aarch64</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="204113997"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204113997" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204113997">(Jul 16 2020 at 17:14)</a>:</h4>
+<p><span class="user-mention" data-user-id="253990">@fitzgen (he/him)</span> , with the regalloc update (PR #2034), the enable-gc-tests-on-aarch64 PR <em>almost</em> passes, except for <code>gc_during_gc_from_many_table_gets</code>; the debug spew seems to indicate that it's not finding the stack canary</p>
+
+
+
+<a name="204114170"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204114170" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204114170">(Jul 16 2020 at 17:15)</a>:</h4>
+<p>I'm thinking this may be an issue with the way that stackframes work on aarch64; in particular, the FP tuple may be at the <em>bottom</em> of an activation record rather than the top (i.e., we don't have the equivalent of <code>push rbp / mov rbp, rsp</code> at the top of every function like x86 does) so we may not actually step over the canary</p>
+
+
+
+<a name="204114243"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204114243" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204114243">(Jul 16 2020 at 17:15)</a>:</h4>
+<p>thoughts? it's totally possible I'm missing the intended functionality here</p>
+
+
+
+<a name="204114458"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204114458" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204114458">(Jul 16 2020 at 17:17)</a>:</h4>
+<p>Here's some debug spew (with my local addition for the backtrace loop):</p>
+<div class="codehilite"><pre><span></span><code>[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] start GC
+[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] stack_canary = 4001586718
+[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 400027b2e0 sp 4001586190
+[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 40002763c0 sp 40015861f0
+[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 4000275c34 sp 40015862c0
+[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 400026a214 sp 40015862f0
+[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] backtrace: pc 40cc61e134 sp 4001586320
+[2020-07-16T17:08:59Z WARN  wasmtime_runtime::externref] did not find stack canary; skipping GC sweep
+[2020-07-16T17:08:59Z DEBUG wasmtime_runtime::externref] end GC
+</code></pre></div>
+
+
+
+<a name="204114642"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204114642" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204114642">(Jul 16 2020 at 17:19)</a>:</h4>
+<p>context: the point of the stack canary is to ensure that we've walked every Wasm frame. If we didn't walk every Wasm frame, then when we sweep, we might reclaim objects that are still in use, leading to use-after-free. If we don't observe the stack canary, then we skip the sweep to avoid these issues</p>
+
+
+
+<a name="204114739"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204114739" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204114739">(Jul 16 2020 at 17:19)</a>:</h4>
+<p>it's expected that (if all the frame management is working right) whenever we're in Wasm code, we should reach the canary, right?</p>
+
+
+
+<a name="204114855"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204114855" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204114855">(Jul 16 2020 at 17:20)</a>:</h4>
+<p>yes, this is a workaround for .NET always emitting windows stack unwind info, even on linux/macos, and libunwind doesn't know how to handle that info, so it fails to keep walking</p>
+
+
+
+<a name="204114929"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204114929" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204114929">(Jul 16 2020 at 17:21)</a>:</h4>
+<p>so if someone calls into wasm, which calls into .NET, and then a GC is triggered, we miss all the frames older than the .NET frames</p>
+
+
+
+<a name="204114945"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204114945" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204114945">(Jul 16 2020 at 17:21)</a>:</h4>
+<p>I see, OK</p>
+
+
+
+<a name="204115004"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115004" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115004">(Jul 16 2020 at 17:22)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="254389">Chris Fallin</span> <a href="#narrow/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64/near/204114170">said</a>:</p>
+<blockquote>
+<p>I'm thinking this may be an issue with the way that stackframes work on aarch64; in particular, the FP tuple may be at the <em>bottom</em> of an activation record rather than the top (i.e., we don't have the equivalent of <code>push rbp / mov rbp, rsp</code> at the top of every function like x86 does) so we may not actually step over the canary</p>
+</blockquote>
+<p>can you explain a little more here? I'm not sure I follow</p>
+
+
+
+<a name="204115076"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115076" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115076">(Jul 16 2020 at 17:23)</a>:</h4>
+<p>So basically, as far as I understand, <code>backtrace</code> should walk the stack by following the linked-list from <code>fp</code> (the frame pointer register); each entry has <code>fp</code> at offset 0 and <code>lr</code> (return address link register) at offset 8</p>
+
+
+
+<a name="204115146"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115146" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115146">(Jul 16 2020 at 17:23)</a>:</h4>
+<p>On aarch64, the stack management is somewhat flexible</p>
+
+
+
+<a name="204115190"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115190" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115190">(Jul 16 2020 at 17:24)</a>:</h4>
+<p>So some compilers (e.g. I just disassembled <code>/bin/ls</code> on our aarch64 box and found an example) allocate stack storage <em>above</em> this record</p>
+
+
+
+<a name="204115266"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115266" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115266">(Jul 16 2020 at 17:24)</a>:</h4>
+<p>On x86 it'd be the equivalent of <code>sub rsp, $MY_LOCALS_SIZE / push rbp / mov rbp, rsp</code></p>
+
+
+
+<a name="204115325"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115325" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115325">(Jul 16 2020 at 17:25)</a>:</h4>
+<p>So if one is hoping that the two <code>fp</code> values (which I assume is what <code>backtrace</code> returns for the "stack pointer"?) land on either side of some local stack storage, this might not happen if the very topmost frame is where it lives</p>
+
+
+
+<a name="204115390"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115390" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115390">(Jul 16 2020 at 17:25)</a>:</h4>
+<p>(What's not clear to me is whether the canary is in the very topmost frame: the unittest framework should call the <code>#[test]</code> function from somewhere else; but maybe the Rust code is compiled without frame pointers?)</p>
+
+
+
+<a name="204115478"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115478" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115478">(Jul 16 2020 at 17:26)</a>:</h4>
+<p>the canary is not in the topmost frame, but in the youngest frame before we enter the oldest wasm frame</p>
+
+
+
+<a name="204115504"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115504" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115504">(Jul 16 2020 at 17:26)</a>:</h4>
+<p>Hmm, OK, so perhaps the problem is just that the backtrace walk stops prematurely</p>
+
+
+
+<a name="204115551"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115551" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115551">(Jul 16 2020 at 17:27)</a>:</h4>
+<p>there could be older frames than the frame containing the canary, but they would all be non-wasm frames</p>
+
+
+
+<a name="204115594"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115594" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115594">(Jul 16 2020 at 17:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="254389">Chris Fallin</span> <a href="#narrow/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64/near/204115504">said</a>:</p>
+<blockquote>
+<p>Hmm, OK, so perhaps the problem is just that the backtrace walk stops prematurely</p>
+</blockquote>
+<p>Yeah, sounds like this to me</p>
+
+
+
+<a name="204115679"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115679" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115679">(Jul 16 2020 at 17:27)</a>:</h4>
+<p>to double check: on aarch64 the stack grows down, right?</p>
+
+
+
+<a name="204115729"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115729" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115729">(Jul 16 2020 at 17:28)</a>:</h4>
+<p>The smoke-test passes now so it seems at least some of the time, this works</p>
+
+
+
+<a name="204115730"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115730" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115730">(Jul 16 2020 at 17:28)</a>:</h4>
+<p>Yes, that's right</p>
+
+
+
+<a name="204115751"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115751" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115751">(Jul 16 2020 at 17:28)</a>:</h4>
+<p>ok, good because basically all of this code assumes that :)</p>
+
+
+
+<a name="204115783"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115783" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115783">(Jul 16 2020 at 17:28)</a>:</h4>
+<p><span class="user-mention" data-user-id="254389">@Chris Fallin</span> afaik stack walking doesn't work on aarch64 b/c we don't emit unwind tables?</p>
+
+
+
+<a name="204115794"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115794" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115794">(Jul 16 2020 at 17:28)</a>:</h4>
+<p>I think all the other trap-related tests that rely on unwinding are ignored as well</p>
+
+
+
+<a name="204115802"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115802" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115802">(Jul 16 2020 at 17:28)</a>:</h4>
+<p>Oh! Does <code>backtrace</code> want those too?</p>
+
+
+
+<a name="204115817"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115817" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115817">(Jul 16 2020 at 17:29)</a>:</h4>
+<p>OK, that's a big chunk of not-happening-today then :-)</p>
+
+
+
+<a name="204115825"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115825" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115825">(Jul 16 2020 at 17:29)</a>:</h4>
+<p>yeah lol that's ok</p>
+
+
+
+<a name="204115846"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115846" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115846">(Jul 16 2020 at 17:29)</a>:</h4>
+<p>but yeah backtrace relies on libunwind which relies on dwarf unwind tables</p>
+
+
+
+<a name="204115854"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115854" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115854">(Jul 16 2020 at 17:29)</a>:</h4>
+<p>and we only emit those on x86_64 right now</p>
+
+
+
+<a name="204115859"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115859" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115859">(Jul 16 2020 at 17:29)</a>:</h4>
+<p>backtrace wraps <code>libunwind</code> which relies on DWARF/ehidx (or whatever its called)</p>
+
+
+
+<a name="204115860"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115860" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115860">(Jul 16 2020 at 17:29)</a>:</h4>
+<p>for the old backend</p>
+
+
+
+<a name="204115911"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115911" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115911">(Jul 16 2020 at 17:29)</a>:</h4>
+<p>OK cool, well, more reason to get to those soon. In any case, I'm happy we're not throwing random segfaults</p>
+
+
+
+<a name="204115925"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204115925" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204115925">(Jul 16 2020 at 17:29)</a>:</h4>
+<p>Thanks!</p>
+
+
+
+<a name="204116150"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/wasmtime%20reftypes%20on%20aarch64/near/204116150" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/wasmtime.20reftypes.20on.20aarch64.html#204116150">(Jul 16 2020 at 17:31)</a>:</h4>
+<p>/me is updating ubuntu; offline for a while</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

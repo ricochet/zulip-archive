@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>badeend opened <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>All input streams are implemented using the <code>HostInputStream</code> trait. Except files. They get special treatment. This can be seen in the definition of <code>InputStream</code>:</p>\n<p><a href=\"https://github.com/bytecodealliance/wasmtime/blob/ba864e987ef1ab87c439ca6b396264547d2425e1/crates/wasi/src/stream.rs#L165-L168\">https://github.com/bytecodealliance/wasmtime/blob/ba864e987ef1ab87c439ca6b396264547d2425e1/crates/wasi/src/stream.rs#L165-L168</a></p>\n<p>The special case was introduced to work around the fact that OS'es don't actually provide any _true_ async APIs for files. A more detailed explanation can be read in the PR that introduced this setup: <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6556\">https://github.com/bytecodealliance/wasmtime/pull/6556</a></p>\n<hr>\n<p>Currently, <code>FileInputStream::read</code> spawns the read syscall on a background thread and then immediately <code>await</code>s the newly created task. This is done to prevent blocking the executor, but from the WASM guest's point-of-view this doesn't provide any asynchronicity.</p>\n<p>My question: Instead of directly awaiting the background task, can we store the task handle in the <code>FileInputStream</code> instance and then use that handle to wait for readiness? Subsequent calls to <code>FileInputStream::read</code> then inspect the result of the previously started background task (if any). And then let <code>FileInputStream</code> implement <code>HostInputStream</code> directly and get rid of the special case.</p>\n<p>From the surface this seems like an \"obvious\" solution, but the PR above also mentions:</p>\n<blockquote>\n<p>We spent a the better part of a week trying to square this circle and this is the best we could come up to make files work</p>\n</blockquote>\n<p>which makes me suspect there's more to the story than meets the eye.</p>\n<p>@pchickey, what do you think?</p>\n</blockquote>",
+        "id": 455725413,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722536624
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2263858032\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>One major difficulty here is cancellation. All other <code>HostInputStream</code> primitives can be cancelled at any time and dropped at any time, but if a background task is spawned there's no way to cancel that if the write has actually reached the OS. Most other primitives use abort-on-drop handles around task handles but that only works because the async operations performed don't actually block so the abort process will actually abort whatever is pending. </p>\n</blockquote>",
+        "id": 455742110,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722541898
+    },
+    {
+        "content": "<p>badeend <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2265375148\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<blockquote>\n<p>One major difficulty here is cancellation</p>\n</blockquote>\n<p>Do you mean \"difficulty\" from a correctness point of view? Or from a Technical implementation / resource usage POV?</p>\n<blockquote>\n<p>there's no way to cancel that if the write has actually reached the OS.</p>\n</blockquote>\n<p>You mention \"write\", but this issue is specifically about input stream, i.e. _reads_ only. Don't know if that changes things.</p>\n<p>Is there any harm in letting the read continue in the background?<br>\n</p>\n</blockquote>",
+        "id": 455930061,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722604217
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2265533829\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>Sorry yeah my reading comprehension isn't great recently... But yes without true support for cancellation the guest can create an unbounded number of cancelled reads and the host has no way to handle that.</p>\n<p>That being said I don't fully remember the blockers for this. Things have gone back-and-forth on the design in wasmtime-wasi and requirements have additionally changed over time. If possible I agree it would be great to remove this enum, and if you're up for giving it a stab I'd recommend doing so. One possible solution to the cancelled read problem is (a) acknowledging that it will rarely come up and (b) placing a hard limit on the number of cancelled reads and refusing futher reads until the other ones are reaped. (or something like that). That may still run the risk though of not being able to bound cancelled reads across all guests (only within one guest). </p>\n<p>In any case I think it's reasonable to explore this space a bit, as the various blockers might be overcomable at this point.</p>\n</blockquote>",
+        "id": 455948608,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722609177
+    },
+    {
+        "content": "<p>badeend <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2265589674\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<blockquote>\n<p>without true support for cancellation the guest can create an unbounded number of cancelled reads and the host has no way to handle that.</p>\n</blockquote>\n<p>I guess there already is an upper bound in place: Tokio's <a href=\"https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.max_blocking_threads\"><code>max_blocking_threads</code></a>. That applies to the entire wasmtime process, though. For CLI use cases, where there is only 1 instance per process, this seems good enough. If we need a more granular limit per wasm instance, we might indeed need a thread pool per <code>WasiCtx</code>, or at the very least a counter/queue per <code>WasiCtx</code>.</p>\n<blockquote>\n<p>if you're up for giving it a stab I'd recommend doing so</p>\n</blockquote>\n<p>I'd be up for it. Just want to make sure I have the full picture before putting too much effort into it.</p>\n</blockquote>",
+        "id": 455954512,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722610617
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2265743914\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>We'd still have to worry about the unbounded-ness of the queued item to write as well. I don't think a thread pool per <code>WasiCtx</code> is viable since those are intended to be quite cheap to create/destroy.</p>\n<p>As I thought more about this though I think I remember the real reason why this is split. For normal streams we don't allow <code>read</code> to block the calling wasm thread, but for files we do. That means that one signature is <code>async</code> and the other isn't. IIRC that's a big reason for the split. We basically don't surface the ability to cancel filesystem reads at all (and writes are probably still questionable but that's a preexisting problem now). If we surfaced <code>read</code> as non-async then we would have to grapple with cancelable filesystem reads.</p>\n</blockquote>",
+        "id": 455978367,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722615832
+    },
+    {
+        "content": "<p>badeend <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2266058738\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>Okay, please don't go reaching for your pitchfork immediately, but: how about (a)synchronously joining the background task (if any) on drop? So instead of naughtily \"blocking\" the wasm guest on _every_ read, only naughtily \"block\" them in the exceptional case that the stream is dropped mid-read/write.</p>\n<p>Definitely not the prettiest solution, I know, but still... :) </p>\n<p>Fwiw, if the guest uses wasi-libc, that exceptional case should occur basically never.</p>\n</blockquote>",
+        "id": 456031633,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722628883
+    },
+    {
+        "content": "<p>badeend edited a <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2266058738\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>Okay, please don't go reaching for your pitchfork immediately, but: how about (a)synchronously joining the background task (if any) on drop? So instead of naughtily \"blocking\" the wasm guest on _every_ read like we do today, only naughtily \"block\" them in the exceptional case that the stream is dropped mid-read/write.</p>\n<p>Definitely not the prettiest solution, I know, but still... :) </p>\n<p>Fwiw, if the guest uses wasi-libc, that exceptional case should occur basically never.</p>\n</blockquote>",
+        "id": 456032050,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722629014
+    },
+    {
+        "content": "<p>badeend edited a <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2266058738\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>Okay, please don't go reaching for your pitchfork immediately, but: how about (a)synchronously joining the background task <strong>on drop</strong> (if any)? So instead of naughtily \"blocking\" the wasm guest on _every_ read like we do today, only naughtily \"block\" them in the exceptional case that the stream is dropped mid-read/write.</p>\n<p>Definitely not the prettiest solution, I know, but still... :) </p>\n<p>Fwiw, if the guest uses wasi-libc, that exceptional case should occur basically never.</p>\n</blockquote>",
+        "id": 456112773,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722666995
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2267760189\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>I think that could theoretically work from a guest perspective but from a host perspective I don't think that would work since that would block a host thread, right? For async mode it should be guaranteed that no host thread ever blocks on I/O waiting for something else for a possibly long time.</p>\n</blockquote>",
+        "id": 456398021,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722809029
+    },
+    {
+        "content": "<p>badeend <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2267810734\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>I was thinking more along the lines of adding an <code>async fn cancel(&amp;mut self)</code> method to the HostInput/OutputStream traits, and <code>await</code>ing that in the <code>WasiView</code> implementations of their respective bindings, just before actually dropping it. That way, Rust's native <code>drop</code> doesn't need to actually block any executor thread. It only _appears_ so from the guest.</p>\n</blockquote>",
+        "id": 456399795,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722810604
+    },
+    {
+        "content": "<p>pchickey <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2269952083\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>I don't have any additional context beyond what the discussion with Alex has covered, I'm definitely in favor of getting rid of the special case if you can find a design that works. We landed it because we just needed something that worked, even though the special case is kinda gross.</p>\n</blockquote>",
+        "id": 456711126,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722893390
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2270540509\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>I can't quite see how <code>async fn cancel</code> would work out but at the same time I think @badeend you've got a good grasp on the requirements here so if you'd like to explore and/or make a PR I think that might be a good next step. I can't see how <code>async fn cancel</code> would work mostly in that I don't have everything in my head at the same time, so a PR would be helpful to frame.</p>\n</blockquote>",
+        "id": 456783679,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1722928064
+    },
+    {
+        "content": "<p>badeend <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2272997320\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>What I had in mind is this: <a href=\"https://github.com/bytecodealliance/wasmtime/compare/main...badeend:wasmtime:output-stream-async-drop\">https://github.com/bytecodealliance/wasmtime/compare/main...badeend:wasmtime:output-stream-async-drop</a> but this doesn't quite work.</p>\n<p>I assumed that the <a href=\"https://github.com/badeend/wasmtime/blob/cdd5f727610aa11280e867f0a7e92d166817660f/crates/wasi/src/host/io.rs#L45\">drop</a> method was just a regular import that I could async'ify like any other by adding<br>\n<code>\"[method]output-stream.drop\"</code> to the <code>async</code> section of the bindgen config. I assumed wrong :) The drop method is a specialized component-model built-in.</p>\n<p>There appears to already be some infrastructure around async drops:<br>\n<a href=\"https://github.com/bytecodealliance/wasmtime/blob/2bf307a41118fe7185460610a13a2024d4d91fe5/crates/wasmtime/src/runtime/component/resources.rs#L978-L984\">https://github.com/bytecodealliance/wasmtime/blob/2bf307a41118fe7185460610a13a2024d4d91fe5/crates/wasmtime/src/runtime/component/resources.rs#L978-L984</a><br>\nbut I don't know if/how this is useful.</p>\n</blockquote>",
+        "id": 457058467,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723021858
+    },
+    {
+        "content": "<p>badeend <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2273187434\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>I've got something up and running: <a href=\"https://github.com/badeend/wasmtime/commit/6d8c4719bd79b8b04efbfa0c74ef2d7006df5638\">https://github.com/badeend/wasmtime/commit/6d8c4719bd79b8b04efbfa0c74ef2d7006df5638</a></p>\n<p>I added an additional <code>resource_async</code> method to the <code>component::Linker</code> which takes an async drop method.<br>\nAnd then I badly modded the wit-bindgen to generate me an <code>async fn drop(</code> method to pass into that new  <code>resource_async</code> linker method. ¯\\\\_(ツ)_/¯</p>\n</blockquote>",
+        "id": 457077971,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723027981
+    },
+    {
+        "content": "<p>badeend edited a <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2272997320\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>What I had in mind is this: <a href=\"https://github.com/bytecodealliance/wasmtime/commit/cdd5f727610aa11280e867f0a7e92d166817660f\">https://github.com/bytecodealliance/wasmtime/commit/cdd5f727610aa11280e867f0a7e92d166817660f</a> but this doesn't quite work.</p>\n<p>I assumed that the <a href=\"https://github.com/badeend/wasmtime/blob/cdd5f727610aa11280e867f0a7e92d166817660f/crates/wasi/src/host/io.rs#L45\">drop</a> method was just a regular import that I could async'ify like any other by adding<br>\n<code>\"[method]output-stream.drop\"</code> to the <code>async</code> section of the bindgen config. I assumed wrong :) The drop method is a specialized component-model built-in.</p>\n<p>There appears to already be some infrastructure around async drops:<br>\n<a href=\"https://github.com/bytecodealliance/wasmtime/blob/2bf307a41118fe7185460610a13a2024d4d91fe5/crates/wasmtime/src/runtime/component/resources.rs#L978-L984\">https://github.com/bytecodealliance/wasmtime/blob/2bf307a41118fe7185460610a13a2024d4d91fe5/crates/wasmtime/src/runtime/component/resources.rs#L978-L984</a><br>\nbut I don't know if/how this is useful.</p>\n</blockquote>",
+        "id": 457331344,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723112959
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058#issuecomment-2277240800\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>Seems plausible yeah, thanks for writing that up! I'll do a review on Monday when I get back from travelling.</p>\n</blockquote>",
+        "id": 459382956,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723185096
+    },
+    {
+        "content": "<p>alexcrichton closed <a href=\"https://github.com/bytecodealliance/wasmtime/issues/9058\">issue #9058</a>:</p>\n<blockquote>\n<p>All input streams are implemented using the <code>HostInputStream</code> trait. Except files. They get special treatment. This can be seen in the definition of <code>InputStream</code>:</p>\n<p><a href=\"https://github.com/bytecodealliance/wasmtime/blob/ba864e987ef1ab87c439ca6b396264547d2425e1/crates/wasi/src/stream.rs#L165-L168\">https://github.com/bytecodealliance/wasmtime/blob/ba864e987ef1ab87c439ca6b396264547d2425e1/crates/wasi/src/stream.rs#L165-L168</a></p>\n<p>The special case was introduced to work around the fact that OS'es don't actually provide any _true_ async APIs for files. A more detailed explanation can be read in the PR that introduced this setup: <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6556\">https://github.com/bytecodealliance/wasmtime/pull/6556</a></p>\n<hr>\n<p>Currently, <code>FileInputStream::read</code> spawns the read syscall on a background thread and then immediately <code>await</code>s the newly created task. This is done to prevent blocking the executor, but from the WASM guest's point-of-view this doesn't provide any asynchronicity.</p>\n<p>My question: Instead of directly awaiting the background task, can we store the task handle in the <code>FileInputStream</code> instance and then use that handle to wait for readiness? Subsequent calls to <code>FileInputStream::read</code> then inspect the result of the previously started background task (if any). And then let <code>FileInputStream</code> implement <code>HostInputStream</code> directly and get rid of the special case.</p>\n<p>From the surface this seems like an \"obvious\" solution, but the PR above also mentions:</p>\n<blockquote>\n<p>We spent a the better part of a week trying to square this circle and this is the best we could come up to make files work</p>\n</blockquote>\n<p>which makes me suspect there's more to the story than meets the eye.</p>\n<p>@pchickey, what do you think?</p>\n</blockquote>",
+        "id": 462643663,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1723757120
+    }
+]

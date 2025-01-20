@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>I have a working function that is generating IR. Next steps are global data, how does one handle that since it is not inside a function?<br>\nHow are structs created/passed? And then finally, how do i run the optimizations and lowering on functions?</p>\n<p>Any documentation on the above topics?</p>",
+        "id": 368311497,
+        "sender_full_name": "Chris Clark",
+        "timestamp": 1687368056
+    },
+    {
+        "content": "<p>there is the <code>cranelift-object</code> crate which is designed to help with this kind of thing, as I understand it. however, Wasmtime doesn't use that crate and does its own thing, so I don't have any experience with it. <span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> might be able to give some tips, since cg_clif uses it (as I understand).</p>\n<p><a href=\"https://docs.rs/cranelift-object/latest/cranelift_object/\">https://docs.rs/cranelift-object/latest/cranelift_object/</a></p>",
+        "id": 368328266,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1687372001
+    },
+    {
+        "content": "<p>For optimization and lowering you want to call <code>compile_and_emit</code> on a <code>Context</code>. For a fairly minimal example which also demonstrates using cranelift-object, see the implementation of the <code>clif-util compile</code> command in <code>cranelift/src/compile.rs</code>.</p>\n<p>I don't know specifically how to handle data sections beyond that Cranelift itself doesn't provide any of that; it just has <code>load</code> and <code>store</code> instructions and it's up to you to provide valid addresses to those. The same goes for heap addresses: you need to determine how to allocate heap space, but once you have a heap address Cranelift can take care of those memory accesses.</p>\n<p>Similarly, Cranelift doesn't know anything about aggregate data structures. It's up to your frontend to pick a representation, whether that's a memory layout or passing individual fields in registers. If you need to call to or be called from functions produced by another compiler, you need to match the ABI details for how that compiler passes aggregates, although Cranelift will help you with using the right registers or stack layout for individual function arguments.</p>\n<p>In short, Cranelift by itself doesn't know anything about interacting with an operating system or managing memory layouts. There's room for more helpers like cranelift-object but I don't know of anyone currently planning on building anything else that's generic like that.</p>",
+        "id": 368336164,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1687374040
+    },
+    {
+        "content": "<p>For accessing globals you did use the global_value instruction to get the address of a global. And <code>cranelift_module::Module::define_data()</code> to define the value of the global.</p>",
+        "id": 368340610,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1687375245
+    },
+    {
+        "content": "<p>I'm having a hard time visualizing this. The function compilation seems straight forward, and I imagine there is a way to parse the ir if i stored it to disk. But I'm having a hard time understand how I can make a program without the global data, I also don't see how struct access  is possible.</p>\n<p>I was also under the impression from a previous conversation that cranelift <a href=\"https://docs.rs/cranelift/0.96.0/cranelift/index.html\">https://docs.rs/cranelift/0.96.0/cranelift/index.html</a> was all I would need, and that the object/module crates were for LTO's</p>",
+        "id": 368396411,
+        "sender_full_name": "Chris Clark",
+        "timestamp": 1687398649
+    },
+    {
+        "content": "<p>Cranelift doesn't support LTO. cranelift-module is how you combine multiple functions and data objects into a single entity like an object file, but this doesn't do any optimizations between it's parts. Just linking them together.</p>",
+        "id": 368484603,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1687426092
+    },
+    {
+        "content": "<p>sorry, i just meant linking. <span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> </p>\n<p>If I need cranelift-module and cranelift-object, for creating object files, does that mean I still need llvm or a linker? I'm confused on what the whole process should look like.</p>",
+        "id": 368653405,
+        "sender_full_name": "Chris Clark",
+        "timestamp": 1687457011
+    },
+    {
+        "content": "<p>You need a linker but not LLVM. Cranelift takes the place of LLVM.</p>",
+        "id": 368658383,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1687458210
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"504918\">Jamey Sharp</span> <a href=\"#narrow/stream/217117-cranelift/topic/.2Erodata.20.2Ebss.20.2Edata.2C.20lowering.2C.20and.20structs/near/368336164\">said</a>:</p>\n<blockquote>\n<p>In short, Cranelift by itself doesn't know anything about interacting with an operating system or managing memory layouts. There's room for more helpers like cranelift-object but I don't know of anyone currently planning on building anything else that's generic like that.</p>\n</blockquote>\n<p>I guess I'm pretty glad I went with zig then, they have their own linker and layout builder for such things accessible in their std library. Might be pretty easy to tap into. I'm just curious then how others can use cranelift, without needing to understand how to manage memory layouts or build the output for operating systems. Do you have any recommendations for learning how to do this, and then where would i start to build one of these additional helper crates for operating system and memory specific building like <code>cranelift-crafter</code>incase i wanted to this.</p>",
+        "id": 369248083,
+        "sender_full_name": "Chris Clark",
+        "timestamp": 1687632771
+    },
+    {
+        "content": "<p>I'm not sure what a good beginner resource would be to learn this. I picked up most of my knowledge about linkers and object file formats while working on rustc_codegen_cranelift and adding features it needs to cranelift. <a href=\"https://maskray.me/\">https://maskray.me/</a> is the blog of one of the devs of lld and <a href=\"https://www.airs.com/blog/\">https://www.airs.com/blog/</a> is the blog of the developer of gold. Both have been quite useful for figuring out specific details.</p>\n<p>Do note however that while getting a basic linker working isn't all that hard once you know how, implementing all the features necessary to handle all the libraries you may want to use on is a lot harder. Glibc for example needs symbol versioning, C needs common linkage and weak linkage, you need COMDATA, linker relaxations for thread local storage, ... And x86 and x86_64 are the easy architectures. Many other architectures have limitations around eg not supporting absolute or relative addressing or range limits for relative addressing which the psABI for the architecture has workaround you need to implement.</p>\n<p>As for how cranelift is normally used to produce executables, that is by using cranelift-object and then passing the object files to the linker the same way you would when compiling a C project.</p>\n<p>By the way last time I checked zig still used lld rather than it's own builtin linker by default. Zld seems to only support Mach-O (macOS), Webassembly and non-PIE x86_64 ELF object files and not PIE ELF, non-x86_64 ELF and COFF/PE (Windows): <a href=\"https://github.com/kubkon/zld#supported-backends\">https://github.com/kubkon/zld#supported-backends</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/kubkon/zld#supported-backends\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/ee7418ddeef9469ef08f79d8f59c6d149f195274\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f613435643038393761663132343066313164393861343434613034366431363266646436613833643863383238303566653665623138626461363366643934382f6b75626b6f6e2f7a6c64)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/kubkon/zld#supported-backends\" title=\"GitHub - kubkon/zld: Zig's lld drop-in replacement\">GitHub - kubkon/zld: Zig's lld drop-in replacement</a></div><div class=\"message_embed_description\">Zig's lld drop-in replacement. Contribute to kubkon/zld development by creating an account on GitHub.</div></div></div>",
+        "id": 369258777,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1687637935
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/217117-cranelift/topic/.2Erodata.20.2Ebss.20.2Edata.2C.20lowering.2C.20and.20structs/near/369258777\">said</a>:</p>\n<blockquote>\n<p>I'm not sure what a good beginner resource would be to learn this. I picked up most of my knowledge about linkers and object file formats while working on rustc_codegen_cranelift and adding features it needs to cranelift. <a href=\"https://maskray.me/\">https://maskray.me/</a> is the blog of one of the devs of lld and <a href=\"https://www.airs.com/blog/\">https://www.airs.com/blog/</a> is the blog of the developer of gold. Both have been quite useful for figuring out specific details.</p>\n<p>Do note however that while getting a basic linker working isn't all that hard once you know how, implementing all the features necessary to handle all the libraries you may want to use on is a lot harder. Glibc for example needs symbol versioning, C needs common linkage and weak linkage, you need COMDATA, linker relaxations for thread local storage, ... And x86 and x86_64 are the easy architectures. Many other architectures have limitations around eg not supporting absolute or relative addressing or range limits for relative addressing which the psABI for the architecture has workaround you need to implement.</p>\n<p>As for how cranelift is normally used to produce executables, that is by using cranelift-object and then passing the object files to the linker the same way you would when compiling a C project.</p>\n<p>By the way last time I checked zig still used lld rather than it's own builtin linker by default. Zld seems to only support Mach-O (macOS), Webassembly and non-PIE x86_64 ELF object files and not PIE ELF, non-x86_64 ELF and COFF/PE (Windows): <a href=\"https://github.com/kubkon/zld#supported-backends\">https://github.com/kubkon/zld#supported-backends</a></p>\n</blockquote>\n<p>I bought the book Linkers and Loaders and skimmed through it. Old book but probably mostly relevant. I also ran through your object crate, and I'm starting to get a clear picture for how all this comes together now.  Thank you everyone. I'm not too keen on building a linker or a loader, but there are some interesting ideas I have, that makes me thinking about doing it.</p>",
+        "id": 372096502,
+        "sender_full_name": "Chris Clark",
+        "timestamp": 1688408057
+    },
+    {
+        "content": "<p>As a follow up, I still ended up doing all this in rust, and deciding to use <code>cranelift-object</code>. </p>\n<p>However, I have no time as we just had our second baby. Even before that, I had limited time, and basically paused my language for 6 months. I am making this a bucket list item, so making a Programming Language is on my long term goals list. </p>\n<p>I'm trying to re-familiarize myself with all the discussions I had around this to start toying around again my free time. </p>\n<p>And I just wanted to shout out again how awesome this community has been. Thank you everyone involved in this great place. You all have been incredibly thorough helping a nobody like me!</p>",
+        "id": 440188795,
+        "sender_full_name": "Chris Clark",
+        "timestamp": 1716414027
+    }
+]

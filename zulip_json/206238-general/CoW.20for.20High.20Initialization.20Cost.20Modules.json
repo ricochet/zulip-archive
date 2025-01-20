@@ -1,0 +1,68 @@
+[
+    {
+        "content": "<p>Hello - my team is evaluating Wasmtime for a project and came across the PoolingAllocation / CoW features. We want to see if this can be helpful for our use case. We have a Wasm module with two exported functions.  The first function is used for initial setup and is a very heavy operation which uses a large amount of memory. The second function is an extremely light operation which uses data structures set up by the first function (without modifying any of the data structures). We also want to prevent state accumulation in calls to the second function and plan to use this in a high QPS setting with multiple threads.</p>\n<p>We currently have a proof of concept built with WAMR where we run the first function and then fork from that process to run the second function. This effectively achieves our use cases (run the heavy function once and reuse the data structures without paying the copying or memory cost because of CoW). Since it's a new fork each time, we are preventing state accumulation by resetting to a good state. The negative is the overhead of process cloning.</p>\n<p>Wasmtime's  PoolingAllocation / CoW seem like a great alternative to this. A few things that I am not very clear about:<br>\nCan I use Wasmtime to execute a heavy initialization function and then have that be the basis on which each new module instance is created when using Pooling Allocation with CoW? Does that kind of granular control exist?</p>\n<p>Thank you so much!</p>",
+        "id": 489557552,
+        "sender_full_name": "Friday More",
+        "timestamp": 1734463743
+    },
+    {
+        "content": "<p>Hello! Wasmtime's pooling allocator and CoW support is around accelerating and optimizing the instantiation of a wasm module, but this doesn't modify the lifetime of the instance itself and this support isn't related to, for example, taking a snapshot of a running instance and copying it.</p>\n<p>That being said one architecture which might be able to work for you is to first run your module through <a href=\"https://github.com/bytecodealliance/wizer\">wizer</a> with the heavy function first. This produces a wasm file which is in effect a snapshot. Wasmtime can then efficiently run that second \"wizened\" file with the pooling allocator and CoW efficiently</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wizer\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/fb02ce89fe0e3dbb8315f6ce66e0d1ba1d2f4087/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f303561613232343863353262323562613361393736316161346137316238363836623861306431313735646361366538613665376465623439356639366331332f62797465636f6465616c6c69616e63652f77697a6572&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wizer\" title=\"GitHub - bytecodealliance/wizer: The WebAssembly Pre-Initializer\">GitHub - bytecodealliance/wizer: The WebAssembly Pre-Initializer</a></div><div class=\"message_embed_description\">The WebAssembly Pre-Initializer. Contribute to bytecodealliance/wizer development by creating an account on GitHub.</div></div></div>",
+        "id": 489564079,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1734466128
+    },
+    {
+        "content": "<p>That's really cool, I'll take a look at Wizer. Thank you!</p>",
+        "id": 489564313,
+        "sender_full_name": "Friday More",
+        "timestamp": 1734466218
+    },
+    {
+        "content": "<p>This may be a question for another group, but does Wizer allow input args for initialization (e.g. if I need a block of memory used in initialization)? Or do I need to enable Wasi and have the initialization method fetch it?</p>",
+        "id": 489574857,
+        "sender_full_name": "Friday More",
+        "timestamp": 1734470826
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> might be able to help with the particulars of wizer (it should be possible one way or another though)</p>",
+        "id": 489575772,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1734471245
+    },
+    {
+        "content": "<p>On phone but while the initialization function’s signature is fixed you can provide WASI access and read from disk or env vars or you can even provide a custom linker and define your own import functions that are available at init time</p>",
+        "id": 489576534,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1734471616
+    },
+    {
+        "content": "<p>Thank you</p>",
+        "id": 489580045,
+        "sender_full_name": "Friday More",
+        "timestamp": 1734473191
+    },
+    {
+        "content": "<p>Happy Monday! I had a couple follow up questions:</p>\n<ol>\n<li>I am a little confused about the CoW feature (<a href=\"https://docs.wasmtime.dev/api/wasmtime/struct.Config.html#method.memory_init_cow\">https://docs.wasmtime.dev/api/wasmtime/struct.Config.html#method.memory_init_cow</a>) and its relation to pooling allocation (<a href=\"https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html\">https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html</a>). It seems like the CoW feature is enabled by default and we can benefit from it even when using the OnDemand strategy? </li>\n<li>Suppose our application only uses a single module with multiple module instances (e.g., for serving concurrent requests), can we have a pooling allocation setup where all instances (in separate \"slots\") share the same backing memory with is CoW-ed?</li>\n</ol>\n<p>Thank you again!</p>",
+        "id": 490602424,
+        "sender_full_name": "Friday More",
+        "timestamp": 1734997561
+    },
+    {
+        "content": "<p>After some experiments, it seems like the answer to #1 is \"yes\". I am able to see a dramatic speed up when recreating memory-heavy module instances after paying the cost once. Is this something deterministic that we can rely on? Is the CoW semantics cross-thread or per-thread? Thank you</p>",
+        "id": 490845674,
+        "sender_full_name": "Friday More",
+        "timestamp": 1735197811
+    },
+    {
+        "content": "<p>For (1) yes CoW is enabled by default and is on regardless of the allocation strategy (on demand or pooling). For (2) I believe that will be achieved by having a single <code>Module</code> which you instantiate in multiple stores</p>",
+        "id": 490895932,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1735231682
+    },
+    {
+        "content": "<p>You can rely on CoW happening yes (if it's enabled) modulo some limits but if it happens once it'll always happen. I'm not sure what your question is about threading, but if it compiles in Rust then it's supposed to work</p>",
+        "id": 490895934,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1735231682
+    }
+]

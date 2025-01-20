@@ -1,0 +1,88 @@
+<html>
+<head><meta charset="utf-8"><title>register promotion in conditional branching · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/register.20promotion.20in.20conditional.20branching.html">register promotion in conditional branching</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="462795310"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/register%20promotion%20in%20conditional%20branching/near/462795310" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Adrian <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/register.20promotion.20in.20conditional.20branching.html#462795310">(Aug 16 2024 at 14:09)</a>:</h4>
+<p>Hey everyone, i'm using cranelift as the backend for a DSL i am working on. However, there are some unknowns concerning the handling of variable assignments in conditional branching and loops, that i would like to know going forward and that i cannot really find any information. Consider the following case for a manual implementation of <code>min</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="nf">min</span><span class="p">(</span><span class="n">x</span><span class="p">:</span><span class="w"> </span><span class="kt">f32</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">:</span><span class="w"> </span><span class="kt">f32</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kt">f32</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">x</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">y</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>To compile this function using cranelift, i would first create three blocks: a block for the then-case, one for the else-case and a merge block. I would then append a block parameter of type <code>ir::types::F32</code> to the merge block and pass the value of either <code>x</code> or <code>y</code> when jumping from the then- or else-block to the merge block. This case is clear. However, what would be the standard procedure for handling the assignment of external variables in these blocks? Example:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="nf">min2</span><span class="p">(</span><span class="n">x</span><span class="p">:</span><span class="w"> </span><span class="kt">f32</span><span class="p">,</span><span class="w"> </span><span class="n">y</span><span class="p">:</span><span class="w"> </span><span class="kt">f32</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kt">f32</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">x</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">res</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">y</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">res</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>In this case, the way i see it, there are two options:</p>
+<ol>
+<li>
+<p>i can figure out which variables are assigned to in the then &amp; else blocks, and append them to the block parameters of the merge block, passing the updated SSA values on the jump. Then, in the merge block, the new SSA value of each variable that gets updated in one or both of the blocks is assigned to its variable name, so that subsequent accesses to the variable use the correct value.<br>
+In other words, i kind of implement the Phi-node for the variable assignment of <code>res</code> manually through analysis of the code and block parameters. While this would definitely work and closely mimics the implementation of expressive if-else statements in the cranelift_jit demo, this will quickly get quite complex, considering that using this method one has to take into account <strong>all</strong> variable assignments in conditional branches, chained if-else statements, loops, etc.</p>
+</li>
+<li>
+<p>alternatively, i can save <code>res</code> (and all other variables for that matter) not as raw SSA values, but as stack slots. Since the location of the stack slot does not change, the assignments are then only a stack_store instruction that overwrites the previous data stored in the stack slot.</p>
+</li>
+</ol>
+<p>In LLVM, i would simply use the second option, since it is much more simple to implement and i can safely rely on LLVMs register promotion to get good performance and avoid unnecessary load and store operations. However, i cannot find much information on the optimization passes that Cranelift performs (i use the JITModule extension for code-gen and execution) and if i can rely on register promotion to get good performance with option 2. Do you have any recommendations on what the standard way of handling these kinds of things would be using Cranelift?</p>
+<p>Thanks ;)</p>
+<p>PS: once i am more comfortable with Cranelift i would be happy to compile my experience in to a refresh of the jit-demo that covers a bit more than the bare basics that are covered in that repo right now. That way, dumb questions like this one may be avoided in the future :)</p>
+
+
+
+<a name="462815735"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/register%20promotion%20in%20conditional%20branching/near/462815735" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/register.20promotion.20in.20conditional.20branching.html#462815735">(Aug 16 2024 at 16:04)</a>:</h4>
+<p>cranelift_frontend::Variable will do option (1) for you</p>
+
+
+
+<a name="462815802"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/register%20promotion%20in%20conditional%20branching/near/462815802" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/register.20promotion.20in.20conditional.20branching.html#462815802">(Aug 16 2024 at 16:04)</a>:</h4>
+<p>On phone so no links, sorry</p>
+
+
+
+<a name="462816694"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/register%20promotion%20in%20conditional%20branching/near/462816694" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Afonso Bordado <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/register.20promotion.20in.20conditional.20branching.html#462816694">(Aug 16 2024 at 16:07)</a>:</h4>
+<p>Links: <a href="https://docs.rs/cranelift-frontend/latest/cranelift_frontend/struct.Variable.html">cranelift_frontend::Variable</a></p>
+<p>See also: <a href="https://docs.rs/cranelift-frontend/latest/cranelift_frontend/struct.FunctionBuilder.html#method.declare_var">cranelift_frontend::FunctionBuilder::declare_var</a> and <code>def_var</code>/<code>use_var</code></p>
+
+
+
+<a name="463342716"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/register%20promotion%20in%20conditional%20branching/near/463342716" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Adrian <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/register.20promotion.20in.20conditional.20branching.html#463342716">(Aug 19 2024 at 08:25)</a>:</h4>
+<p>Hey, thanks guys. It's interesting to know that cranelift_frontend::Variable supports that out of the box. I have kind of moved away from this implementation of variables, since my lang supports aggregate types, with are mostly saved as stack slots internally to facilitate easy field access and reference taking, among other things. I will take a look at the implementation in cranelift_frontend and maybe get some inspiration how the variables are implemented there.</p>
+
+
+
+<a name="463789640"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/register%20promotion%20in%20conditional%20branching/near/463789640" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ivan Chinenov <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/register.20promotion.20in.20conditional.20branching.html#463789640">(Aug 20 2024 at 19:16)</a>:</h4>
+<p>As a sidenote, does cranelift have a mem2reg pass to optimize out some of stack slots?</p>
+
+
+
+<a name="463790101"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/register%20promotion%20in%20conditional%20branching/near/463790101" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/register.20promotion.20in.20conditional.20branching.html#463790101">(Aug 20 2024 at 19:19)</a>:</h4>
+<p>it has an alias analysis that can do redundant load elimination and store-to-loard forwarding. it cannot do dead-store elimination, so you'd still get some writes to the stack, even if all uses were in registers</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

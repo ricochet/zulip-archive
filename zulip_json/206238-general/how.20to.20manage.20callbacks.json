@@ -1,0 +1,164 @@
+[
+    {
+        "content": "<p>Hi everyone,</p>\n<p>I'm trying to setup a \"callback\" system to handle async computation. I was creating a variant of <span class=\"user-mention\" data-user-id=\"617931\">@Dirk Bäumer</span>'s <a href=\"https://code.visualstudio.com/blogs/2024/05/08/wasm\">calculator example</a> in which the operands can also be variables:</p>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>interface types {\n    // ...\n    variant operand {\n        integer(u32),\n        variable(string),\n    }\n    // ...\n}\n</code></pre></div>\n<p>To resolve the value of a variable requires a callback, which I setup like so:</p>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>interface types {\n    // ...\n    resource with-operand-value {\n        value: func(value: u32);\n    }\n    // ...\n}\n</code></pre></div>\n<p>in the world there is a function:</p>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>world calculator {\n    use types.{operation, with-operand-value, with-calc-result};\n        // ...\n    import resolve-variable: func(name: string, wov: with-operand-value);\n        // ...\n}\n</code></pre></div>\n<p>and in my Rust code I have a struct <a href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L56-L58\"><code>ResolveOperandFuture</code></a> that implements the <a href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L60-L65\">GuestWithOperandValue trait</a> -- the impl is pretty broken (it doesn't use the Waker) -- but that's not the question.</p>\n<p>The question is, when I try to call this, I <a href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L49\">invoke <code>resolve_variable</code> like so</a>...</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">            </span><span class=\"n\">resolve_variable</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">name</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">WithOperandValue</span><span class=\"p\">::</span><span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">future</span><span class=\"p\">.</span><span class=\"n\">clone</span><span class=\"p\">()));</span>\n</code></pre></div>\n<p>and I get an error like</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">error</span><span class=\"p\">[</span><span class=\"n\">E0599</span><span class=\"p\">]:</span><span class=\"w\"> </span><span class=\"nc\">no</span><span class=\"w\"> </span><span class=\"n\">function</span><span class=\"w\"> </span><span class=\"n\">or</span><span class=\"w\"> </span><span class=\"n\">associated</span><span class=\"w\"> </span><span class=\"n\">item</span><span class=\"w\"> </span><span class=\"n\">named</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">new</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"n\">found</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"k\">struct</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">vscode</span><span class=\"p\">::</span><span class=\"n\">example</span><span class=\"p\">::</span><span class=\"n\">types</span><span class=\"p\">::</span><span class=\"n\">WithOperandValue</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"o\">&gt;</span>\n<span class=\"w\">  </span><span class=\"o\">-</span><span class=\"p\">-&gt;</span><span class=\"w\"> </span><span class=\"nc\">src</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"p\">.</span><span class=\"n\">rs</span><span class=\"p\">:</span><span class=\"mi\">49</span><span class=\"p\">:</span><span class=\"mi\">55</span>\n</code></pre></div>\n<p>Digging more into this, it seems there are <strong>two</strong> <code>WithOperandValue</code> structs defined, one for the \"exported\" resource and one for the \"imported\" resource. </p>\n<p>How can I manage this situation?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://code.visualstudio.com/blogs/2024/05/08/wasm\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/a9bb85dafc61473ba3e902edea6bc8176eaaee20/68747470733a2f2f636f64652e76697375616c73747564696f2e636f6d2f6f70656e6772617068696d672f6f70656e67726170682d626c6f672e706e67&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://code.visualstudio.com/blogs/2024/05/08/wasm\" title=\"VS Code Extensions and WebAssembly\">VS Code Extensions and WebAssembly</a></div><div class=\"message_embed_description\">Using WebAssembly for Extension Development.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L56-L58\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/a6d684afae370502b27a982c23fbcc9c5e27351e/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f653733613335656531306164333066663231366131343633303135363266383837326230303033633165636331383332326330346438643132656137333239352f6e696b6f6d617473616b69732f7761736d2d7673636f64652d6578706572696d656e74&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L56-L58\" title=\"wasm-vscode-experiment/src/lib.rs at 4d44cb4eafaa2418d9f85501ede359e9ab48f08c · nikomatsakis/wasm-vscode-experiment\">wasm-vscode-experiment/src/lib.rs at 4d44cb4eafaa2418d9f85501ede359e9ab48f08c · nikomatsakis/wasm-vscode-experiment</a></div><div class=\"message_embed_description\">Contribute to nikomatsakis/wasm-vscode-experiment development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L60-L65\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/a6d684afae370502b27a982c23fbcc9c5e27351e/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f653733613335656531306164333066663231366131343633303135363266383837326230303033633165636331383332326330346438643132656137333239352f6e696b6f6d617473616b69732f7761736d2d7673636f64652d6578706572696d656e74&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L60-L65\" title=\"wasm-vscode-experiment/src/lib.rs at 4d44cb4eafaa2418d9f85501ede359e9ab48f08c · nikomatsakis/wasm-vscode-experiment\">wasm-vscode-experiment/src/lib.rs at 4d44cb4eafaa2418d9f85501ede359e9ab48f08c · nikomatsakis/wasm-vscode-experiment</a></div><div class=\"message_embed_description\">Contribute to nikomatsakis/wasm-vscode-experiment development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L49\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/a6d684afae370502b27a982c23fbcc9c5e27351e/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f653733613335656531306164333066663231366131343633303135363266383837326230303033633165636331383332326330346438643132656137333239352f6e696b6f6d617473616b69732f7761736d2d7673636f64652d6578706572696d656e74&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/nikomatsakis/wasm-vscode-experiment/blob/4d44cb4eafaa2418d9f85501ede359e9ab48f08c/src/lib.rs#L49\" title=\"wasm-vscode-experiment/src/lib.rs at 4d44cb4eafaa2418d9f85501ede359e9ab48f08c · nikomatsakis/wasm-vscode-experiment\">wasm-vscode-experiment/src/lib.rs at 4d44cb4eafaa2418d9f85501ede359e9ab48f08c · nikomatsakis/wasm-vscode-experiment</a></div><div class=\"message_embed_description\">Contribute to nikomatsakis/wasm-vscode-experiment development by creating an account on GitHub.</div></div></div>",
+        "id": 447469608,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492511
+    },
+    {
+        "content": "<p>Leaving aside the details of the above, the core question is...</p>\n<p><strong>Is there a way to define a resource that I implement from Rust and then pass to an imported function?</strong></p>",
+        "id": 447470168,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492680
+    },
+    {
+        "content": "<p>I'm more interested in that question then in the best way to model async callbacks (given that direct suport for async is not yet available to me), but we could discuss that  specific question in a different topic :)</p>",
+        "id": 447470341,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492723
+    },
+    {
+        "content": "<p>The tl;dr; is \"no\". An exported resource is a type that's exported and imports cannot revert to exported types</p>",
+        "id": 447470621,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719492780
+    },
+    {
+        "content": "<p>I'm trying to think through how this might be modeled</p>",
+        "id": 447470690,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719492801
+    },
+    {
+        "content": "<p>This feels like a pretty major limitation!</p>",
+        "id": 447470706,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492808
+    },
+    {
+        "content": "<p>I think you'd have to invert it to have <code>calc</code> return a resource</p>",
+        "id": 447470793,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719492835
+    },
+    {
+        "content": "<p>I was just going to say that</p>",
+        "id": 447470832,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492842
+    },
+    {
+        "content": "<p>where you'd have something like <code>step()</code> and it'd return \"no I need this variable\" and you feed it back in</p>",
+        "id": 447470876,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719492847
+    },
+    {
+        "content": "<p>I had half a mind to do that already but it felt unnatural</p>",
+        "id": 447470890,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492850
+    },
+    {
+        "content": "<p>so I was hoping there was another option</p>",
+        "id": 447470905,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492855
+    },
+    {
+        "content": "<p>OK.</p>",
+        "id": 447470921,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492860
+    },
+    {
+        "content": "<p>Due to the way resources all work out there's unfortunately not really another option</p>",
+        "id": 447470948,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719492872
+    },
+    {
+        "content": "<p>/me thinks</p>",
+        "id": 447470997,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492885
+    },
+    {
+        "content": "<p>there'd have to be a major redesign to how resources work at a fundamental level to enable imports to refer to exports</p>",
+        "id": 447471018,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719492891
+    },
+    {
+        "content": "<p>it feels like I basically wind up modeling \"poll\"</p>",
+        "id": 447471031,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492895
+    },
+    {
+        "content": "<p>right</p>",
+        "id": 447471064,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719492901
+    },
+    {
+        "content": "<p>and I have to move the \"callback management\" to the other side</p>",
+        "id": 447471100,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492909
+    },
+    {
+        "content": "<p>ok</p>",
+        "id": 447471104,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492910
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253994\">Alex Crichton</span> <a href=\"#narrow/stream/206238-general/topic/how.20to.20manage.20callbacks/near/447471018\">said</a>:</p>\n<blockquote>\n<p>there'd have to be a major redesign to how resources work at a fundamental level to enable imports to refer to exports</p>\n</blockquote>\n<p>I can sort of see why</p>",
+        "id": 447471169,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492926
+    },
+    {
+        "content": "<p>or at least, I can imagine it (not knowing the details)</p>",
+        "id": 447471199,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492934
+    },
+    {
+        "content": "<p>in particular I can see why it'd be simpler to only have the 'dependency edges' going in 1 direciton between components</p>",
+        "id": 447471262,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492954
+    },
+    {
+        "content": "<p>OK, I'll try that, thanks <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span></p>",
+        "id": 447471370,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719492973
+    },
+    {
+        "content": "<p>I think of it as a functor-like thing where every time you instantiate a component it creates brand new types for the exported types, so there's no way for the imports to refer to the future thing which will be the exported resource type</p>",
+        "id": 447471372,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719492974
+    },
+    {
+        "content": "<p>(it occurs to me I could also provide integer handles across the boundary, but now I'm straying into the topic I didn't want to discuss here)</p>",
+        "id": 447474500,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1719493836
+    },
+    {
+        "content": "<p>See also <a href=\"https://github.com/WebAssembly/component-model/issues/272\">https://github.com/WebAssembly/component-model/issues/272</a> for a discussion of why this limitation exists.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/component-model/issues/272\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/0e2efb319ede1f4b91f4f5a2ea0419b56f842e93/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f383735373339646335306634393465336130336161343935626163343366616461613862393838383365323732346132303631666439383635333139356436662f576562417373656d626c792f636f6d706f6e656e742d6d6f64656c2f6973737565732f323732&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/component-model/issues/272\" title=\"Question: Why is it not possible to refer to exported types in imports? · Issue #272 · WebAssembly/component-model\">Question: Why is it not possible to refer to exported types in imports? · Issue #272 · WebAssembly/component-model</a></div><div class=\"message_embed_description\">The Component Model does not currently allow you to refer to exported types in imports, which feels asymmetric given that one can easily refer to imported types in exports. This becomes a practical...</div></div></div>",
+        "id": 447482461,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1719496032
+    },
+    {
+        "content": "<p>+1 to the integer handles idea; I think that's the best you can do currently if you want to provide a general-purpose callback mechanism.</p>",
+        "id": 447483024,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1719496138
+    }
+]

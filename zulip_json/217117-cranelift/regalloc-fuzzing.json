@@ -1,0 +1,182 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@Nick Fitzgerald</span> I've set up fuzzing with libfuzzer and Arbitrary on our <a href=\"https://github.com/bnjbvr/regalloc.rs\" target=\"_blank\" title=\"https://github.com/bnjbvr/regalloc.rs\">WIP replacement for regalloc</a>, and I wanted to start a conversation about strategies to do this efficiently.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bnjbvr/regalloc.rs\" style=\"background-image: url(https://avatars2.githubusercontent.com/u/1180019?s=400&amp;v=4)\" target=\"_blank\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bnjbvr/regalloc.rs\" target=\"_blank\" title=\"bnjbvr/regalloc.rs\">bnjbvr/regalloc.rs</a></div><div class=\"message_embed_description\">Modular register allocator algorithms. Contribute to bnjbvr/regalloc.rs development by creating an account on GitHub.</div></div></div>",
+        "id": 188744306,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582300215
+    },
+    {
+        "content": "<p>Right now, I've implemented a validator function that checks that the given input (constructed from random data bytes) is correct, and i run this before passing the generated input to the actually-useful test oracles. With code-coverage guided fuzzing, it seems libfuzzer found the way to create some valid inputs by luck, but it seems they remain mostly identical: a function with one block only,  a few instructions in this block.</p>",
+        "id": 188744969,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582300582
+    },
+    {
+        "content": "<p>So my question is really about the best strategy i could use there: is it likely that libfuzzer may find the different allowed inputs (several blocks), or should i start to make my own generator so that i only generate valid test cases?</p>",
+        "id": 188745032,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582300623
+    },
+    {
+        "content": "<p>For the Arbitrary impl on for example Label and Block, you may want to manually implement one that creates valid Strings when the input is not utf-8. For example by reading 32bits and converting that to a base64 string. This way the fuzzer doesn't have to \"learn\" what utf-8 is.</p>",
+        "id": 188747717,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1582302193
+    },
+    {
+        "content": "<p>Another idea would be to store the name String in a side table, and use indexes everywhere instead. If you allow the side tables to be empty, you could skip them in the Arbitrary impl.</p>",
+        "id": 188747892,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1582302297
+    },
+    {
+        "content": "<p>Ah, good point, this was one of the things i wanted to ask about, as well: is there a way the Arbitrary derive trait can ignore some fields and not generate these, by having the user provide a default value instead? All the string fields in the regalloc crate definitely belong to this category.</p>\n<p>One way to emulate this would be to have a <code>FuzzFunc</code> data structures, which derives Arbitrary, and it would only contain the fields we actually want to fuzz. Then it would also implement <code>Into&lt;Func&gt;</code> and fill in all the default values, e.g. for strings and all of this.</p>",
+        "id": 188748131,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582302448
+    },
+    {
+        "content": "<p>edit: from the mentions view, I didn't get to see the whole thread, deleting this comment and then reading backlog &gt;.&lt;</p>",
+        "id": 188756354,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582307402
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> so you don't need to jump all the way to \"custom generators\" from here, you can explore doing targeted <code>impl Arbitrary for X</code> blocks by hand, for example to avoid generating irrelevant strings</p>",
+        "id": 188757189,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582307829
+    },
+    {
+        "content": "<p>is the validation pass to make sure that (for example) we only use things that have been already defined? (I'm looking at things like <code>BlockIx</code> which at first blush looks like an index that needs to be valid)</p>",
+        "id": 188757557,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582307979
+    },
+    {
+        "content": "<p>if so, then it makes sense to only have an <code>Arbitrary</code> implementation \"one level up\" at the thing that contains/defines all the valid entities/indices. we do this kind of thing in wasmtime here: <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/crates/fuzzing/src/generators/api.rs\" target=\"_blank\" title=\"https://github.com/bytecodealliance/wasmtime/blob/master/crates/fuzzing/src/generators/api.rs\">https://github.com/bytecodealliance/wasmtime/blob/master/crates/fuzzing/src/generators/api.rs</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/master/crates/fuzzing/src/generators/api.rs\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\" target=\"_blank\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/crates/fuzzing/src/generators/api.rs\" target=\"_blank\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 188757795,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582308089
+    },
+    {
+        "content": "<p>regarding ignoring some fields: no we can't currently (and we can't ever fully ignore, we would need to either use a <code>Default::default</code> implementation or some other function)</p>\n<p>I'll file an issue for this tho because I've also wanted it in the past and think it would be generally valuable</p>",
+        "id": 188757992,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582308193
+    },
+    {
+        "content": "<p>re: validation, yes, it's the same as Cranelift's verifier (checks that the IR is sane: blocks are not empty and must end with a control flow instruction, etc)</p>",
+        "id": 188758195,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582308297
+    },
+    {
+        "content": "<p>thanks for the pointers, i'll look into this early next week!</p>",
+        "id": 188758210,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582308305
+    },
+    {
+        "content": "<p>no problem! happy to help, keep me in the loop :)</p>",
+        "id": 188758262,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582308337
+    },
+    {
+        "content": "<p>hm... is there something more abstract than literal clif that the allocator can work on? like can it take in a set of constraints? might be easier to generate the constraints than actually valid clif</p>",
+        "id": 188758375,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582308393
+    },
+    {
+        "content": "<p>if doing full clif, it may prove more fruitful to have the fuzz target take in <code>String</code> and seed the corpus with a bunch of valid clif files, fwiw</p>",
+        "id": 188758474,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582308467
+    },
+    {
+        "content": "<p>worth trying at least</p>",
+        "id": 188758487,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582308479
+    },
+    {
+        "content": "<p>Here is the issue I filed for \"skipping\" fields in <code>#[derive(Arbitrary)]</code>:</p>\n<p><a href=\"https://github.com/rust-fuzz/arbitrary/issues/33\" target=\"_blank\" title=\"https://github.com/rust-fuzz/arbitrary/issues/33\">https://github.com/rust-fuzz/arbitrary/issues/33</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-fuzz/arbitrary/issues/33\" style=\"background-image: url(https://avatars1.githubusercontent.com/u/25854843?s=400&amp;v=4)\" target=\"_blank\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-fuzz/arbitrary/issues/33\" target=\"_blank\" title=\"Allow custom arbitrary methods for fields in the custom derive · Issue #33 · rust-fuzz/arbitrary\">Allow custom arbitrary methods for fields in the custom derive · Issue #33 · rust-fuzz/arbitrary</a></div><div class=\"message_embed_description\">Sometimes a field of a struct doesn&#39;t implement arbitrary and it is either impossible to do (because it is from another crate, for example) or undesired. We should support some kind of attribut...</div></div></div>",
+        "id": 188766911,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582314051
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@Nick Fitzgerald</span> is there a way to have libfuzzer/the harness record statistics on my behalf? say, if i wanted to count the number of test cases that were valid vs invalid (i.e. didn't trigger a panic, but resulted in an error during interpretation, for instance), and get an idea of how effective my fuzzing is.</p>",
+        "id": 188950640,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582567798
+    },
+    {
+        "content": "<p><code>cargo fuzz</code> and libFuzzer should stop once they discover a panic, so I think the answer is that all of the test cases run didn't trigger a panic</p>\n<p>maybe I'm not following exactly what you're asking for though...</p>\n<p>are you looking for \"what % of test cases reached code location X?\" where X is the branch for valid test cases?</p>",
+        "id": 188950873,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582567964
+    },
+    {
+        "content": "<p>Context is I run the (now always valid) generated func in an IR interpreter, and interpreting can return errors, e.g. division by zero, infinite loops, etc. So in this case, the generated func is structurally valid, but not runnable. I'd like to get a rough estimate of the proportion of such test cases, vs test cases that can actually be interpreted, and thus can go through register allocation.</p>",
+        "id": 188951211,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582568207
+    },
+    {
+        "content": "<p>I don't think there's a nice way to get this info out, unfortunately</p>\n<p>the official libfuzzer docs recommend using clang code coverage visualization to get an idea of \"how good the fuzzer is\" but rustc doesn't support that right now :(</p>\n<p>as a hacky work around, you could try adding a <code>panic!()</code> to the start of the register allocation testing code path. or even just a <code>println!(\"got to reg alloc\")</code> and count them with a CLI script</p>",
+        "id": 188952402,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582569121
+    },
+    {
+        "content": "<p>ok, thanks! had another idea: if i can eliminate most real OOMs, i can trigger fake OOMs by allocating very large vectors on paths where the test case is valid but not interpreted correctly, so they get displayed in the output of libfuzzer (when using multiple jobs). Quite hacky <span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span></p>",
+        "id": 188953724,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582570055
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@Nick Fitzgerald</span> Hey, i'm debug-printing the Unstructured instance's length, and i see it's around 3 bytes in most of my test runs, which is not enough bytes to run interesting programs. Do you know how its size is computed, and if there are ways i can increase it?</p>",
+        "id": 189046609,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582655307
+    },
+    {
+        "content": "<p>Generating mostly correct output is time consuming, and i get to around 10 execs/run only, so there might be some bad interactions there...</p>",
+        "id": 189046654,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582655342
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> couple things:</p>\n<ul>\n<li>\n<p>you can manually do <code>head /dev/random -c 1000 &gt; fuzz/corpus/my-fuzz-target/my-random-seed</code> to get a bigger sized seed file in the corpus for libfuzzer to mutate</p>\n</li>\n<li>\n<p><code>cargo fuzz run my-fuzz-target -- -help=1</code> should also show a bunch of libfuzzer flags you can pass in that control input size. anything after the <code>--</code> is passed directly to libfuzzer</p>\n</li>\n</ul>",
+        "id": 189046928,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582655483
+    },
+    {
+        "content": "<p>great, -max_len and -len_control is what i want. Thanks!</p>",
+        "id": 189047147,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582655640
+    },
+    {
+        "content": "<p>Since <code>arbitrary</code> returns a <code>Result</code>, it would be pretty nice if <code>cargo fuzz</code> could show me a relative proportion of <code>Err</code> among generated inputs, to make it discoverable that there's something wrong with the size of the raw data bytes. Would it be feasible?</p>",
+        "id": 189047688,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1582655960
+    },
+    {
+        "content": "<p>perhaps... <code>cargo fuzz</code> mostly just wraps libfuzzer and provides the logic to build sanitizers and link libfuzzer</p>\n<p>but we could probably use the <code>Arbitrary::size_hint</code> to auto add seed files to the corpus or to pass <code>-max_len</code> and <code>-len_control</code> flags to libfuzzer. not sure exactly how this would work, there's some design work to be done</p>",
+        "id": 189048819,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582656769
+    },
+    {
+        "content": "<p>Filed <a href=\"https://github.com/rust-fuzz/cargo-fuzz/issues/218\" target=\"_blank\" title=\"https://github.com/rust-fuzz/cargo-fuzz/issues/218\">https://github.com/rust-fuzz/cargo-fuzz/issues/218</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-fuzz/cargo-fuzz/issues/218\" style=\"background-image: url(https://avatars1.githubusercontent.com/u/25854843?s=400&amp;v=4)\" target=\"_blank\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-fuzz/cargo-fuzz/issues/218\" target=\"_blank\" title=\"Somehow leverage `Arbitrary::size_hint` to create initial seeds for corpus or control `-max_len` and `-len_control`? · Issue #218 · rust-fuzz/cargo-fuzz\">Somehow leverage `Arbitrary::size_hint` to create initial seeds for corpus or control `-max_len` and `-len_control`? · Issue #218 · rust-fuzz/cargo-fuzz</a></div><div class=\"message_embed_description\">@bnjbvr was reporting that starting fuzzing from scratch with a fuzz target that takes an Arbtirary impl was spending a lot of time on three bytes long inputs, where the Arbitrary implementation re...</div></div></div>",
+        "id": 189058964,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1582663286
+    }
+]

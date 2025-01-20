@@ -1,0 +1,98 @@
+[
+    {
+        "content": "<p>Hi all,</p>\n<p>The spidermonkey wasm team is currently trying to release cranelift to our nightly aarch64 user base. As part of this we're reviewing our stability/release policy for this code. I understand that there were some other discussions about a future release policy for wasmtime/cranelift, so I thought I should open up a thread.</p>\n<p>We currently vendor specific commits of the crates we directly depend on. All the recursive dependencies of each crate are then vendored using normal semver and lockfile semantics.</p>\n<p>We need a few things to manage releasing cranelift effectively.</p>\n<ul>\n<li>Release/stable branch(es)<ul>\n<li>If we're only shipping to nightly, then we can get by with a single 'stable' branch. This would allow us to apply fixes to what's in nightly without always having to update to the latest master.</li>\n<li>If we're allowing cranelift to ride the <a href=\"https://wiki.mozilla.org/Release_Management/Calendar\">release trains</a>, then we should have a branch for each mozilla release to facilitate backporting changes to affected versions.</li>\n<li>These branches could live in our own repositories or the bytecodealliance repositories.</li>\n</ul>\n</li>\n<li>A process for landing security sensitive commits<ul>\n<li>Ideally, we need to be able to limit sensitive metadata (such as repro steps, tests cases, mechanism) with the understanding that source code is visible.</li>\n<li>I do see there's a <a href=\"mailto:security@bytecodealliance.org\">security@bytecodealliance.org</a>, not sure what the process looks like with that.</li>\n</ul>\n</li>\n</ul>\n<p>This is complicated by the fact that the crates required for our compiler are spread across multiple repositories.</p>\n<ul>\n<li>wasmtime (cranelift-codegen, cranelift-wasm)</li>\n<li>wasmparser (wasm-tools)</li>\n<li>regalloc (<a href=\"http://regalloc.rs\">regalloc.rs</a>)<br>\nSo if we're maintaining release branches for stability and backporting, we may need them for all of these repositories.</li>\n</ul>\n<p>There's a balance here between a mozilla-specific process and one that benefits other community members. We need something like this in the near term, so if possible we would like to get 'something' working for this and potentially expand it in the future.</p>\n<p>So in summary:</p>\n<ul>\n<li>Would it be acceptable for the SM-wasm folks to create/manage release branches on the wasmtime, <a href=\"http://regalloc.rs\">regalloc.rs</a>, wasm-tools repositories. These could be explicitly mozilla specific (e.g. sm/v85 or sm/stable).</li>\n<li>Would there be interest in consolidating the <a href=\"http://regalloc.rs\">regalloc.rs</a> and wasmtime repositories? This would cut down on some tracking of branches.</li>\n</ul>\n<p>If there's a better approach here, suggestions are appreciated!</p>\n<p>cc <span class=\"user-mention\" data-user-id=\"234973\">@Till Schneidereit</span> <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> <span class=\"user-mention\" data-user-id=\"268444\">@Julian Seward</span>  <span class=\"user-mention\" data-user-id=\"254388\">@Lars Hansen</span></p>",
+        "id": 216681618,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1605305993
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254394\">@Ryan Hunt</span> thanks for writing up these thoughts! I'm very much in favor of a stable-branch policy/process of some sort -- I think it would be useful for a bunch of folks.</p>\n<p>I wanted to weigh in on one point in particular: <a href=\"http://regalloc.rs\">regalloc.rs</a> vs wasmtime repositories. On balance I think I'd be receptive to this; while there is definitely an advantage to presenting <a href=\"http://regalloc.rs\">regalloc.rs</a> as an independent, reusable component (and I hope it remains so!), it seems that some of the reasoning that led to consolidation of wasmtime and Cranelift into one repo (while still releasing as separate crates) might apply again. As we developed various features that crossed the regalloc/CL boundary, we had to do a bunch of release/version-bumps of <a href=\"http://regalloc.rs\">regalloc.rs</a> just to pick up minor changes. (We're at v0.0.31 now and most of those 31 releases were necessitated by cross-cutting work.) If we choose to do that, I'm happy to help out with the git magic to actually do the merge with history.</p>\n<p>I don't have as much of an opinion on wasmparser; it seems to be much more widely used outside of CL than regalloc is, and is not as closely coupled, so maybe the above reasoning doesn't apply as strongly, though I'm not sure.</p>",
+        "id": 216688597,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1605310462
+    },
+    {
+        "content": "<p>A followup thought here, after talking with <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> a bit about <a href=\"http://regalloc.rs\">regalloc.rs</a>: perhaps we should instead pull in regalloc (and wasmparser?) as git submodules in the wasmtime repo. This would let us version/branch things as we please, since the root project pins particular commits of its deps that we control, without relying on <a href=\"http://crates.io\">crates.io</a> releases. The alternative if we don't Monorepo All The Things is that if a stable branch of a dependency (regalloc or wasmparser, e.g.) changes to incorporate a security fix, we'd need to release a crate version and refer to that in the stable branch of wasmtime; or else pin git commits in wasmtime's Cargo.toml, but that's most of the way to submodules and submodules let one hack locally without editing dep paths. Thoughts?</p>",
+        "id": 216910478,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1605550707
+    },
+    {
+        "content": "<p>I would personally prefer to avoid submodules if we can, exploring other avenues first. They're generally just a pain to deal with and having a forcing function for us to release crates on <a href=\"http://crates.io\">crates.io</a> I think is also valuable (at least I like it for wat/wast/wasmparser). I would hope that a security fix for something like wasmparser wouldn't be too bad (and presumably other projects would also want to be able to pull in the fix so we'd want to publish anyway), but it sounds like we'd definitely need documentation of how to release the various components</p>",
+        "id": 216912986,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1605551783
+    },
+    {
+        "content": "<p>So one particular unanswered question, in my head at least, is how a crate-release-based dependency reference would work with a bugfix on a stable branch. Imagine we have <a href=\"http://regalloc.rs\">regalloc.rs</a> <code>main</code> at v0.0.40, but its <code>stable</code> corresponds to v0.0.39, and wasmtime <code>stable</code> points to v0.0.39. Say we need to backport a security fix to regalloc stable; do we release v0.0.41 (nonlinear, doesn't supersede v0.0.40) or do we pin the <code>stable</code> wasmtime to a git commit in <code>regalloc.rs</code>? In other words it seems to me that at least for stable branches, the nonlinearity forces us off of a pure crate-release-based process, but possibly I'm missing some workaround :-)</p>",
+        "id": 216913528,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1605552033
+    },
+    {
+        "content": "<p>I think the fix for that would be to switch regalloc to <code>0.x.0</code> releases</p>",
+        "id": 216914506,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1605552491
+    },
+    {
+        "content": "<p>so that way if we wanted to patch something it would be <code>0.x.1</code></p>",
+        "id": 216914520,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1605552500
+    },
+    {
+        "content": "<p>and <code>0.x.y</code> is still \"this is unstable\" in semver-speak</p>",
+        "id": 216914578,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1605552532
+    },
+    {
+        "content": "<p>Ah, of course</p>",
+        "id": 216914653,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1605552571
+    },
+    {
+        "content": "<p>It seems like the easiest immediate path forward is for us to manage our own fork(s) and branches. So I'm going to be looking into that now.</p>\n<p>As a related but separate note, It seems like there is support for merging the regalloc and wasmtime repositories (while keeping them separate crates). <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> would you be interested in helping out with this? Or giving me pointers on how to best accomplish this.</p>",
+        "id": 217077688,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1605655702
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254394\">@Ryan Hunt</span> re: <a href=\"http://regalloc.rs\">regalloc.rs</a>, the latest thoughts are I think that we are leaning toward keeping it as a separate repository; or at least, that's what we were converging toward above (<span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span>, <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> or others correct me if wrong!)</p>",
+        "id": 217077854,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1605655867
+    },
+    {
+        "content": "<p>Ah apologies, I misread the previous comments then.</p>\n<p>So I think I understand the concerns with using submodules, but what is the concern with merging <a href=\"http://regalloc.rs\">regalloc.rs</a> into the wasmtime repository, using path dependencies and still publishing regalloc as an independent crate?</p>",
+        "id": 217079996,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1605657624
+    },
+    {
+        "content": "<p>The main concerns raised by <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> when I spoke to him (please correct me if I misrepresent this!) were CI time (PRs to <a href=\"http://regalloc.rs\">regalloc.rs</a> shouldn't necessarily need to wait for wasmtime CI) and the way in which <a href=\"http://regalloc.rs\">regalloc.rs</a> is presented as, and maintains the ability to be, an independently-usable building block</p>",
+        "id": 217080380,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1605657937
+    },
+    {
+        "content": "<p>Ah, yeah, running a full wasmtime test run for regalloc changes would be unfortunate. And if there's desire for it to be presented as an independent component then I'm fine with it remaining so. Wasn't aware of Benjamin's concerns, and don't want to shake things up unless it's worth it.</p>",
+        "id": 217081313,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1605658643
+    },
+    {
+        "content": "<p>Hi! Thanks <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span>, this is a correct explanation of my concerns. Unrelated CI failures in addition to long CI runs have been cumbersome in the past, and since regalloc has a very low CI latency, as well as very focused code / tests / issues / PRs, it is quite nice that we can keep it separate from the rest.</p>",
+        "id": 217111405,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1605691270
+    },
+    {
+        "content": "<p>Hey Ryan,</p>\n<p>I think this is all sorted out for the near-term concerns at least, but I wanted to chime in and say that I agree the proposed course of action makes sense! The one thing perhaps being that it doesn't seem necessary to me to maintain the stable branches in a Mozilla-specific fork. Do you see complications with doing so in the main repository? I'd have a slight preference for that as it'd more clearly put us on a path towards shared stable branches.</p>\n<p>As Alex says, it seems good to continue doing releases to <a href=\"http://crates.io\">crates.io</a>, and use patch version bumps for changes to stable branches. To some degree that's more long- or at least medium-term though: ideally we'd have <a href=\"http://crates.io\">crates.io</a> releases automated to a degree where it can just happen in automation. Plus, those only make sense for shared stable branches, not Mozilla-specific ones. For those, I guess you'll want to use git refspecs as the dependency? I.e., the Mozilla stable branch(es) of the wasmtime repo would refer to the associated Mozilla stable branch(es) of the <a href=\"http://regalloc.rs\">regalloc.rs</a> and wasm-tools repositories. That'd give you full control and flexibility in how to handle patches and what to pull into your monorepo</p>",
+        "id": 217122381,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1605698697
+    }
+]

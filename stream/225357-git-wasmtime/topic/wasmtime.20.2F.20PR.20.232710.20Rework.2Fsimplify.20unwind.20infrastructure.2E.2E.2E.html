@@ -1,0 +1,1288 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #2710 Rework/simplify unwind infrastructure... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html">wasmtime / PR #2710 Rework/simplify unwind infrastructure...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="229139339"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229139339" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229139339">(Mar 06 2021 at 23:49)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/peterhuene">peterhuene</a> and <a href="https://github.com/abrown">abrown</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a>.</p>
+
+
+
+<a name="229139340"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229139340" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229139340">(Mar 06 2021 at 23:49)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>:</p>
+<blockquote>
+<p>Our previous implementation of unwind infrastructure was somewhat<br>
+complex and brittle: it parsed generated instructions in order to<br>
+reverse-engineer unwind info from prologues. It also relied on some<br>
+fragile linkage to communicate instruction-layout information that VCode<br>
+was not designed to provide.</p>
+<p>A much simpler, more reliable, and easier-to-reason-about approach is to<br>
+embed unwind directives as pseudo-instructions in the prologue as we<br>
+generate it. That way, we can say what we mean and just emit it<br>
+directly.</p>
+<p>The usual reasoning that leads to the reverse-engineering approach is<br>
+that metadata is hard to keep in sync across optimization passes; but<br>
+here, (i) prologues are generated at the very end of the pipeline, and<br>
+(ii) if we ever do a post-prologue-gen optimization, we can treat unwind<br>
+directives as black boxes with unknown side-effects, just as we do for<br>
+some other pseudo-instructions today.</p>
+<p>It turns out that it was easier to just build this for both x64 and<br>
+aarch64 (since they share a factored-out ABI implementation), and wire<br>
+up the platform-specific unwind-info generation for Windows and SystemV.<br>
+Now we have simpler unwind on all platforms and we can delete the old<br>
+unwind infra as soon as we remove the old backend.</p>
+<p>here were a few consequences to supporting Fastcall unwind in<br>
+particular that led to a refactor of the common ABI. Windows only<br>
+supports naming clobbered-register save locations within 240 bytes of<br>
+the frame-pointer register, whatever one chooses that to be (RSP or<br>
+RBP). We had previously saved clobbers below the fixed frame (and below<br>
+nominal-SP). The 240-byte range has to include the old RBP too, so we're<br>
+forced to place clobbers at the top of the frame, just below saved<br>
+RBP/RIP. This is fine; we always keep a frame pointer anyway because we<br>
+use it to refer to stack args. It does mean that offsets of fixed-frame<br>
+slots (spillslots, stackslots) from RBP are no longer known before we do<br>
+regalloc, so if we ever want to index these off of RBP rather than<br>
+nominal-SP because we add support for <code>alloca</code> (dynamic frame growth),<br>
+then we'll need a "nominal-BP" mode that is resolved after regalloc and<br>
+clobber-save code is generated. I added a comment to this effect in<br>
+<code>abi_impl.rs</code>.</p>
+<p>The above refactor touched both x64 and aarch64 because of shared code.<br>
+This had a further effect in that the old aarch64 prologue generation<br>
+subtracted from <code>sp</code> once to allocate space, then used stores to <code>[sp,
+offset]</code> to save clobbers. Unfortunately the offset only has 7-bit<br>
+range, so if there are enough clobbered registers (and there can be --<br>
+aarch64 has 384 bytes of registers; at least one unit test hits this)<br>
+the stores/loads will be out-of-range. I really don't want to synthesize<br>
+large-offset sequences here; better to go back to the simpler<br>
+pre-index/post-index <code>stp r1, r2, [sp, #-16]</code> form that works just like<br>
+a "push". It's likely not much worse microarchitecturally (dependence<br>
+chain on SP, but oh well) and it actually saves an instruction if<br>
+there's no other frame to allocate. As a further advantage, it's much<br>
+simpler to understand; simpler is usually better.</p>
+<p>This PR adds the new backend on Windows to CI as well.</p>
+</blockquote>
+
+
+
+<a name="229139341"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229139341" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229139341">(Mar 06 2021 at 23:49)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/peterhuene">peterhuene</a> and <a href="https://github.com/abrown">abrown</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a>.</p>
+
+
+
+<a name="229139412"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229139412" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229139412">(Mar 06 2021 at 23:50)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>:</p>
+<blockquote>
+<p>Our previous implementation of unwind infrastructure was somewhat<br>
+complex and brittle: it parsed generated instructions in order to<br>
+reverse-engineer unwind info from prologues. It also relied on some<br>
+fragile linkage to communicate instruction-layout information that VCode<br>
+was not designed to provide.</p>
+<p>A much simpler, more reliable, and easier-to-reason-about approach is to<br>
+embed unwind directives as pseudo-instructions in the prologue as we<br>
+generate it. That way, we can say what we mean and just emit it<br>
+directly.</p>
+<p>The usual reasoning that leads to the reverse-engineering approach is<br>
+that metadata is hard to keep in sync across optimization passes; but<br>
+here, (i) prologues are generated at the very end of the pipeline, and<br>
+(ii) if we ever do a post-prologue-gen optimization, we can treat unwind<br>
+directives as black boxes with unknown side-effects, just as we do for<br>
+some other pseudo-instructions today.</p>
+<p>It turns out that it was easier to just build this for both x64 and<br>
+aarch64 (since they share a factored-out ABI implementation), and wire<br>
+up the platform-specific unwind-info generation for Windows and SystemV.<br>
+Now we have simpler unwind on all platforms and we can delete the old<br>
+unwind infra as soon as we remove the old backend.</p>
+<p>here were a few consequences to supporting Fastcall unwind in<br>
+particular that led to a refactor of the common ABI. Windows only<br>
+supports naming clobbered-register save locations within 240 bytes of<br>
+the frame-pointer register, whatever one chooses that to be (RSP or<br>
+RBP). We had previously saved clobbers below the fixed frame (and below<br>
+nominal-SP). The 240-byte range has to include the old RBP too, so we're<br>
+forced to place clobbers at the top of the frame, just below saved<br>
+RBP/RIP. This is fine; we always keep a frame pointer anyway because we<br>
+use it to refer to stack args. It does mean that offsets of fixed-frame<br>
+slots (spillslots, stackslots) from RBP are no longer known before we do<br>
+regalloc, so if we ever want to index these off of RBP rather than<br>
+nominal-SP because we add support for <code>alloca</code> (dynamic frame growth),<br>
+then we'll need a "nominal-BP" mode that is resolved after regalloc and<br>
+clobber-save code is generated. I added a comment to this effect in<br>
+<code>abi_impl.rs</code>.</p>
+<p>The above refactor touched both x64 and aarch64 because of shared code.<br>
+This had a further effect in that the old aarch64 prologue generation<br>
+subtracted from <code>sp</code> once to allocate space, then used stores to <code>[sp, offset]</code><br>
+to save clobbers. Unfortunately the offset only has 7-bit<br>
+range, so if there are enough clobbered registers (and there can be --<br>
+aarch64 has 384 bytes of registers; at least one unit test hits this)<br>
+the stores/loads will be out-of-range. I really don't want to synthesize<br>
+large-offset sequences here; better to go back to the simpler<br>
+pre-index/post-index <code>stp r1, r2, [sp, #-16]</code> form that works just like<br>
+a "push". It's likely not much worse microarchitecturally (dependence<br>
+chain on SP, but oh well) and it actually saves an instruction if<br>
+there's no other frame to allocate. As a further advantage, it's much<br>
+simpler to understand; simpler is usually better.</p>
+<p>This PR adds the new backend on Windows to CI as well.</p>
+</blockquote>
+
+
+
+<a name="229139508"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229139508" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229139508">(Mar 06 2021 at 23:52)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>:</p>
+<blockquote>
+<p>Our previous implementation of unwind infrastructure was somewhat<br>
+complex and brittle: it parsed generated instructions in order to<br>
+reverse-engineer unwind info from prologues. It also relied on some<br>
+fragile linkage to communicate instruction-layout information that VCode<br>
+was not designed to provide.</p>
+<p>A much simpler, more reliable, and easier-to-reason-about approach is to<br>
+embed unwind directives as pseudo-instructions in the prologue as we<br>
+generate it. That way, we can say what we mean and just emit it<br>
+directly.</p>
+<p>The usual reasoning that leads to the reverse-engineering approach is<br>
+that metadata is hard to keep in sync across optimization passes; but<br>
+here, (i) prologues are generated at the very end of the pipeline, and<br>
+(ii) if we ever do a post-prologue-gen optimization, we can treat unwind<br>
+directives as black boxes with unknown side-effects, just as we do for<br>
+some other pseudo-instructions today.</p>
+<p>It turns out that it was easier to just build this for both x64 and<br>
+aarch64 (since they share a factored-out ABI implementation), and wire<br>
+up the platform-specific unwind-info generation for Windows and SystemV.<br>
+Now we have simpler unwind on all platforms and we can delete the old<br>
+unwind infra as soon as we remove the old backend.</p>
+<p>There were a few consequences to supporting Fastcall unwind in<br>
+particular that led to a refactor of the common ABI. Windows only<br>
+supports naming clobbered-register save locations within 240 bytes of<br>
+the frame-pointer register, whatever one chooses that to be (RSP or<br>
+RBP). We had previously saved clobbers below the fixed frame (and below<br>
+nominal-SP). The 240-byte range has to include the old RBP too, so we're<br>
+forced to place clobbers at the top of the frame, just below saved<br>
+RBP/RIP. This is fine; we always keep a frame pointer anyway because we<br>
+use it to refer to stack args. It does mean that offsets of fixed-frame<br>
+slots (spillslots, stackslots) from RBP are no longer known before we do<br>
+regalloc, so if we ever want to index these off of RBP rather than<br>
+nominal-SP because we add support for <code>alloca</code> (dynamic frame growth),<br>
+then we'll need a "nominal-BP" mode that is resolved after regalloc and<br>
+clobber-save code is generated. I added a comment to this effect in<br>
+<code>abi_impl.rs</code>.</p>
+<p>The above refactor touched both x64 and aarch64 because of shared code.<br>
+This had a further effect in that the old aarch64 prologue generation<br>
+subtracted from <code>sp</code> once to allocate space, then used stores to <code>[sp, offset]</code><br>
+to save clobbers. Unfortunately the offset only has 7-bit<br>
+range, so if there are enough clobbered registers (and there can be --<br>
+aarch64 has 384 bytes of registers; at least one unit test hits this)<br>
+the stores/loads will be out-of-range. I really don't want to synthesize<br>
+large-offset sequences here; better to go back to the simpler<br>
+pre-index/post-index <code>stp r1, r2, [sp, #-16]</code> form that works just like<br>
+a "push". It's likely not much worse microarchitecturally (dependence<br>
+chain on SP, but oh well) and it actually saves an instruction if<br>
+there's no other frame to allocate. As a further advantage, it's much<br>
+simpler to understand; simpler is usually better.</p>
+<p>This PR adds the new backend on Windows to CI as well.</p>
+</blockquote>
+
+
+
+<a name="229139576"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229139576" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229139576">(Mar 06 2021 at 23:53)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>:</p>
+<blockquote>
+<p>Our previous implementation of unwind infrastructure was somewhat<br>
+complex and brittle: it parsed generated instructions in order to<br>
+reverse-engineer unwind info from prologues. It also relied on some<br>
+fragile linkage to communicate instruction-layout information that VCode<br>
+was not designed to provide.</p>
+<p>A much simpler, more reliable, and easier-to-reason-about approach is to<br>
+embed unwind directives as pseudo-instructions in the prologue as we<br>
+generate it. That way, we can say what we mean and just emit it<br>
+directly.</p>
+<p>The usual reasoning that leads to the reverse-engineering approach is<br>
+that metadata is hard to keep in sync across optimization passes; but<br>
+here, (i) prologues are generated at the very end of the pipeline, and<br>
+(ii) if we ever do a post-prologue-gen optimization, we can treat unwind<br>
+directives as black boxes with unknown side-effects, just as we do for<br>
+some other pseudo-instructions today.</p>
+<p>It turns out that it was easier to just build this for both x64 and<br>
+aarch64 (since they share a factored-out ABI implementation), and wire<br>
+up the platform-specific unwind-info generation for Windows and SystemV.<br>
+Now we have simpler unwind on all platforms and we can delete the old<br>
+unwind infra as soon as we remove the old backend.</p>
+<p>There were a few consequences to supporting Fastcall unwind in<br>
+particular that led to a refactor of the common ABI. Windows only<br>
+supports naming clobbered-register save locations within 240 bytes of<br>
+the frame-pointer register, whatever one chooses that to be (RSP or<br>
+RBP). We had previously saved clobbers below the fixed frame (and below<br>
+nominal-SP). The 240-byte range has to include the old RBP too, so we're<br>
+forced to place clobbers at the top of the frame, just below saved<br>
+RBP/RIP. This is fine; we always keep a frame pointer anyway because we<br>
+use it to refer to stack args. It does mean that offsets of fixed-frame<br>
+slots (spillslots, stackslots) from RBP are no longer known before we do<br>
+regalloc, so if we ever want to index these off of RBP rather than<br>
+nominal-SP because we add support for <code>alloca</code> (dynamic frame growth),<br>
+then we'll need a "nominal-BP" mode that is resolved after regalloc and<br>
+clobber-save code is generated. I added a comment to this effect in<br>
+<code>abi_impl.rs</code>.</p>
+<p>The above refactor touched both x64 and aarch64 because of shared code.<br>
+This had a further effect in that the old aarch64 prologue generation<br>
+subtracted from <code>sp</code> once to allocate space, then used stores to <code>[sp, offset]</code><br>
+to save clobbers. Unfortunately the offset only has 7-bit<br>
+range, so if there are enough clobbered registers (and there can be --<br>
+aarch64 has 768 bytes of registers; at least one unit test hits this)<br>
+the stores/loads will be out-of-range. I really don't want to synthesize<br>
+large-offset sequences here; better to go back to the simpler<br>
+pre-index/post-index <code>stp r1, r2, [sp, #-16]</code> form that works just like<br>
+a "push". It's likely not much worse microarchitecturally (dependence<br>
+chain on SP, but oh well) and it actually saves an instruction if<br>
+there's no other frame to allocate. As a further advantage, it's much<br>
+simpler to understand; simpler is usually better.</p>
+<p>This PR adds the new backend on Windows to CI as well.</p>
+</blockquote>
+
+
+
+<a name="229139853"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229139853" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229139853">(Mar 06 2021 at 23:58)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229313843"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229313843" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229313843">(Mar 08 2021 at 15:12)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-606393511">PR Review</a>.</p>
+
+
+
+<a name="229313845"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229313845" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229313845">(Mar 08 2021 at 15:12)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r589496961">PR Review Comment</a>:</p>
+<blockquote>
+<p>One thing I noticed while reading this is that this might be a bit easier to read if it was framed in the positive ("unwind_info") rather than the negative (enabling the disabling switch). Wasmtime would then enable this by default, but it'd be up to other consumers of cranelift whether or not they'd wish to enable this.</p>
+</blockquote>
+
+
+
+<a name="229392596"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229392596" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229392596">(Mar 08 2021 at 23:06)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229392885"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229392885" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229392885">(Mar 08 2021 at 23:08)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r589816410">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done, thanks!</p>
+</blockquote>
+
+
+
+<a name="229392886"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229392886" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229392886">(Mar 08 2021 at 23:08)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-606791817">PR Review</a>.</p>
+
+
+
+<a name="229394634"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229394634" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229394634">(Mar 08 2021 at 23:22)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229395272"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229395272" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229395272">(Mar 08 2021 at 23:26)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229431573"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229431573" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229431573">(Mar 09 2021 at 07:05)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229432558"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229432558" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229432558">(Mar 09 2021 at 07:18)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229451454"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229451454" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229451454">(Mar 09 2021 at 10:04)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-607223039">PR Review</a>.</p>
+
+
+
+<a name="229451455"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229451455" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229451455">(Mar 09 2021 at 10:04)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r590163132">PR Review Comment</a>:</p>
+<blockquote>
+<p>Could you restore these tests for the actual unwind info being emitted?</p>
+</blockquote>
+
+
+
+<a name="229540134"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229540134" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229540134">(Mar 09 2021 at 19:40)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229544143"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229544143" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229544143">(Mar 09 2021 at 20:06)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-607892423">PR Review</a>.</p>
+
+
+
+<a name="229544144"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229544144" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229544144">(Mar 09 2021 at 20:06)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r590682069">PR Review Comment</a>:</p>
+<blockquote>
+<p>Sorry, not sure why I removed that along with the dead code. Added back.</p>
+</blockquote>
+
+
+
+<a name="229784046"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229784046" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229784046">(Mar 11 2021 at 02:46)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229784329"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229784329" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229784329">(Mar 11 2021 at 02:49)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229889695"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229889695" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229889695">(Mar 11 2021 at 17:22)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/alexcrichton">alexcrichton</a>, <a href="https://github.com/peterhuene">peterhuene</a> and <a href="https://github.com/abrown">abrown</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a>.</p>
+
+
+
+<a name="229909096"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909096" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909096">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610036885">PR Review</a>.</p>
+
+
+
+<a name="229909097"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909097" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909097">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610036885">PR Review</a>.</p>
+
+
+
+<a name="229909098"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909098" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909098">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592568373">PR Review Comment</a>:</p>
+<blockquote>
+<p>FWIW since this is so common in the test suite I think it'd be reasonable to just either have this as the global default for cranelift or either just the default for the test suite.</p>
+</blockquote>
+
+
+
+<a name="229909099"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909099" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909099">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592583351">PR Review Comment</a>:</p>
+<blockquote>
+<p>I'm personally finding this a bit confusing and hard to follow. I have yet to read all the ABI stuff but I'm particularly confused about what the offset is here.</p>
+<p>In the example above this directive comes after <code>mov rbp, rsp</code>, so I'm not sure how the <code>fp_offset</code> plays into what's going on here since there's no frame adjustments at that point. I'm also somewhat confused since this is a <code>u8</code> and we're presumably supporting frames with more than 256 bytes of stack space, so I don't think <code>fp_offset</code> is the size of the stack frame (but the docs say "base of the frame" which makes me think it is supposed to encompass the entire stack frame?)</p>
+<p>I may just need to read more to learn about this...<br>
+</p>
+</blockquote>
+
+
+
+<a name="229909100"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909100" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909100">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592575802">PR Review Comment</a>:</p>
+<blockquote>
+<p>temporary allow?</p>
+</blockquote>
+
+
+
+<a name="229909101"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909101" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909101">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592586385">PR Review Comment</a>:</p>
+<blockquote>
+<p>FWIW I'm visiting this location after visiting the definition of <code>UnwindInst</code>, but this seems like a hidden detail that may want to be documented? This seems to indicate that <code>PushOldFp</code> for architectures with <code>lr</code> (e.g. AArch64) indicates that two registers were pushed, both <code>fp</code> and <code>lr</code>? </p>
+<p>Or I guess put another way this <code>PushOldFp</code> is intended to encompass architectures where the "frame pointer" is actually two separate registers (sorta)</p>
+</blockquote>
+
+
+
+<a name="229909102"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909102" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909102">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592583703">PR Review Comment</a>:</p>
+<blockquote>
+<p>Could these variants explicitly list the value for <code>frame_offset</code> from the variant below?</p>
+</blockquote>
+
+
+
+<a name="229909103"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909103" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909103">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592572318">PR Review Comment</a>:</p>
+<blockquote>
+<p>s/RegUnit/Reg/</p>
+</blockquote>
+
+
+
+<a name="229909104"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909104" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909104">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592581309">PR Review Comment</a>:</p>
+<blockquote>
+<p>Could this include the sample value for <code>fp_offset</code> for this variant?</p>
+</blockquote>
+
+
+
+<a name="229909105"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909105" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909105">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592571233">PR Review Comment</a>:</p>
+<blockquote>
+<p>Temporary during development?</p>
+</blockquote>
+
+
+
+<a name="229909106"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909106" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909106">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592605759">PR Review Comment</a>:</p>
+<blockquote>
+<p>I'm surprised here that this can make an assumption about this 16 bytes. While that may be true for x86_64/aarch64 today it seems like it should be factored out perhaps?</p>
+</blockquote>
+
+
+
+<a name="229909107"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909107" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909107">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592584486">PR Review Comment</a>:</p>
+<blockquote>
+<p>Could this exhaustively match and then have a comment for why other cases are ignored?</p>
+</blockquote>
+
+
+
+<a name="229909108"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909108" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909108">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592617393">PR Review Comment</a>:</p>
+<blockquote>
+<p>I realize that this code existed before you touched it, but I'm finding myself getting a bit lost in how many offsets from how many things there are with unwinding. Since all variants here have an <code>offset: u8</code>, which I presume is the code offset in the function, could that be factored out separately from the <code>UnwindCode</code> itself? (e.g. stored somewhere as <code>(u8, UnwindCode)</code> instead of just <code>UnwindCode</code></p>
+</blockquote>
+
+
+
+<a name="229909109"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909109" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909109">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592618595">PR Review Comment</a>:</p>
+<blockquote>
+<p>Could this use <code>u32::from</code> or <code>.into()</code> to show it's not losing any bits?</p>
+</blockquote>
+
+
+
+<a name="229909110"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909110" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909110">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592620261">PR Review Comment</a>:</p>
+<blockquote>
+<p>I'm a bit confused that this is happening as part of the <code>CreateFPFrame</code> unwind pseudo-instruction here. Given the original example it looked like this pseudo instruction happened as part of the <code>mov %rbp, %rsp</code> portion, but wouldn't the "stack alloc" here happen as part of the subtraction from <code>%rsp</code>? Should the <code>CreateFPFrame</code> opcode be split into two?</p>
+</blockquote>
+
+
+
+<a name="229909111"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909111" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909111">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592629136">PR Review Comment</a>:</p>
+<blockquote>
+<p>Technically this is adjusting the stack pointer a lot more than just for the clobbers I think? This is account for the whole frame, clobbers and statically known space needed?</p>
+</blockquote>
+
+
+
+<a name="229909112"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909112" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909112">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592630149">PR Review Comment</a>:</p>
+<blockquote>
+<p>Could this be preceded with <code>let off = cur_offset;</code> and then <code>cur_offset</code> is adjusted in the <code>match</code>?</p>
+</blockquote>
+
+
+
+<a name="229909113"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909113" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909113">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592624308">PR Review Comment</a>:</p>
+<blockquote>
+<p>Could this have a comment indicating why this is 16? (presumably that we're skipping the 8 bytes we just pushed plus the 8 bytes pushed by the <code>call</code> instruction)</p>
+</blockquote>
+
+
+
+<a name="229909114"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909114" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909114">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592637583">PR Review Comment</a>:</p>
+<blockquote>
+<p>Technically this restriction is just on Windows x86_64, right? (even if we add AArch64 support for Windows that may have not have the same retrictions?)</p>
+</blockquote>
+
+
+
+<a name="229909115"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909115" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909115">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592642534">PR Review Comment</a>:</p>
+<blockquote>
+<p>This mentions <code>SImm7</code> but below it uses <code>SImm7Scaled</code> which seems to have a range of (63 * 8) to -(64 * 8). Is that a bug in the documentation or am I missing the usage of <code>SImm7</code>? More-or-less I'm wondering if given a 504 byte range we could do everything as a positive offset relative to <code>sp</code>?</p>
+</blockquote>
+
+
+
+<a name="229909116"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909116" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909116">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592644024">PR Review Comment</a>:</p>
+<blockquote>
+<p>Since this and <code>PopOldFP</code> aren't actually used anywhere today, should they be removed for now?</p>
+<p>I'd imagine that unwind info for the epilogue would also need to record that the saved registers no longer need to restored, but I don't think there's any emission for that just yet.</p>
+</blockquote>
+
+
+
+<a name="229909117"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909117" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909117">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592607136">PR Review Comment</a>:</p>
+<blockquote>
+<p>Ah so after further reading this isn't necessarily the entire call frame size, but just the size of the register saves we'll be doing?</p>
+</blockquote>
+
+
+
+<a name="229909118"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909118" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909118">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592651022">PR Review Comment</a>:</p>
+<blockquote>
+<p>Ok so after reading the various ABI implementations I think I understand a little better, but not entirely. It seems like this is primarily around for Windows and calculating adjustments on Unix, right?</p>
+<p>For the Unix case (which I think I understand better) this seems like it should be something like <code>DeclareCobberFrameSize { size: u8 }</code> where it's basically just declaring that all saves to come later are relative offsets within a frame of size <code>size</code>, allocated at the top of the stack just after the frame pointer was pushed.</p>
+<p>For Windows I'm much more unfamiliar with the unwinding stuff. I'm a bit confused, though, on why everything is <code>u8</code> here. It seems to be because of Windows but the <a href="https://docs.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-160">exception codes</a> all have short/far variants which seems like it's trying to account for offsets which are larger than <code>u8</code> perhaps, but I may be misunderstanding something. For Windows though it seems like this should be two instructions, where one signifies the <code>mov %rsp, %rbp</code> happened and the other happens after the stack decrement.</p>
+<p>I'll admit though I'm pretty confused on Windows, and I probably just need to sit down and read through their documentation some more. I'm not sure if we're doing RSP-relative addressing or whatever the second mode is mentioned <a href="https://docs.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-160#unwind-operation-code">at the top of this</a> where something is FP relative. I always seem to get lost in the details thinking about stuff like this.</p>
+</blockquote>
+
+
+
+<a name="229909119"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229909119" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229909119">(Mar 11 2021 at 19:18)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592611141">PR Review Comment</a>:</p>
+<blockquote>
+<p>Hm ok well I was thinking that maybe <code>fp_offset</code> is the size of the clobber are and should be renamed, but I think I'm still just very confused on the definition of what this instruction is, where it goes, and what this offset is.</p>
+</blockquote>
+
+
+
+<a name="229916977"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229916977" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229916977">(Mar 11 2021 at 20:07)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610179022">PR Review</a>.</p>
+
+
+
+<a name="229916978"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229916978" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229916978">(Mar 11 2021 at 20:07)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592686318">PR Review Comment</a>:</p>
+<blockquote>
+<p>Yes, that's true, but it would be significantly more complex to make the factored-out ABI implementation conditional on platform and do a different thing on aarch64. (It's a tradeoff for sure -- we could fork aarch64's code, as we used to have, but then that doubles the maintenance and update cost in other cases.)</p>
+</blockquote>
+
+
+
+<a name="229918069"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229918069" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229918069">(Mar 11 2021 at 20:14)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610184257">PR Review</a>.</p>
+
+
+
+<a name="229918071"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229918071" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229918071">(Mar 11 2021 at 20:14)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592690256">PR Review Comment</a>:</p>
+<blockquote>
+<p>So WIndows forces our hand in a few ways here:</p>
+<ul>
+<li>The way that clobbers are located is as a <em>positive</em> offset from the "frame", wherever we choose to define the frame. Since we place <code>RBP</code>/<code>FP</code> just below the return address so that we have known offset addressing to stack args, and we place clobbers below <code>RBP</code>, we have to either define the frame in terms of <code>RSP</code> or as some offset below <code>RBP</code>. The former is difficult for several reasons but basically our nominal-SP tracking would not interact well with unwind info due to the order we compute and finalize things. So we define the frame in terms of <code>RBP</code>, but <code>RBP</code> is at the <em>top</em> of it.</li>
+<li>This is what <code>fp_offset</code> means (it comes directly from the "frame register offset" field in <code>UNWIND_INFO</code>, which is also the source of the <code>u8</code>-sized limit): when we declare the frame, its base is at <code>RBP - fp_offset</code>. Equivalently, this is saying that the frame pointer is at the "frame pointer offset" into the frame.</li>
+<li>Note that on SysV platforms, the frame is defined by the "CFA" (call-frame address) which is spec-defined to be the SP value at entry, so instead <code>fp_offset</code> is used to adjust the offsets for clobber-saves.</li>
+<li>The <code>fp_offset</code> size limit (actually 240 bytes) is the reason that clobbers had to be moved to just below <code>RBP</code> as well; otherwise we could not define a frame far enough away from <code>RBP</code> to straddle our other fixed-frame slots.</li>
+</ul>
+</blockquote>
+
+
+
+<a name="229918256"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229918256" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229918256">(Mar 11 2021 at 20:15)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610185343">PR Review</a>.</p>
+
+
+
+<a name="229918257"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229918257" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229918257">(Mar 11 2021 at 20:15)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592691163">PR Review Comment</a>:</p>
+<blockquote>
+<p>Regarding <code>fp_offset</code> in particular, I'll go over the doc comments some more and see if I can add detail. Perhaps what we really need is just a small tutorial on unwind formats on Windows and SysV and how frames are computed in both cases :-)</p>
+</blockquote>
+
+
+
+<a name="229918617"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229918617" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229918617">(Mar 11 2021 at 20:17)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610186884">PR Review</a>.</p>
+
+
+
+<a name="229918618"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229918618" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229918618">(Mar 11 2021 at 20:17)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592692417">PR Review Comment</a>:</p>
+<blockquote>
+<p>Yes, I'm thinking now perhaps we just give two offsets to describe FP: its offset above the start of clobbers, and its offset below SP at entry. These are the two values needed to produce either Windows or SysV info so it should make everything else completely platform-agnostic.</p>
+</blockquote>
+
+
+
+<a name="229919454"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229919454" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229919454">(Mar 11 2021 at 20:22)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610190770">PR Review</a>.</p>
+
+
+
+<a name="229919456"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229919456" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229919456">(Mar 11 2021 at 20:22)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592695395">PR Review Comment</a>:</p>
+<blockquote>
+<p>Perhaps it should just be called <code>CreateFrame</code> -- it was meant to be a single macro-op that captured anything a specific unwind format needs for the prologue. The close mapping between <code>sub %rsp</code> and <code>StackAlloc</code> was the sort of thing I was hoping to avoid in this simplification :-) Given that we pin the frame to <code>RBP</code> with the <code>SetFPReg</code>, the <code>StackAlloc</code> serves only to let the unwinder know that more stack space is being used; so as long as it comes after the <code>SetFPReg</code> and before any uses of the clobber space, it shouldn't matter exactly where it occurs, I think.</p>
+</blockquote>
+
+
+
+<a name="229919494"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229919494" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229919494">(Mar 11 2021 at 20:23)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610190996">PR Review</a>.</p>
+
+
+
+<a name="229919496"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229919496" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229919496">(Mar 11 2021 at 20:23)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592695562">PR Review Comment</a>:</p>
+<blockquote>
+<p>Yep, that's a stale comment, thanks!</p>
+</blockquote>
+
+
+
+<a name="229923368"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923368" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923368">(Mar 11 2021 at 20:49)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610211803">PR Review</a>.</p>
+
+
+
+<a name="229923369"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923369" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923369">(Mar 11 2021 at 20:49)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592712013">PR Review Comment</a>:</p>
+<blockquote>
+<p>Yes, my mistake, it is actually a scaled offset; I'll update the comment, thanks!</p>
+<p>That said, going back to an sp-offset scheme requires two assumptions: (i) the subset of registers that are callee-save fits within 512 bytes; this is true for SysV but may be a subtle footgun in the future; and (ii) that we are alright with a two-stage thing, where we decrement SP once and save clobbers, then decrement again for the frame, unless we special-case the "everything is in range" case and collapse those two into one. I'd rather not have that complexity if we can avoid it!</p>
+<p>Basically my high-level bit here is: try to find a common set of simple lowerings and shared layouts/schemes that does not have a lot of special cases for different ABIs, different architectures, different in-range/out-of-range cases; bugs and unmaintainable complexity lie that way. The optimized all-in-one <code>sub sp</code> stuff that this PR removes was already very hard for me to re-internalize when I had to change it for this work. So I'd rather standardize on a simple "push the things one at a time" lowering, and have the same frame layout everywhere, to keeps us all sane :-)</p>
+</blockquote>
+
+
+
+<a name="229923564"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923564" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923564">(Mar 11 2021 at 20:51)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610212646">PR Review</a>.</p>
+
+
+
+<a name="229923565"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923565" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923565">(Mar 11 2021 at 20:51)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592712644">PR Review Comment</a>:</p>
+<blockquote>
+<p>Ok thanks for the info! This helps dispel some of my confusion. I'm familiar with the CFA in dwarf but the "cfa equivalent" was actually in the other direction on Windows and I was getting confused how these two things map to each other. I think for now some extra documentation for how the field is expected to be interpreted on Windows and Unix should be fine myself.</p>
+<p>But for the <code>u8</code>-ness, to make sure I understand, we're declaring to Windows "all register saves, which occur at positive offsets, are relative to XX" where XX is <code>RBP-thing</code> and <code>thing</code> is limited to 8 bits? We then have an <em>additional</em> requirement later on that when we save a register it can be saved at most 240 bytes away? (I couldn't actually find where that second restriction arose myself)</p>
+</blockquote>
+
+
+
+<a name="229923635"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923635" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923635">(Mar 11 2021 at 20:51)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610213247">PR Review</a>.</p>
+
+
+
+<a name="229923636"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923636" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923636">(Mar 11 2021 at 20:51)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592713135">PR Review Comment</a>:</p>
+<blockquote>
+<p>Yep, this is left over from my intermediate PR state where I tried to handle epilogues too. Happy to remove!</p>
+</blockquote>
+
+
+
+<a name="229923710"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923710" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923710">(Mar 11 2021 at 20:52)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610213573">PR Review</a>.</p>
+
+
+
+<a name="229923711"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923711" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923711">(Mar 11 2021 at 20:52)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592713399">PR Review Comment</a>:</p>
+<blockquote>
+<p>Ok I think that's fine in the meantime anyway. I don't think it's required we get this 100% right but it might just be worth in the documentation to mention that it's sort of a macro-op for now.</p>
+</blockquote>
+
+
+
+<a name="229923773"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923773" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923773">(Mar 11 2021 at 20:52)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592713749">PR Review Comment</a>:</p>
+<blockquote>
+<p>Nah this is definitely fine to have, just wanted to double-check my understanding!</p>
+</blockquote>
+
+
+
+<a name="229923774"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229923774" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229923774">(Mar 11 2021 at 20:52)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610214059">PR Review</a>.</p>
+
+
+
+<a name="229924309"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229924309" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229924309">(Mar 11 2021 at 20:56)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610216831">PR Review</a>.</p>
+
+
+
+<a name="229924310"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229924310" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229924310">(Mar 11 2021 at 20:56)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592715852">PR Review Comment</a>:</p>
+<blockquote>
+<p>Nah that makes sense, and I think it's fine to keep as-is. I definitely agree having a known-correct thing is the highest priority. If it turns out that we want to change this in the future for perf reasons or something like that we can cross that bridge when we get there.</p>
+</blockquote>
+
+
+
+<a name="229925363"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229925363" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229925363">(Mar 11 2021 at 21:03)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610222352">PR Review</a>.</p>
+
+
+
+<a name="229925364"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229925364" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229925364">(Mar 11 2021 at 21:03)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592720133">PR Review Comment</a>:</p>
+<blockquote>
+<p>Re: offset restrictions, only the former (<code>RBP - offset</code>); once we establish the frame we can declare clobber-saves at any 32-bit offset. But combining this with the fact that we place <code>RBP</code> <em>above</em> clobber-saves gives us the limit on clobber offsets.</p>
+<p>In hindsight, perhaps it's better to have explicit asserts that all offsets are in-range for the unwind info we're generating, and give these offset fields a <code>u32</code> or so; that would document these limits more explicitly I think!</p>
+</blockquote>
+
+
+
+<a name="229925493"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229925493" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229925493">(Mar 11 2021 at 21:04)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610222979">PR Review</a>.</p>
+
+
+
+<a name="229925494"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229925494" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229925494">(Mar 11 2021 at 21:04)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592720600">PR Review Comment</a>:</p>
+<blockquote>
+<p>(Err, "any positive 32-bit offset" above.)</p>
+</blockquote>
+
+
+
+<a name="229927689"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229927689" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229927689">(Mar 11 2021 at 21:19)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610233771">PR Review</a>.</p>
+
+
+
+<a name="229927691"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229927691" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229927691">(Mar 11 2021 at 21:19)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592729359">PR Review Comment</a>:</p>
+<blockquote>
+<p>Alternatively we could stop establishing a frame pointer until such a time we actually need one on Windows (the save offsets encoded in the unwind information would then be positive offsets from RSP rather than FP-[0..240], thereby eliminating the "saves have to be near enough to the frame pointer establishment" problem).  That's a whole can of worms, though, I imagine.</p>
+</blockquote>
+
+
+
+<a name="229931368"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229931368" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229931368">(Mar 11 2021 at 21:42)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592742427">PR Review Comment</a>:</p>
+<blockquote>
+<p>In fact, the old unwind info emitted for Windows explicitly didn't encode establishing a frame pointer (despite the prologue doing so) to side step the 240 offset limitation, thereby encoding all of the register saves as positive offsets from the stack pointer.  This would obviously break when the frame pointer is required, such as dynamically-sized frames.</p>
+</blockquote>
+
+
+
+<a name="229931370"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229931370" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229931370">(Mar 11 2021 at 21:42)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610250652">PR Review</a>.</p>
+
+
+
+<a name="229936630"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229936630" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229936630">(Mar 11 2021 at 22:10)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610270041">PR Review</a>.</p>
+
+
+
+<a name="229936631"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229936631" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229936631">(Mar 11 2021 at 22:10)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592757785">PR Review Comment</a>:</p>
+<blockquote>
+<p>Aha ok that makes a lot of sense now, where the 240 comes from. I do think there's definitely room for improvement here, but there's no need to happen in this PR I think. I'd be happy with some more comments myself, and then seems reasonable to open tracking issues if necessary.</p>
+</blockquote>
+
+
+
+<a name="229949234"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949234" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949234">(Mar 11 2021 at 23:48)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229949821"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949821" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949821">(Mar 11 2021 at 23:54)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610340545">PR Review</a>.</p>
+
+
+
+<a name="229949822"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949822" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949822">(Mar 11 2021 at 23:54)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592811891">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done; changed just for filetests (I think it's too surprising to change the default overall given that it's needed for backtraces and correct operation generally).</p>
+</blockquote>
+
+
+
+<a name="229949881"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949881" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949881">(Mar 11 2021 at 23:55)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610340811">PR Review</a>.</p>
+
+
+
+<a name="229949882"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949882" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949882">(Mar 11 2021 at 23:55)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592812468">PR Review Comment</a>:</p>
+<blockquote>
+<p>Ah, yes, I was trying to get rid of some unused-code warnings in the new-backend PR and this percolated backward during some rebasing magic. Removed!</p>
+</blockquote>
+
+
+
+<a name="229949895"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949895" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949895">(Mar 11 2021 at 23:55)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610340855">PR Review</a>.</p>
+
+
+
+<a name="229949896"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949896" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949896">(Mar 11 2021 at 23:55)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592812604">PR Review Comment</a>:</p>
+<blockquote>
+<p>Fixed.</p>
+</blockquote>
+
+
+
+<a name="229949907"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949907" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949907">(Mar 11 2021 at 23:55)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610340913">PR Review</a>.</p>
+
+
+
+<a name="229949908"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949908" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949908">(Mar 11 2021 at 23:55)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592812736">PR Review Comment</a>:</p>
+<blockquote>
+<p>Removed, thanks!</p>
+</blockquote>
+
+
+
+<a name="229949940"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949940" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949940">(Mar 11 2021 at 23:55)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610341019">PR Review</a>.</p>
+
+
+
+<a name="229949941"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229949941" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229949941">(Mar 11 2021 at 23:55)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592813059">PR Review Comment</a>:</p>
+<blockquote>
+<p>Updated along with the doc and field-name clarity changes noted below.</p>
+</blockquote>
+
+
+
+<a name="229950060"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950060" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950060">(Mar 11 2021 at 23:57)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610341577">PR Review</a>.</p>
+
+
+
+<a name="229950061"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950061" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950061">(Mar 11 2021 at 23:57)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592814329">PR Review Comment</a>:</p>
+<blockquote>
+<p>So I've revamped the doc-comment for this enum and added the "offset upward / offset downward" dual fields for the CreateNewFrame pseudo-inst. Hopefully this is a bit more clear now!</p>
+<p>Agreed that we could eventually look into <code>-fomit-frame-pointer</code> codegen, though that's a deeper rabbithole in the ABI code (as is <code>alloca</code> support); one bridge at a time :-)</p>
+</blockquote>
+
+
+
+<a name="229950097"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950097" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950097">(Mar 11 2021 at 23:57)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610341722">PR Review</a>.</p>
+
+
+
+<a name="229950098"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950098" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950098">(Mar 11 2021 at 23:57)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592814458">PR Review Comment</a>:</p>
+<blockquote>
+<p>Updated as noted -- two offsets given now.</p>
+</blockquote>
+
+
+
+<a name="229950119"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950119" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950119">(Mar 11 2021 at 23:57)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610341870">PR Review</a>.</p>
+
+
+
+<a name="229950120"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950120" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950120">(Mar 11 2021 at 23:57)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592814589">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done!</p>
+</blockquote>
+
+
+
+<a name="229950402"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950402" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950402">(Mar 12 2021 at 00:00)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229950522"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950522" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950522">(Mar 12 2021 at 00:01)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229950664"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950664" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950664">(Mar 12 2021 at 00:02)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610344040">PR Review</a>.</p>
+
+
+
+<a name="229950666"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950666" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950666">(Mar 12 2021 at 00:02)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592816411">PR Review Comment</a>:</p>
+<blockquote>
+<p>I've changed this to <code>instruction_offset</code> everywhere now. The tuple refactor is a bit more intrusive but I can do that instead if you'd prefer!</p>
+</blockquote>
+
+
+
+<a name="229950714"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950714" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950714">(Mar 12 2021 at 00:02)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592816627">PR Review Comment</a>:</p>
+<blockquote>
+<p>I did one better and just removed the <code>StackAlloc</code>; it doesn't seem to actually be needed once we pin the frame to <code>RBP</code>.</p>
+</blockquote>
+
+
+
+<a name="229950715"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950715" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950715">(Mar 12 2021 at 00:02)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610344344">PR Review</a>.</p>
+
+
+
+<a name="229950733"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950733" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950733">(Mar 12 2021 at 00:03)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610344403">PR Review</a>.</p>
+
+
+
+<a name="229950736"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950736" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950736">(Mar 12 2021 at 00:03)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592816668">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done.</p>
+</blockquote>
+
+
+
+<a name="229950769"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950769" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950769">(Mar 12 2021 at 00:03)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610344466">PR Review</a>.</p>
+
+
+
+<a name="229950770"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950770" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950770">(Mar 12 2021 at 00:03)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592816718">PR Review Comment</a>:</p>
+<blockquote>
+<p>Fixed!</p>
+</blockquote>
+
+
+
+<a name="229950784"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950784" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950784">(Mar 12 2021 at 00:03)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610344561">PR Review</a>.</p>
+
+
+
+<a name="229950785"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950785" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950785">(Mar 12 2021 at 00:03)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592816801">PR Review Comment</a>:</p>
+<blockquote>
+<p>Ah, yeah, that's a silly bit of verbosity; fixed.</p>
+</blockquote>
+
+
+
+<a name="229950933"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950933" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950933">(Mar 12 2021 at 00:04)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610345148">PR Review</a>.</p>
+
+
+
+<a name="229950934"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950934" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950934">(Mar 12 2021 at 00:04)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592817289">PR Review Comment</a>:</p>
+<blockquote>
+<p>Updated comment here -- yes, you're right, the range is actually 504 bytes. I've written out the reasoning here w.r.t. simplicity and avoiding a two-stage frame setup with big frames.</p>
+</blockquote>
+
+
+
+<a name="229950960"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950960" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950960">(Mar 12 2021 at 00:05)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610345261">PR Review</a>.</p>
+
+
+
+<a name="229950961"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229950961" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229950961">(Mar 12 2021 at 00:05)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592817378">PR Review Comment</a>:</p>
+<blockquote>
+<p>Updated comment.</p>
+</blockquote>
+
+
+
+<a name="229951017"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951017" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951017">(Mar 12 2021 at 00:05)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610345489">PR Review</a>.</p>
+
+
+
+<a name="229951018"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951018" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951018">(Mar 12 2021 at 00:05)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592817609">PR Review Comment</a>:</p>
+<blockquote>
+<p>Yep, I've removed all traces of the epilogue attempt now.</p>
+</blockquote>
+
+
+
+<a name="229951033"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951033" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951033">(Mar 12 2021 at 00:05)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610345645">PR Review</a>.</p>
+
+
+
+<a name="229951034"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951034" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951034">(Mar 12 2021 at 00:05)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592817746">PR Review Comment</a>:</p>
+<blockquote>
+<p>Added to the doc-comment! I've also removed this to <code>PushFrameRegs</code> rather than <code>PushOldFP</code>.</p>
+</blockquote>
+
+
+
+<a name="229951084"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951084" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951084">(Mar 12 2021 at 00:06)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610345704">PR Review</a>.</p>
+
+
+
+<a name="229951085"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951085" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951085">(Mar 12 2021 at 00:06)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592817795">PR Review Comment</a>:</p>
+<blockquote>
+<p>Updated.</p>
+</blockquote>
+
+
+
+<a name="229951127"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951127" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951127">(Mar 12 2021 at 00:06)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610345763">PR Review</a>.</p>
+
+
+
+<a name="229951128"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951128" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951128">(Mar 12 2021 at 00:06)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592817851">PR Review Comment</a>:</p>
+<blockquote>
+<p>Updated.</p>
+</blockquote>
+
+
+
+<a name="229951567"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951567" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951567">(Mar 12 2021 at 00:10)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229951713"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229951713" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229951713">(Mar 12 2021 at 00:11)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229956772"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229956772" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229956772">(Mar 12 2021 at 00:59)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229958644"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229958644" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229958644">(Mar 12 2021 at 01:18)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229959654"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229959654" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229959654">(Mar 12 2021 at 01:30)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610380556">PR Review</a>.</p>
+
+
+
+<a name="229959821"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229959821" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229959821">(Mar 12 2021 at 01:31)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610364645">PR Review</a>.</p>
+
+
+
+<a name="229959822"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229959822" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229959822">(Mar 12 2021 at 01:31)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610364645">PR Review</a>.</p>
+
+
+
+<a name="229959823"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229959823" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229959823">(Mar 12 2021 at 01:31)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592834280">PR Review Comment</a>:</p>
+<blockquote>
+<p>Minor nit: perhaps we should probably mention here that describing epilogues is not required by some platforms for correct operation.  For example, Windows x64 unwind information doesn't describe epilogues as the epilogues are required to be a particular shape and the OS can "virtually run them forward" to unwind the frame when inside an epilogue.</p>
+</blockquote>
+
+
+
+<a name="229959824"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229959824" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229959824">(Mar 12 2021 at 01:31)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592844167">PR Review Comment</a>:</p>
+<blockquote>
+<p>Is this match (and others like it) intentionally truncated?</p>
+</blockquote>
+
+
+
+<a name="229959825"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229959825" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229959825">(Mar 12 2021 at 01:31)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592845363">PR Review Comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>//! 240 bytes of RBP. Finally, it is not allowed to access memory
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="229972560"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229972560" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229972560">(Mar 12 2021 at 04:04)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a> from <code>x64-fastcall-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="229972578"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229972578" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229972578">(Mar 12 2021 at 04:04)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610434898">PR Review</a>.</p>
+
+
+
+<a name="229972579"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229972579" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229972579">(Mar 12 2021 at 04:04)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592895879">PR Review Comment</a>:</p>
+<blockquote>
+<p>Good point, done!</p>
+</blockquote>
+
+
+
+<a name="229972723"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229972723" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229972723">(Mar 12 2021 at 04:06)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610435509">PR Review</a>.</p>
+
+
+
+<a name="229972724"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229972724" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229972724">(Mar 12 2021 at 04:06)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592896442">PR Review Comment</a>:</p>
+<blockquote>
+<p>Ah, no, I had meant to fill these in after capturing the registers (the <code>Debug</code>-printed versions use regalloc indices); thanks!</p>
+</blockquote>
+
+
+
+<a name="229972743"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229972743" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229972743">(Mar 12 2021 at 04:07)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#pullrequestreview-610435562">PR Review</a>.</p>
+
+
+
+<a name="229972746"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229972746" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229972746">(Mar 12 2021 at 04:07)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2710#discussion_r592896484">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done.</p>
+</blockquote>
+
+
+
+<a name="229975774"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232710%20Rework/simplify%20unwind%20infrastructure.../near/229975774" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232710.20Rework.2Fsimplify.20unwind.20infrastructure.2E.2E.2E.html#229975774">(Mar 12 2021 at 04:47)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/2710">PR #2710</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

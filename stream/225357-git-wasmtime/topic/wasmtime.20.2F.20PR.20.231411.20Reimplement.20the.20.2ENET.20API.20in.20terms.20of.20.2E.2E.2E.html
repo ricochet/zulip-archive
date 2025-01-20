@@ -1,0 +1,533 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #1411 Reimplement the .NET API in terms of ... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html">wasmtime / PR #1411 Reimplement the .NET API in terms of ...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="191832360"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191832360" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191832360">(Mar 26 2020 at 01:49)</a>:</h4>
+<p>peterhuene opened <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a> from <code>reimplement-dotnet-api</code> to <code>master</code>:</p>
+<blockquote>
+<p>This PR takes a new approach to the .NET API.</p>
+<p>Instead of using reflection to bind .NET code to host imports, we now internally use a <code>Linker</code> from Wasmtime to preform the binding.</p>
+<p>This allows a much closer abstraction to what the Rust API has.  In the new API, users interact with the <code>Host</code> type that represents a hosting environment for WebAssembly modules.  It internally hides the <code>Engine</code>, <code>Store</code>, and <code>Linker</code> types.</p>
+<p>So this:</p>
+<div class="codehilite"><pre><span></span><span class="k">class</span> <span class="nc">Host</span> <span class="p">:</span> <span class="n">IHost</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="n">Instance</span> <span class="n">Instance</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+
+<span class="na">    [Import(&quot;hello&quot;)]</span>
+    <span class="k">public</span> <span class="k">void</span> <span class="nf">SayHello</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Program</span>
+<span class="p">{</span>
+    <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">engine</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Engine</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">store</span> <span class="p">=</span> <span class="n">engine</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">store</span><span class="p">.</span><span class="n">CreateModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+        <span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">module</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="k">new</span> <span class="n">Host</span><span class="p">());</span>
+
+        <span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>becomes this:</p>
+<div class="codehilite"><pre><span></span><span class="k">using</span> <span class="nn">var</span> <span class="n">host</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Host</span><span class="p">();</span>
+
+<span class="n">host</span><span class="p">.</span><span class="n">DefineFunction</span><span class="p">(</span>
+    <span class="s">&quot;&quot;</span><span class="p">,</span>
+    <span class="s">&quot;hello&quot;</span><span class="p">,</span>
+    <span class="p">()</span> <span class="p">=&gt;</span> <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">LoadModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+<span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+</pre></div>
+
+
+<p>Where <code>DefineFunction</code> accepts lambdas up to 16 parameters (of acceptable Wasm types).  The lambdas can also return tuples to represent multiple return values (of acceptable Wasm types).</p>
+<p>Along with this PR are changes that make the WASI C API configurable on the module name, allowing users to call <code>Host.DefineWasi</code> with <code>wasi_snapshot_preview1</code> or <code>wasi_unsable</code>.</p>
+</blockquote>
+
+
+
+<a name="191832732"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191832732" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191832732">(Mar 26 2020 at 01:56)</a>:</h4>
+<p>peterhuene updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a> from <code>reimplement-dotnet-api</code> to <code>master</code>:</p>
+<blockquote>
+<p>This PR takes a new approach to the .NET API.</p>
+<p>Instead of using reflection to bind .NET code to host imports, we now internally use a <code>Linker</code> from Wasmtime to preform the binding.</p>
+<p>This allows a much closer abstraction to what the Rust API has.  In the new API, users interact with the <code>Host</code> type that represents a hosting environment for WebAssembly modules.  It internally hides the <code>Engine</code>, <code>Store</code>, and <code>Linker</code> types.</p>
+<p>So this:</p>
+<div class="codehilite"><pre><span></span><span class="k">class</span> <span class="nc">Host</span> <span class="p">:</span> <span class="n">IHost</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="n">Instance</span> <span class="n">Instance</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+
+<span class="na">    [Import(&quot;hello&quot;)]</span>
+    <span class="k">public</span> <span class="k">void</span> <span class="nf">SayHello</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Program</span>
+<span class="p">{</span>
+    <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">engine</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Engine</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">store</span> <span class="p">=</span> <span class="n">engine</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">store</span><span class="p">.</span><span class="n">CreateModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+        <span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">module</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="k">new</span> <span class="n">Host</span><span class="p">());</span>
+
+        <span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>becomes this:</p>
+<div class="codehilite"><pre><span></span><span class="k">using</span> <span class="nn">var</span> <span class="n">host</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Host</span><span class="p">();</span>
+
+<span class="n">host</span><span class="p">.</span><span class="n">DefineFunction</span><span class="p">(</span>
+    <span class="s">&quot;&quot;</span><span class="p">,</span>
+    <span class="s">&quot;hello&quot;</span><span class="p">,</span>
+    <span class="p">()</span> <span class="p">=&gt;</span> <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">LoadModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+<span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+</pre></div>
+
+
+<p>Where <code>DefineFunction</code> accepts lambdas up to 16 parameters (of acceptable Wasm types).  The lambdas can also return tuples to represent multiple return values (of acceptable Wasm types).</p>
+<p>Along with this PR are changes that make the WASI C API configurable on the module name, allowing users to call <code>Host.DefineWasi</code> with <code>wasi_snapshot_preview1</code> or <code>wasi_unsable</code>.</p>
+</blockquote>
+
+
+
+<a name="191833141"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191833141" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191833141">(Mar 26 2020 at 02:05)</a>:</h4>
+<p>peterhuene updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a> from <code>reimplement-dotnet-api</code> to <code>master</code>:</p>
+<blockquote>
+<p>This PR takes a new approach to the .NET API.</p>
+<p>Instead of using reflection to bind .NET code to host imports, we now internally use a <code>Linker</code> from Wasmtime to preform the binding.</p>
+<p>This allows a much closer abstraction to what the Rust API has.  In the new API, users interact with the <code>Host</code> type that represents a hosting environment for WebAssembly modules.  It internally hides the <code>Engine</code>, <code>Store</code>, and <code>Linker</code> types.</p>
+<p>So this:</p>
+<div class="codehilite"><pre><span></span><span class="k">class</span> <span class="nc">Host</span> <span class="p">:</span> <span class="n">IHost</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="n">Instance</span> <span class="n">Instance</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+
+<span class="na">    [Import(&quot;hello&quot;)]</span>
+    <span class="k">public</span> <span class="k">void</span> <span class="nf">SayHello</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Program</span>
+<span class="p">{</span>
+    <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">engine</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Engine</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">store</span> <span class="p">=</span> <span class="n">engine</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">store</span><span class="p">.</span><span class="n">CreateModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+        <span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">module</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="k">new</span> <span class="n">Host</span><span class="p">());</span>
+
+        <span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>becomes this:</p>
+<div class="codehilite"><pre><span></span><span class="k">using</span> <span class="nn">var</span> <span class="n">host</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Host</span><span class="p">();</span>
+
+<span class="n">host</span><span class="p">.</span><span class="n">DefineFunction</span><span class="p">(</span>
+    <span class="s">&quot;&quot;</span><span class="p">,</span>
+    <span class="s">&quot;hello&quot;</span><span class="p">,</span>
+    <span class="p">()</span> <span class="p">=&gt;</span> <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">LoadModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+<span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+</pre></div>
+
+
+<p>Where <code>DefineFunction</code> accepts lambdas up to 16 parameters (of acceptable Wasm types).  The lambdas can also return tuples to represent multiple return values (of acceptable Wasm types).</p>
+<p>Along with this PR are changes that make the WASI C API configurable on the module name, allowing users to call <code>Host.DefineWasi</code> with <code>wasi_snapshot_preview1</code> or <code>wasi_unsable</code>.</p>
+</blockquote>
+
+
+
+<a name="191836715"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191836715" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191836715">(Mar 26 2020 at 03:21)</a>:</h4>
+<p>peterhuene updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a> from <code>reimplement-dotnet-api</code> to <code>master</code>:</p>
+<blockquote>
+<p>This PR takes a new approach to the .NET API.</p>
+<p>Instead of using reflection to bind .NET code to host imports, we now internally use a <code>Linker</code> from Wasmtime to preform the binding.</p>
+<p>This allows a much closer abstraction to what the Rust API has.  In the new API, users interact with the <code>Host</code> type that represents a hosting environment for WebAssembly modules.  It internally hides the <code>Engine</code>, <code>Store</code>, and <code>Linker</code> types.</p>
+<p>So this:</p>
+<div class="codehilite"><pre><span></span><span class="k">class</span> <span class="nc">Host</span> <span class="p">:</span> <span class="n">IHost</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="n">Instance</span> <span class="n">Instance</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+
+<span class="na">    [Import(&quot;hello&quot;)]</span>
+    <span class="k">public</span> <span class="k">void</span> <span class="nf">SayHello</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Program</span>
+<span class="p">{</span>
+    <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">engine</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Engine</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">store</span> <span class="p">=</span> <span class="n">engine</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">store</span><span class="p">.</span><span class="n">CreateModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+        <span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">module</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="k">new</span> <span class="n">Host</span><span class="p">());</span>
+
+        <span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>becomes this:</p>
+<div class="codehilite"><pre><span></span><span class="k">using</span> <span class="nn">var</span> <span class="n">host</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Host</span><span class="p">();</span>
+
+<span class="n">host</span><span class="p">.</span><span class="n">DefineFunction</span><span class="p">(</span>
+    <span class="s">&quot;&quot;</span><span class="p">,</span>
+    <span class="s">&quot;hello&quot;</span><span class="p">,</span>
+    <span class="p">()</span> <span class="p">=&gt;</span> <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">LoadModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+<span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+</pre></div>
+
+
+<p>Where <code>DefineFunction</code> accepts lambdas up to 16 parameters (of acceptable Wasm types).  The lambdas can also return tuples to represent multiple return values (of acceptable Wasm types).</p>
+<p>Along with this PR are changes that make the WASI C API configurable on the module name, allowing users to call <code>Host.DefineWasi</code> with <code>wasi_snapshot_preview1</code> or <code>wasi_unsable</code>.</p>
+</blockquote>
+
+
+
+<a name="191842495"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191842495" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191842495">(Mar 26 2020 at 05:50)</a>:</h4>
+<p>peterhuene updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a> from <code>reimplement-dotnet-api</code> to <code>master</code>:</p>
+<blockquote>
+<p>This PR takes a new approach to the .NET API.</p>
+<p>Instead of using reflection to bind .NET code to host imports, we now internally use a <code>Linker</code> from Wasmtime to preform the binding.</p>
+<p>This allows a much closer abstraction to what the Rust API has.  In the new API, users interact with the <code>Host</code> type that represents a hosting environment for WebAssembly modules.  It internally hides the <code>Engine</code>, <code>Store</code>, and <code>Linker</code> types.</p>
+<p>So this:</p>
+<div class="codehilite"><pre><span></span><span class="k">class</span> <span class="nc">Host</span> <span class="p">:</span> <span class="n">IHost</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="n">Instance</span> <span class="n">Instance</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+
+<span class="na">    [Import(&quot;hello&quot;)]</span>
+    <span class="k">public</span> <span class="k">void</span> <span class="nf">SayHello</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Program</span>
+<span class="p">{</span>
+    <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">engine</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Engine</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">store</span> <span class="p">=</span> <span class="n">engine</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">store</span><span class="p">.</span><span class="n">CreateModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+        <span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">module</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="k">new</span> <span class="n">Host</span><span class="p">());</span>
+
+        <span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>becomes this:</p>
+<div class="codehilite"><pre><span></span><span class="k">using</span> <span class="nn">var</span> <span class="n">host</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Host</span><span class="p">();</span>
+
+<span class="n">host</span><span class="p">.</span><span class="n">DefineFunction</span><span class="p">(</span>
+    <span class="s">&quot;&quot;</span><span class="p">,</span>
+    <span class="s">&quot;hello&quot;</span><span class="p">,</span>
+    <span class="p">()</span> <span class="p">=&gt;</span> <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">LoadModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+<span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+</pre></div>
+
+
+<p>Where <code>DefineFunction</code> accepts lambdas up to 16 parameters (of acceptable Wasm types).  The lambdas can also return tuples to represent multiple return values (of acceptable Wasm types).</p>
+<p>Along with this PR are changes that make the WASI C API configurable on the module name, allowing users to call <code>Host.DefineWasi</code> with <code>wasi_snapshot_preview1</code> or <code>wasi_unsable</code>.</p>
+</blockquote>
+
+
+
+<a name="191849934"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191849934" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191849934">(Mar 26 2020 at 08:12)</a>:</h4>
+<p>peterhuene updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a> from <code>reimplement-dotnet-api</code> to <code>master</code>:</p>
+<blockquote>
+<p>This PR takes a new approach to the .NET API.</p>
+<p>Instead of using reflection to bind .NET code to host imports, we now internally use a <code>Linker</code> from Wasmtime to preform the binding.</p>
+<p>This allows a much closer abstraction to what the Rust API has.  In the new API, users interact with the <code>Host</code> type that represents a hosting environment for WebAssembly modules.  It internally hides the <code>Engine</code>, <code>Store</code>, and <code>Linker</code> types.</p>
+<p>So this:</p>
+<div class="codehilite"><pre><span></span><span class="k">class</span> <span class="nc">Host</span> <span class="p">:</span> <span class="n">IHost</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="n">Instance</span> <span class="n">Instance</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+
+<span class="na">    [Import(&quot;hello&quot;)]</span>
+    <span class="k">public</span> <span class="k">void</span> <span class="nf">SayHello</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Program</span>
+<span class="p">{</span>
+    <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">engine</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Engine</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">store</span> <span class="p">=</span> <span class="n">engine</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">store</span><span class="p">.</span><span class="n">CreateModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+        <span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">module</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="k">new</span> <span class="n">Host</span><span class="p">());</span>
+
+        <span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>becomes this:</p>
+<div class="codehilite"><pre><span></span><span class="k">using</span> <span class="nn">var</span> <span class="n">host</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Host</span><span class="p">();</span>
+
+<span class="n">host</span><span class="p">.</span><span class="n">DefineFunction</span><span class="p">(</span>
+    <span class="s">&quot;&quot;</span><span class="p">,</span>
+    <span class="s">&quot;hello&quot;</span><span class="p">,</span>
+    <span class="p">()</span> <span class="p">=&gt;</span> <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">LoadModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+<span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+</pre></div>
+
+
+<p>Where <code>DefineFunction</code> accepts lambdas up to 16 parameters (of acceptable Wasm types).  The lambdas can also return tuples to represent multiple return values (of acceptable Wasm types).</p>
+<p>Along with this PR are changes that make the WASI C API configurable on the module name, allowing users to call <code>Host.DefineWasi</code> with <code>wasi_snapshot_preview1</code> or <code>wasi_unsable</code>.</p>
+</blockquote>
+
+
+
+<a name="191850185"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191850185" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191850185">(Mar 26 2020 at 08:15)</a>:</h4>
+<p>peterhuene updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a> from <code>reimplement-dotnet-api</code> to <code>master</code>:</p>
+<blockquote>
+<p>This PR takes a new approach to the .NET API.</p>
+<p>Instead of using reflection to bind .NET code to host imports, we now internally use a <code>Linker</code> from Wasmtime to preform the binding.</p>
+<p>This allows a much closer abstraction to what the Rust API has.  In the new API, users interact with the <code>Host</code> type that represents a hosting environment for WebAssembly modules.  It internally hides the <code>Engine</code>, <code>Store</code>, and <code>Linker</code> types.</p>
+<p>So this:</p>
+<div class="codehilite"><pre><span></span><span class="k">class</span> <span class="nc">Host</span> <span class="p">:</span> <span class="n">IHost</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="n">Instance</span> <span class="n">Instance</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+
+<span class="na">    [Import(&quot;hello&quot;)]</span>
+    <span class="k">public</span> <span class="k">void</span> <span class="nf">SayHello</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Program</span>
+<span class="p">{</span>
+    <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">engine</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Engine</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">store</span> <span class="p">=</span> <span class="n">engine</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">store</span><span class="p">.</span><span class="n">CreateModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+        <span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">module</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="k">new</span> <span class="n">Host</span><span class="p">());</span>
+
+        <span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>becomes this:</p>
+<div class="codehilite"><pre><span></span><span class="k">using</span> <span class="nn">var</span> <span class="n">host</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Host</span><span class="p">();</span>
+
+<span class="n">host</span><span class="p">.</span><span class="n">DefineFunction</span><span class="p">(</span>
+    <span class="s">&quot;&quot;</span><span class="p">,</span>
+    <span class="s">&quot;hello&quot;</span><span class="p">,</span>
+    <span class="p">()</span> <span class="p">=&gt;</span> <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">LoadModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+<span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+</pre></div>
+
+
+<p>Where <code>DefineFunction</code> accepts lambdas up to 16 parameters (of acceptable Wasm types).  The lambdas can also return tuples to represent multiple return values (of acceptable Wasm types).</p>
+<p>Along with this PR are changes that make the WASI C API configurable on the module name, allowing users to call <code>Host.DefineWasi</code> with <code>wasi_snapshot_preview1</code> or <code>wasi_unsable</code>.</p>
+</blockquote>
+
+
+
+<a name="191904963"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191904963" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191904963">(Mar 26 2020 at 15:49)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382137542" title="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382137542">PR Review</a>.</p>
+
+
+
+<a name="191904964"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191904964" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191904964">(Mar 26 2020 at 15:49)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382137542" title="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382137542">PR Review</a>.</p>
+
+
+
+<a name="191904965"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191904965" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191904965">(Mar 26 2020 at 15:49)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#discussion_r398673644" title="https://github.com/bytecodealliance/wasmtime/pull/1411#discussion_r398673644">PR Review Comment</a>:</p>
+<blockquote>
+<p>We might end up having a number of configuration options, so could this become a configuration method rather than a constructor parameter?</p>
+</blockquote>
+
+
+
+<a name="191904967"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191904967" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191904967">(Mar 26 2020 at 15:49)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#discussion_r398674040" title="https://github.com/bytecodealliance/wasmtime/pull/1411#discussion_r398674040">PR Review Comment</a>:</p>
+<blockquote>
+<p>Perhaps we could go ahead with the fully general <code>new_with_env</code> custom function for wasmtime itself?</p>
+</blockquote>
+
+
+
+<a name="191926336"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191926336" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191926336">(Mar 26 2020 at 18:06)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382277252" title="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382277252">PR Review</a>.</p>
+
+
+
+<a name="191926337"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191926337" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191926337">(Mar 26 2020 at 18:06)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#discussion_r398783475" title="https://github.com/bytecodealliance/wasmtime/pull/1411#discussion_r398783475">PR Review Comment</a>:</p>
+<blockquote>
+<p>I'll change it to a function.</p>
+</blockquote>
+
+
+
+<a name="191926477"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191926477" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191926477">(Mar 26 2020 at 18:07)</a>:</h4>
+<p>peterhuene created <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#discussion_r398785140" title="https://github.com/bytecodealliance/wasmtime/pull/1411#discussion_r398785140">PR Review Comment</a>:</p>
+<blockquote>
+<p>Can do.  I'll see about sharing the impls between these and the <code>wasm_</code> counterparts the best we can, too.</p>
+</blockquote>
+
+
+
+<a name="191926478"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191926478" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191926478">(Mar 26 2020 at 18:07)</a>:</h4>
+<p>peterhuene submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382278779" title="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382278779">PR Review</a>.</p>
+
+
+
+<a name="191931797"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191931797" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191931797">(Mar 26 2020 at 18:48)</a>:</h4>
+<p>peterhuene updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a> from <code>reimplement-dotnet-api</code> to <code>master</code>:</p>
+<blockquote>
+<p>This PR takes a new approach to the .NET API.</p>
+<p>Instead of using reflection to bind .NET code to host imports, we now internally use a <code>Linker</code> from Wasmtime to preform the binding.</p>
+<p>This allows a much closer abstraction to what the Rust API has.  In the new API, users interact with the <code>Host</code> type that represents a hosting environment for WebAssembly modules.  It internally hides the <code>Engine</code>, <code>Store</code>, and <code>Linker</code> types.</p>
+<p>So this:</p>
+<div class="codehilite"><pre><span></span><span class="k">class</span> <span class="nc">Host</span> <span class="p">:</span> <span class="n">IHost</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="n">Instance</span> <span class="n">Instance</span> <span class="p">{</span> <span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;</span> <span class="p">}</span>
+
+<span class="na">    [Import(&quot;hello&quot;)]</span>
+    <span class="k">public</span> <span class="k">void</span> <span class="nf">SayHello</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Program</span>
+<span class="p">{</span>
+    <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">engine</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Engine</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">store</span> <span class="p">=</span> <span class="n">engine</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">();</span>
+        <span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">store</span><span class="p">.</span><span class="n">CreateModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+        <span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">module</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="k">new</span> <span class="n">Host</span><span class="p">());</span>
+
+        <span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>becomes this:</p>
+<div class="codehilite"><pre><span></span><span class="k">using</span> <span class="nn">var</span> <span class="n">host</span> <span class="p">=</span> <span class="k">new</span> <span class="n">Host</span><span class="p">();</span>
+
+<span class="n">host</span><span class="p">.</span><span class="n">DefineFunction</span><span class="p">(</span>
+    <span class="s">&quot;&quot;</span><span class="p">,</span>
+    <span class="s">&quot;hello&quot;</span><span class="p">,</span>
+    <span class="p">()</span> <span class="p">=&gt;</span> <span class="n">Console</span><span class="p">.</span><span class="n">WriteLine</span><span class="p">(</span><span class="s">&quot;Hello from C#, WebAssembly!&quot;</span><span class="p">)</span>
+<span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">var</span> <span class="n">module</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">LoadModule</span><span class="p">(</span><span class="s">&quot;hello.wasm&quot;</span><span class="p">);</span>
+
+<span class="k">using</span> <span class="nn">dynamic</span> <span class="n">instance</span> <span class="p">=</span> <span class="n">host</span><span class="p">.</span><span class="n">Instantiate</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+<span class="n">instance</span><span class="p">.</span><span class="n">run</span><span class="p">();</span>
+</pre></div>
+
+
+<p>Where <code>DefineFunction</code> accepts lambdas up to 16 parameters (of acceptable Wasm types).  The lambdas can also return tuples to represent multiple return values (of acceptable Wasm types).</p>
+<p>Along with this PR are changes that make the WASI C API configurable on the module name, allowing users to call <code>Host.DefineWasi</code> with <code>wasi_snapshot_preview1</code> or <code>wasi_unsable</code>.</p>
+</blockquote>
+
+
+
+<a name="191935882"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191935882" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191935882">(Mar 26 2020 at 19:20)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382339940" title="https://github.com/bytecodealliance/wasmtime/pull/1411#pullrequestreview-382339940">PR Review</a>.</p>
+
+
+
+<a name="191937887"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231411%20Reimplement%20the%20.NET%20API%20in%20terms%20of%20.../near/191937887" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231411.20Reimplement.20the.20.2ENET.20API.20in.20terms.20of.20.2E.2E.2E.html#191937887">(Mar 26 2020 at 19:35)</a>:</h4>
+<p>peterhuene merged <a href="https://github.com/bytecodealliance/wasmtime/pull/1411" title="https://github.com/bytecodealliance/wasmtime/pull/1411">PR #1411</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

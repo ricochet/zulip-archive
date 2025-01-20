@@ -1,0 +1,283 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #4890 x64: Incorrect out-of-bounds acces... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html">wasmtime / issue #4890 x64: Incorrect out-of-bounds acces...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="298028845"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298028845" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298028845">(Sep 09 2022 at 18:13)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>This input module:</p>
+<div class="codehilite" data-code-language="wasm"><pre><span></span><code>(module
+  (func (param i32) (result f32)
+    f32.const 0
+    local.get 0
+    f32.load offset=1
+    f32.copysign
+  )
+  (memory 1)
+  (export "" (func 0))
+)
+</code></pre></div>
+<p>yields:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">$</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">-</span><span class="n">q</span><span class="w"> </span><span class="n">testcase0</span><span class="p">.</span><span class="n">shrunken</span><span class="p">.</span><span class="n">wat</span><span class="w"> </span><span class="o">--</span><span class="n">invoke</span><span class="w"> </span><span class="o">''</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="n">warning</span>: <span class="nc">using</span><span class="w"> </span><span class="err">`</span><span class="o">--</span><span class="n">invoke</span><span class="err">`</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">that</span><span class="w"> </span><span class="n">takes</span><span class="w"> </span><span class="n">arguments</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">experimental</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">may</span><span class="w"> </span><span class="k">break</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">future</span><span class="w"></span>
+<span class="n">Error</span>: <span class="nc">failed</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="n">main</span><span class="w"> </span><span class="n">module</span><span class="w"> </span><span class="err">`</span><span class="n">testcase0</span><span class="p">.</span><span class="n">shrunken</span><span class="p">.</span><span class="n">wat</span><span class="err">`</span><span class="w"></span>
+
+<span class="n">Caused</span><span class="w"> </span><span class="n">by</span>:
+    <span class="mi">0</span>: <span class="nc">failed</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">invoke</span><span class="w"> </span><span class="err">``</span><span class="w"></span>
+<span class="w">    </span><span class="mi">1</span>: <span class="nc">wasm</span><span class="w"> </span><span class="n">trap</span>: <span class="nc">out</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">bounds</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">access</span><span class="w"></span>
+<span class="w">       </span><span class="n">wasm</span><span class="w"> </span><span class="n">backtrace</span>:
+           <span class="mi">0</span>:   <span class="mh">0x2e</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">&lt;</span><span class="n">unknown</span><span class="o">&gt;!&lt;</span><span class="n">wasm</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="mi">0</span><span class="o">&gt;</span><span class="w"></span>
+</code></pre></div>
+<p>but the trap reported here is incorrect because there is no out-of-bounds memory access in this module. Instead what's happening is that in the compile function:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">0000000000000000</span><span class="w"> </span><span class="err">&lt;</span><span class="nf">_wasm_function_0</span><span class="err">&gt;</span><span class="p">:</span><span class="w"></span>
+<span class="w">       </span><span class="err">0:</span><span class="w">       </span><span class="err">55</span><span class="w">                      </span><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">       </span><span class="err">1:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">89</span><span class="w"> </span><span class="nf">e5</span><span class="w">                </span><span class="no">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">       </span><span class="err">4:</span><span class="w">       </span><span class="err">8</span><span class="nf">b</span><span class="w"> </span><span class="no">c2</span><span class="w">                   </span><span class="no">mov</span><span class="w">    </span><span class="nv">%edx</span><span class="p">,</span><span class="nv">%eax</span><span class="w"></span>
+<span class="w">       </span><span class="err">6:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">8</span><span class="nf">b</span><span class="w"> </span><span class="mi">4</span><span class="no">f</span><span class="w"> </span><span class="mi">50</span><span class="w">             </span><span class="no">mov</span><span class="w">    </span><span class="mi">0x50</span><span class="p">(</span><span class="nv">%rdi</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="w">       </span><span class="nl">a:</span><span class="w">       </span><span class="err">41</span><span class="w"> </span><span class="nf">ba</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">80</span><span class="w">       </span><span class="no">mov</span><span class="w">    </span><span class="no">$0x80000000</span><span class="p">,</span><span class="nv">%r10d</span><span class="w"></span>
+<span class="w">      </span><span class="err">10:</span><span class="w">       </span><span class="err">66</span><span class="w"> </span><span class="err">45</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">6</span><span class="no">e</span><span class="w"> </span><span class="no">da</span><span class="w">          </span><span class="no">movd</span><span class="w">   </span><span class="nv">%r10d</span><span class="p">,</span><span class="nv">%xmm11</span><span class="w"></span>
+<span class="w">      </span><span class="err">15:</span><span class="w">       </span><span class="err">66</span><span class="w"> </span><span class="err">41</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">6</span><span class="no">f</span><span class="w"> </span><span class="no">c3</span><span class="w">          </span><span class="no">movdqa</span><span class="w"> </span><span class="nv">%xmm11</span><span class="p">,</span><span class="nv">%xmm0</span><span class="w"></span>
+<span class="w">      </span><span class="err">1</span><span class="nl">a:</span><span class="w">       </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">55</span><span class="w"> </span><span class="mi">05</span><span class="w"> </span><span class="mi">0</span><span class="no">f</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w">    </span><span class="no">andnps</span><span class="w"> </span><span class="mi">0xf</span><span class="p">(</span><span class="nv">%rip</span><span class="p">),</span><span class="nv">%xmm0</span><span class="w">        </span><span class="c1"># 30 &lt;_wasm_function_0+0x30&gt;</span>
+<span class="w">      </span><span class="err">21:</span><span class="w">       </span><span class="err">44</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">54</span><span class="w"> </span><span class="mi">5</span><span class="no">c</span><span class="w"> </span><span class="mi">01</span><span class="w"> </span><span class="mi">01</span><span class="w">       </span><span class="no">andps</span><span class="w">  </span><span class="mi">0x1</span><span class="p">(</span><span class="nv">%rcx</span><span class="p">,</span><span class="nv">%rax</span><span class="p">,</span><span class="mi">1</span><span class="p">),</span><span class="nv">%xmm11</span><span class="w"></span>
+<span class="w">      </span><span class="err">27:</span><span class="w">       </span><span class="err">41</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">56</span><span class="w"> </span><span class="no">c3</span><span class="w">             </span><span class="no">orps</span><span class="w">   </span><span class="nv">%xmm11</span><span class="p">,</span><span class="nv">%xmm0</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">b:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">89</span><span class="w"> </span><span class="nf">ec</span><span class="w">                </span><span class="no">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">e:</span><span class="w">       </span><span class="err">5</span><span class="nf">d</span><span class="w">                      </span><span class="no">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">f:</span><span class="w">       </span><span class="nf">c3</span><span class="w">                      </span><span class="no">retq</span><span class="w"></span>
+</code></pre></div>
+<p>The instruction at 0x21 is segfaulting due to a misaligned address. The segfault is also registered as a trap point in Wasmtime since I believe this is a folding of the <code>f32.load</code> into the <code>f32.copysign</code> and so this could also segfault due to an out-of-bounds memory access.</p>
+<p>Bisection reveals that this issue become a segfault in #4730 and then became a trap in #4790 (cc @elliottt). We'll want to be sure to backport the fix for this to the release-1.0.0 branch as well.</p>
+</blockquote>
+
+
+
+<a name="298028847"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298028847" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298028847">(Sep 09 2022 at 18:13)</a>:</h4>
+<p>alexcrichton labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>This input module:</p>
+<div class="codehilite" data-code-language="wasm"><pre><span></span><code>(module
+  (func (param i32) (result f32)
+    f32.const 0
+    local.get 0
+    f32.load offset=1
+    f32.copysign
+  )
+  (memory 1)
+  (export "" (func 0))
+)
+</code></pre></div>
+<p>yields:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">$</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">-</span><span class="n">q</span><span class="w"> </span><span class="n">testcase0</span><span class="p">.</span><span class="n">shrunken</span><span class="p">.</span><span class="n">wat</span><span class="w"> </span><span class="o">--</span><span class="n">invoke</span><span class="w"> </span><span class="o">''</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="n">warning</span>: <span class="nc">using</span><span class="w"> </span><span class="err">`</span><span class="o">--</span><span class="n">invoke</span><span class="err">`</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">that</span><span class="w"> </span><span class="n">takes</span><span class="w"> </span><span class="n">arguments</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">experimental</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">may</span><span class="w"> </span><span class="k">break</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">future</span><span class="w"></span>
+<span class="n">Error</span>: <span class="nc">failed</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="n">main</span><span class="w"> </span><span class="n">module</span><span class="w"> </span><span class="err">`</span><span class="n">testcase0</span><span class="p">.</span><span class="n">shrunken</span><span class="p">.</span><span class="n">wat</span><span class="err">`</span><span class="w"></span>
+
+<span class="n">Caused</span><span class="w"> </span><span class="n">by</span>:
+    <span class="mi">0</span>: <span class="nc">failed</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">invoke</span><span class="w"> </span><span class="err">``</span><span class="w"></span>
+<span class="w">    </span><span class="mi">1</span>: <span class="nc">wasm</span><span class="w"> </span><span class="n">trap</span>: <span class="nc">out</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">bounds</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">access</span><span class="w"></span>
+<span class="w">       </span><span class="n">wasm</span><span class="w"> </span><span class="n">backtrace</span>:
+           <span class="mi">0</span>:   <span class="mh">0x2e</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">&lt;</span><span class="n">unknown</span><span class="o">&gt;!&lt;</span><span class="n">wasm</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="mi">0</span><span class="o">&gt;</span><span class="w"></span>
+</code></pre></div>
+<p>but the trap reported here is incorrect because there is no out-of-bounds memory access in this module. Instead what's happening is that in the compile function:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">0000000000000000</span><span class="w"> </span><span class="err">&lt;</span><span class="nf">_wasm_function_0</span><span class="err">&gt;</span><span class="p">:</span><span class="w"></span>
+<span class="w">       </span><span class="err">0:</span><span class="w">       </span><span class="err">55</span><span class="w">                      </span><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">       </span><span class="err">1:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">89</span><span class="w"> </span><span class="nf">e5</span><span class="w">                </span><span class="no">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">       </span><span class="err">4:</span><span class="w">       </span><span class="err">8</span><span class="nf">b</span><span class="w"> </span><span class="no">c2</span><span class="w">                   </span><span class="no">mov</span><span class="w">    </span><span class="nv">%edx</span><span class="p">,</span><span class="nv">%eax</span><span class="w"></span>
+<span class="w">       </span><span class="err">6:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">8</span><span class="nf">b</span><span class="w"> </span><span class="mi">4</span><span class="no">f</span><span class="w"> </span><span class="mi">50</span><span class="w">             </span><span class="no">mov</span><span class="w">    </span><span class="mi">0x50</span><span class="p">(</span><span class="nv">%rdi</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="w">       </span><span class="nl">a:</span><span class="w">       </span><span class="err">41</span><span class="w"> </span><span class="nf">ba</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">80</span><span class="w">       </span><span class="no">mov</span><span class="w">    </span><span class="no">$0x80000000</span><span class="p">,</span><span class="nv">%r10d</span><span class="w"></span>
+<span class="w">      </span><span class="err">10:</span><span class="w">       </span><span class="err">66</span><span class="w"> </span><span class="err">45</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">6</span><span class="no">e</span><span class="w"> </span><span class="no">da</span><span class="w">          </span><span class="no">movd</span><span class="w">   </span><span class="nv">%r10d</span><span class="p">,</span><span class="nv">%xmm11</span><span class="w"></span>
+<span class="w">      </span><span class="err">15:</span><span class="w">       </span><span class="err">66</span><span class="w"> </span><span class="err">41</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">6</span><span class="no">f</span><span class="w"> </span><span class="no">c3</span><span class="w">          </span><span class="no">movdqa</span><span class="w"> </span><span class="nv">%xmm11</span><span class="p">,</span><span class="nv">%xmm0</span><span class="w"></span>
+<span class="w">      </span><span class="err">1</span><span class="nl">a:</span><span class="w">       </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">55</span><span class="w"> </span><span class="mi">05</span><span class="w"> </span><span class="mi">0</span><span class="no">f</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w">    </span><span class="no">andnps</span><span class="w"> </span><span class="mi">0xf</span><span class="p">(</span><span class="nv">%rip</span><span class="p">),</span><span class="nv">%xmm0</span><span class="w">        </span><span class="c1"># 30 &lt;_wasm_function_0+0x30&gt;</span>
+<span class="w">      </span><span class="err">21:</span><span class="w">       </span><span class="err">44</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">54</span><span class="w"> </span><span class="mi">5</span><span class="no">c</span><span class="w"> </span><span class="mi">01</span><span class="w"> </span><span class="mi">01</span><span class="w">       </span><span class="no">andps</span><span class="w">  </span><span class="mi">0x1</span><span class="p">(</span><span class="nv">%rcx</span><span class="p">,</span><span class="nv">%rax</span><span class="p">,</span><span class="mi">1</span><span class="p">),</span><span class="nv">%xmm11</span><span class="w"></span>
+<span class="w">      </span><span class="err">27:</span><span class="w">       </span><span class="err">41</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">56</span><span class="w"> </span><span class="no">c3</span><span class="w">             </span><span class="no">orps</span><span class="w">   </span><span class="nv">%xmm11</span><span class="p">,</span><span class="nv">%xmm0</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">b:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">89</span><span class="w"> </span><span class="nf">ec</span><span class="w">                </span><span class="no">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">e:</span><span class="w">       </span><span class="err">5</span><span class="nf">d</span><span class="w">                      </span><span class="no">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">f:</span><span class="w">       </span><span class="nf">c3</span><span class="w">                      </span><span class="no">retq</span><span class="w"></span>
+</code></pre></div>
+<p>The instruction at 0x21 is segfaulting due to a misaligned address. The segfault is also registered as a trap point in Wasmtime since I believe this is a folding of the <code>f32.load</code> into the <code>f32.copysign</code> and so this could also segfault due to an out-of-bounds memory access.</p>
+<p>Bisection reveals that this issue become a segfault in #4730 and then became a trap in #4790 (cc @elliottt). We'll want to be sure to backport the fix for this to the release-1.0.0 branch as well.</p>
+</blockquote>
+
+
+
+<a name="298035149"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298035149" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298035149">(Sep 09 2022 at 18:56)</a>:</h4>
+<p>elliottt <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242353179">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>It seems like we want a stronger condition in <code>put_in_xmm_mem</code>, as we need to know that it's a mergeable load and 16-byte aligned to merge the load:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/2986f6b0fffd576a2ba88a1fc6cb2db959a1f9e8/cranelift/codegen/src/isa/x64/lower/isle.rs#L169-L175">https://github.com/bytecodealliance/wasmtime/blob/2986f6b0fffd576a2ba88a1fc6cb2db959a1f9e8/cranelift/codegen/src/isa/x64/lower/isle.rs#L169-L175</a></p>
+</blockquote>
+
+
+
+<a name="298045723"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298045723" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298045723">(Sep 09 2022 at 20:06)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242411294">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>I sort of suspect that we will find most loads encountered by <code>put_in_xmm_mem</code> won't have any known alignment (greater than 1 byte); at least, in CLIF lowered from Wasm, that will be the case, since Wasm SIMD loads must work with unaligned addresses. The simplest fix here may just be to remove load-op merging in the XMM case, and always force to a register (i.e., delete exactly the lines you highlighted). Thoughts?</p>
+</blockquote>
+
+
+
+<a name="298047250"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298047250" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298047250">(Sep 09 2022 at 20:17)</a>:</h4>
+<p>elliottt <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242420623">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>I was just experimenting with that fix and was going to suggest it :) I'll make a PR!</p>
+</blockquote>
+
+
+
+<a name="298048686"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298048686" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298048686">(Sep 09 2022 at 20:28)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242430471">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>In cg_clif we do almost always know an alignment bigger than 1.</p>
+</blockquote>
+
+
+
+<a name="298051642"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298051642" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298051642">(Sep 09 2022 at 20:52)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242460964">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<blockquote>
+<p>In cg_clif we do almost always know an alignment bigger than 1.</p>
+</blockquote>
+<p>Fair enough; we can eventually look at adding this back, while respecting alignment, but IMHO we should fix the fuzzbug first in the most straightforward way, especially given we want to cherry-pick this to the 1.0 branch too :-)</p>
+</blockquote>
+
+
+
+<a name="298051660"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298051660" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298051660">(Sep 09 2022 at 20:52)</a>:</h4>
+<p>elliottt <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242461113">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>Here's another option: in <code>is_mergable_load</code> we currently only require alignment of the load if the type being loaded is a vector type. Why don't we extend this to floating point types as well?</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/2986f6b0fffd576a2ba88a1fc6cb2db959a1f9e8/cranelift/codegen/src/isa/x64/lower.rs#L107-L111">https://github.com/bytecodealliance/wasmtime/blob/2986f6b0fffd576a2ba88a1fc6cb2db959a1f9e8/cranelift/codegen/src/isa/x64/lower.rs#L107-L111</a></p>
+</blockquote>
+
+
+
+<a name="298051701"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298051701" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298051701">(Sep 09 2022 at 20:53)</a>:</h4>
+<p>elliottt edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242461113">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>Here's another option: in <code>is_mergable_load</code> we currently only require the address to be aligned if the type being loaded is a vector type. Why don't we extend this to floating point types as well?</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/2986f6b0fffd576a2ba88a1fc6cb2db959a1f9e8/cranelift/codegen/src/isa/x64/lower.rs#L107-L111">https://github.com/bytecodealliance/wasmtime/blob/2986f6b0fffd576a2ba88a1fc6cb2db959a1f9e8/cranelift/codegen/src/isa/x64/lower.rs#L107-L111</a></p>
+</blockquote>
+
+
+
+<a name="298051973"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298051973" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298051973">(Sep 09 2022 at 20:55)</a>:</h4>
+<p>elliottt <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242462886">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>We could also pass a flag to <code>is_mergeable_load</code> that indicates if the destination would be an xmm register, and use that in place of the check for <code>load_ty.is_vector()</code>.</p>
+</blockquote>
+
+
+
+<a name="298052097"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298052097" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298052097">(Sep 09 2022 at 20:56)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242463548">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>Possibly, yeah, though it's less obviously clear to me that this covers all cases (e.g. what if some lowering were to somehow load an integer-typed value into an XMM register?). The proximate cause here is that loads into XMM registers merged into SSE instructions need to be aligned, so I'd prefer to take the more risk-averse option for the initial fix and turn that path off altogether, I think...</p>
+</blockquote>
+
+
+
+<a name="298052248"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298052248" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298052248">(Sep 09 2022 at 20:57)</a>:</h4>
+<p>elliottt <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1242464892">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>For now, never merging the loads is obviously correct, and we can always revisit this later :)</p>
+</blockquote>
+
+
+
+<a name="298425744"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298425744" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298425744">(Sep 12 2022 at 17:14)</a>:</h4>
+<p>elliottt closed <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>This input module:</p>
+<div class="codehilite" data-code-language="wasm"><pre><span></span><code>(module
+  (func (param i32) (result f32)
+    f32.const 0
+    local.get 0
+    f32.load offset=1
+    f32.copysign
+  )
+  (memory 1)
+  (export "" (func 0))
+)
+</code></pre></div>
+<p>yields:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">$</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">-</span><span class="n">q</span><span class="w"> </span><span class="n">testcase0</span><span class="p">.</span><span class="n">shrunken</span><span class="p">.</span><span class="n">wat</span><span class="w"> </span><span class="o">--</span><span class="n">invoke</span><span class="w"> </span><span class="o">''</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="n">warning</span>: <span class="nc">using</span><span class="w"> </span><span class="err">`</span><span class="o">--</span><span class="n">invoke</span><span class="err">`</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">that</span><span class="w"> </span><span class="n">takes</span><span class="w"> </span><span class="n">arguments</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">experimental</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">may</span><span class="w"> </span><span class="k">break</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">future</span><span class="w"></span>
+<span class="n">Error</span>: <span class="nc">failed</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="n">main</span><span class="w"> </span><span class="n">module</span><span class="w"> </span><span class="err">`</span><span class="n">testcase0</span><span class="p">.</span><span class="n">shrunken</span><span class="p">.</span><span class="n">wat</span><span class="err">`</span><span class="w"></span>
+
+<span class="n">Caused</span><span class="w"> </span><span class="n">by</span>:
+    <span class="mi">0</span>: <span class="nc">failed</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">invoke</span><span class="w"> </span><span class="err">``</span><span class="w"></span>
+<span class="w">    </span><span class="mi">1</span>: <span class="nc">wasm</span><span class="w"> </span><span class="n">trap</span>: <span class="nc">out</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">bounds</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="n">access</span><span class="w"></span>
+<span class="w">       </span><span class="n">wasm</span><span class="w"> </span><span class="n">backtrace</span>:
+           <span class="mi">0</span>:   <span class="mh">0x2e</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">&lt;</span><span class="n">unknown</span><span class="o">&gt;!&lt;</span><span class="n">wasm</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="mi">0</span><span class="o">&gt;</span><span class="w"></span>
+</code></pre></div>
+<p>but the trap reported here is incorrect because there is no out-of-bounds memory access in this module. Instead what's happening is that in the compile function:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">0000000000000000</span><span class="w"> </span><span class="err">&lt;</span><span class="nf">_wasm_function_0</span><span class="err">&gt;</span><span class="p">:</span><span class="w"></span>
+<span class="w">       </span><span class="err">0:</span><span class="w">       </span><span class="err">55</span><span class="w">                      </span><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">       </span><span class="err">1:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">89</span><span class="w"> </span><span class="nf">e5</span><span class="w">                </span><span class="no">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">       </span><span class="err">4:</span><span class="w">       </span><span class="err">8</span><span class="nf">b</span><span class="w"> </span><span class="no">c2</span><span class="w">                   </span><span class="no">mov</span><span class="w">    </span><span class="nv">%edx</span><span class="p">,</span><span class="nv">%eax</span><span class="w"></span>
+<span class="w">       </span><span class="err">6:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">8</span><span class="nf">b</span><span class="w"> </span><span class="mi">4</span><span class="no">f</span><span class="w"> </span><span class="mi">50</span><span class="w">             </span><span class="no">mov</span><span class="w">    </span><span class="mi">0x50</span><span class="p">(</span><span class="nv">%rdi</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="w">       </span><span class="nl">a:</span><span class="w">       </span><span class="err">41</span><span class="w"> </span><span class="nf">ba</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">80</span><span class="w">       </span><span class="no">mov</span><span class="w">    </span><span class="no">$0x80000000</span><span class="p">,</span><span class="nv">%r10d</span><span class="w"></span>
+<span class="w">      </span><span class="err">10:</span><span class="w">       </span><span class="err">66</span><span class="w"> </span><span class="err">45</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">6</span><span class="no">e</span><span class="w"> </span><span class="no">da</span><span class="w">          </span><span class="no">movd</span><span class="w">   </span><span class="nv">%r10d</span><span class="p">,</span><span class="nv">%xmm11</span><span class="w"></span>
+<span class="w">      </span><span class="err">15:</span><span class="w">       </span><span class="err">66</span><span class="w"> </span><span class="err">41</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">6</span><span class="no">f</span><span class="w"> </span><span class="no">c3</span><span class="w">          </span><span class="no">movdqa</span><span class="w"> </span><span class="nv">%xmm11</span><span class="p">,</span><span class="nv">%xmm0</span><span class="w"></span>
+<span class="w">      </span><span class="err">1</span><span class="nl">a:</span><span class="w">       </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">55</span><span class="w"> </span><span class="mi">05</span><span class="w"> </span><span class="mi">0</span><span class="no">f</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w">    </span><span class="no">andnps</span><span class="w"> </span><span class="mi">0xf</span><span class="p">(</span><span class="nv">%rip</span><span class="p">),</span><span class="nv">%xmm0</span><span class="w">        </span><span class="c1"># 30 &lt;_wasm_function_0+0x30&gt;</span>
+<span class="w">      </span><span class="err">21:</span><span class="w">       </span><span class="err">44</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">54</span><span class="w"> </span><span class="mi">5</span><span class="no">c</span><span class="w"> </span><span class="mi">01</span><span class="w"> </span><span class="mi">01</span><span class="w">       </span><span class="no">andps</span><span class="w">  </span><span class="mi">0x1</span><span class="p">(</span><span class="nv">%rcx</span><span class="p">,</span><span class="nv">%rax</span><span class="p">,</span><span class="mi">1</span><span class="p">),</span><span class="nv">%xmm11</span><span class="w"></span>
+<span class="w">      </span><span class="err">27:</span><span class="w">       </span><span class="err">41</span><span class="w"> </span><span class="err">0</span><span class="nf">f</span><span class="w"> </span><span class="mi">56</span><span class="w"> </span><span class="no">c3</span><span class="w">             </span><span class="no">orps</span><span class="w">   </span><span class="nv">%xmm11</span><span class="p">,</span><span class="nv">%xmm0</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">b:</span><span class="w">       </span><span class="err">48</span><span class="w"> </span><span class="err">89</span><span class="w"> </span><span class="nf">ec</span><span class="w">                </span><span class="no">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">e:</span><span class="w">       </span><span class="err">5</span><span class="nf">d</span><span class="w">                      </span><span class="no">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="w">      </span><span class="err">2</span><span class="nl">f:</span><span class="w">       </span><span class="nf">c3</span><span class="w">                      </span><span class="no">retq</span><span class="w"></span>
+</code></pre></div>
+<p>The instruction at 0x21 is segfaulting due to a misaligned address. The segfault is also registered as a trap point in Wasmtime since I believe this is a folding of the <code>f32.load</code> into the <code>f32.copysign</code> and so this could also segfault due to an out-of-bounds memory access.</p>
+<p>Bisection reveals that this issue become a segfault in #4730 and then became a trap in #4790 (cc @elliottt). We'll want to be sure to backport the fix for this to the release-1.0.0 branch as well.</p>
+</blockquote>
+
+
+
+<a name="298426570"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298426570" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298426570">(Sep 12 2022 at 17:19)</a>:</h4>
+<p>abrown <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1244054387">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>Perhaps there should be an issue to revisit this later? @elliottt brought up what seemed to me like good avenues for fixing this.</p>
+</blockquote>
+
+
+
+<a name="298437004"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298437004" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298437004">(Sep 12 2022 at 18:17)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1244121445">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>@elliottt also would you be up for backporting this to the release-1.0.0 branch? If not no worries and I can do that as well.</p>
+</blockquote>
+
+
+
+<a name="298437664"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234890%20x64%3A%20Incorrect%20out-of-bounds%20acces.../near/298437664" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234890.20x64.3A.20Incorrect.20out-of-bounds.20acces.2E.2E.2E.html#298437664">(Sep 12 2022 at 18:20)</a>:</h4>
+<p>elliottt <a href="https://github.com/bytecodealliance/wasmtime/issues/4890#issuecomment-1244125217">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4890">issue #4890</a>:</p>
+<blockquote>
+<p>Absolutely, I'll make a PR today and send it to you for review.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

@@ -1,0 +1,38 @@
+[
+    {
+        "content": "<p>cfallin opened <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160\">issue #8160</a>:</p>\n<blockquote>\n<p>From <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8158#issuecomment-2002601881\">this comment</a>: it would be great to have an optimization such that</p>\n<blockquote>\n<p>if a table's default funcref is null, don't do lazy-init, and make the 0 bit-pattern mean null rather than non-initialized-pointer-to-anyfunc.</p>\n</blockquote>\n<p>This comes from a circumstance where we know we'll initialize a table slot manually before calling it (not doing so is a program error that should lead to a trap), possibly because we already have a branch for the case where it is null at the program-logic level (e.g. fallback IC). We still must trap on null somehow but #8159 can do that implicitly by detecting a segfault in a load from a <code>NULL</code> anyfunc pointer. The above optimization then means that we do not need the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/7fa71a4f9e34bdb3ba85679d46e9a31a955fdd3a/crates/cranelift/src/func_environ.rs#L954-L1002\">lengthy lazy-init-check sequence</a> on loads from such tables, and we can do so without requiring any initialization at instantiation time either.</p>\n<p>cc @alexcrichton @jameysharp </p>\n</blockquote>",
+        "id": 427212097,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710707000
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160#issuecomment-2004137067\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160\">issue #8160</a>:</p>\n<blockquote>\n<p>I like this idea! Some implementation points I can think of off the top of my head:</p>\n<ul>\n<li>This would only be applicable when there are no <code>elem</code> segments with non-null entries for a table.</li>\n<li>We'd need to store runtime state for each table to know whether it contains tagged functions or non-tagged functions.</li>\n<li>In the <code>Module</code>'s type information we'd need to store this in a <code>TablePlan</code> as well so the table access codegen could take it into account as well as runtime instantiation</li>\n</ul>\n</blockquote>",
+        "id": 427503930,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710773676
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160#issuecomment-2008139705\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160\">issue #8160</a>:</p>\n<blockquote>\n<p>See also <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008139279\">https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008139279</a></p>\n</blockquote>",
+        "id": 427811884,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710882530
+    },
+    {
+        "content": "<p>jameysharp <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160#issuecomment-2008674852\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160\">issue #8160</a>:</p>\n<blockquote>\n<p>An additional requirement, I think, is that we can only do this for tables which are not exported. If another module imports a table, it has no way of knowing at compile time whether this optimization applies.</p>\n<p>I think this technique is still broadly applicable in spite of that though.</p>\n<p>Nick pointed out that we could build a static page full of pointers which are null except the low bit is set, and CoW-map that page repeatedly as the initial table contents, if we know that the table is initially all null. That would be compatible with codegen that can't optimize away the lazy-init check, which would make it safe to export such tables.</p>\n<p>He also pointed out that we could use the same trick to swap the meaning of our sentinel values: a <code>(void*)1</code> would then mean \"uninitialized\", but we could still instantiate quickly without writing a bunch of bytes into a bunch of new pages. Then we'd be able to avoid setting and clearing the lazy-init flag on every table access. When we can prove the initial values are all null, we'd map zero-filled pages instead.</p>\n<p>We discussed many more ideas, but I'll leave it at that for now.</p>\n</blockquote>",
+        "id": 427855992,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710911924
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160#issuecomment-2010644011\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160\">issue #8160</a>:</p>\n<blockquote>\n<p>We talked some more in the Cranelift meeting this morning again about this and I wanted to summarize our thinking here as well.</p>\n<p>The main realization we had was that we can address the concern of \"now there's two kinds of null pointers\" by, well, not having two kinds of null pointers. For example initialization of of an all-null table where the null pointer is <code>(void*) 1</code> would be a bulk-initialization using that value (a memset-but-with-usize-value-things). Either that or an mmap'd memfd or page or something to use VM tricks. More-or-less we realized that we could implement the optimization in this issue, fast initialization of all-null tables, and then in codegen we can omit all lazy init checks since everything is statically known to be initialized.</p>\n</blockquote>",
+        "id": 428016081,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710968952
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160#issuecomment-2018893044\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/8160\">issue #8160</a>:</p>\n<blockquote>\n<p>As a quick data-point to drop here: in a very hacky (work-in-progress) dev branch of SpiderMonkey + weval with traditional funcptr ICs with signature checks simply removed (unsafe!), I measured the impact of the lazy-init table scheme on runtime directly and came up with ~8% -- fairly significant and makes the optimizations discussed here worthwhile, IMHO. (I'm going to \"speculatively live in the glorious future\" with <a href=\"https://github.com/cfallin/wasmtime/tree/experiment-fast-calls\">this branch of wasmtime</a> for all my experiments, which also removes table bounds-checks and stack limit checks, and hope that we can productionize all of this at some point!)</p>\n</blockquote>",
+        "id": 429507783,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711399911
+    }
+]

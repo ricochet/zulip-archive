@@ -1,0 +1,191 @@
+<html>
+<head><meta charset="utf-8"><title>`wasi-http` middleware is infeasible? · wasi · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/index.html">wasi</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html">`wasi-http` middleware is infeasible?</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="400585424"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/400585424" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#400585424">(Nov 06 2023 at 18:01)</a>:</h4>
+<p>Context: I'm working on adding resource support to <code>wasm-compose</code> and <code>wasi-virt</code>.  In the process, I was going to update the middleware example in the <code>wasm-tools</code> repo to use <code>wasi-http</code>-style resources to represent requests and responses.  However I immediately ran into a problem which leads me to wonder if implementing general-purpose middleware using component composition for <code>wasi:http/incoming-handler</code> might not be possible.</p>
+<p>The example in the <code>wasm-tools</code> repo involves composing a <code>service</code> component with a <code>middleware</code> component such that the latter compresses the body of the response returned by the former.  That works just fine when the response is represented as a <code>record</code> with a <code>list&lt;u8&gt;</code> body.  With <code>wasi-http</code>, though, both requests and responses are represented as <code>resource</code>s, and the signature of the <code>wasi:http/incoming-handler#handle</code> function takes <code>IncomingRequest</code> and <code>ResponseOutparam</code> resource handles.  Ideally, the <code>middleware</code> component would export the <code>handle</code> function from the host and import it from the <code>service</code> component.  Moreover, the <code>middleware</code> component should import the relevant resource types from the host and export its own "virtualized" versions of those resources to the <code>service</code> component.  However, a component cannot import a function which refers to types that it is exporting, which means the <code>handle</code> function it imports from the <code>service</code> component can only refer to the host's versions of those resource types.</p>
+<p>Is there a way around this?  The best I can come up with so far (and this just occurred to me, so it's a half-baked idea) is to add a third component to the above scenario which exports virtualized versions of the relevant resources plus some kind of "hook" API the <code>middleware</code> component can use to intercept the resource method calls it cares about.  Then both the <code>middleware</code> and the <code>service</code> component would import the resource types from the third component, which in turn would import the "real" versions from the host.</p>
+
+
+
+<a name="400812714"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/400812714" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#400812714">(Nov 07 2023 at 20:39)</a>:</h4>
+<p>Just had a good conversation with <span class="user-mention" data-user-id="253998">@Luke Wagner</span> about this, which I'll try to summarize here (any errors are my own, which perhaps he'll be kind enough to correct).</p>
+<p>First, you <em>can</em> create a component which both imports from and exports to another component.  This can't be expressed in WIT and can't be done using <code>wasm-compose</code> (to my knowledge), but you could theoretically build a wrapper component around the original one such that the wrapper instantiates the original and handles the cyclical relationship using lifted functions which use <code>call_indirect</code> at the core Wasm level.  In fact, you can create arbitrary graphs of components containing cycles as long as the cycles are "broken" using <code>call_indirect</code>.  Presumably <code>wasi-virt</code> does something like this.</p>
+<p>Second, you can always do service chaining the old-fashioned way by having the <code>middleware</code> component do an outbound HTTP request to the <code>service</code> component (which the host <em>might</em> optimize if it notices the <code>service</code> can be invoked without using the network at all).  I.e. you don't <em>need</em> component composition to do service chaining, and you probably won't want to use it for that until Preview 3.</p>
+<p>Once Preview 3 arrives, we'll be able to do efficient, local service chaining using component composition, and this will <em>not</em> require virtualizing resource types.  In my <code>middleware</code>/<code>service</code> example, the <code>middleware</code> component can call the <code>service</code> component's <code>handle</code> function, which returns a <code>Response</code> resource, from which <code>middleware</code> can extract the body as a stream (and anything else it wants), create a <em>new</em> <code>Response</code> with <em>new</em> stream, and pipe from the original stream to the new one while applying any desired transformations (e.g. compression).  None of that requires virtualizing any resource types, breaking cycles, etc. (i.e. it can all be done with standard, <code>wasm-compose</code>-style composition).</p>
+
+
+
+<a name="402007353"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402007353" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kellytk <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402007353">(Nov 14 2023 at 15:13)</a>:</h4>
+<p>Re: last paragraph, is the juggling kinda similar to how it goes with Rust's std::process::Command? (stdin et al)</p>
+
+
+
+<a name="402030632"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402030632" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402030632">(Nov 14 2023 at 17:06)</a>:</h4>
+<p>Yeah, that seems like a good analogy.  You can create multiple <code>Command</code>s and pipe the stdout of one to the stdin of another, using the equivalent plumbing to what a POSIX shell would do when you use the <code>|</code> (pipe) operator.</p>
+
+
+
+<a name="402081337"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402081337" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Kate Goldenring <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402081337">(Nov 14 2023 at 22:25)</a>:</h4>
+<p><span class="user-mention" data-user-id="509936">@Joel Dice</span> thank you for the summary. Just a couple clarifying questions.<br>
+You mention, "I.e. you don't need component composition to do service chaining, and you probably won't want to use it for that until Preview 3." Service chaining seems to be a really big use case that WASI HTTP + preview 2 has unlocked. I am not sure I understand why we don't want to use it yet, even without WASI virt.</p>
+<p>I just want to clarify why we think preview 3 will solve this. It sounds like with preview 3 we are avoiding needing to import/export Types? Is this a goal or side effect of preview 3. Just catching up.</p>
+
+
+
+<a name="402081439"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402081439" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402081439">(Nov 14 2023 at 22:26)</a>:</h4>
+<p>Guy and I just realized <code>wasi-virt --allow-http</code> is broken for exactly the reason I described above.  It currently relies on <code>wasm-compose</code>, which can't handle cycles (as noted earlier).  If you're only doing outbound requests, you're fine (or at least you will be once I PR a fix for that), but if you're handling inbound requests you hit the cycle issue.</p>
+<p>In my summary above, I basically concluded that we don't need or want virtualization to implement middleware anyway, but Guy reminded me that if you're not virtualizing <code>wasi-http</code>, you can't use <code>wasi-virt</code> to virtualize <em>anything</em> involving streams.  That means no virtual filesystem, etc.  At most, you can virtualize the bits that don't involve streams (e.g. env, clocks, and random), but that's it.  Kind of a sad state of affairs.</p>
+<p>So now Guy and I are thinking we <em>do</em> want to support virtualizing all of <code>wasi-http</code>, including inbound, which I think means we need to do one of the following:</p>
+<ul>
+<li>Add support for cycles in <code>wasm-compose</code></li>
+<li>Stop using <code>wasm-compose</code> in <code>wasi-virt</code> and implement a custom component wrapping solution</li>
+<li>Create a new tool that does that, which <code>wasi-virt</code> can use</li>
+</ul>
+
+
+
+<a name="402082030"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402082030" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402082030">(Nov 14 2023 at 22:30)</a>:</h4>
+<p><span class="user-mention" data-user-id="582009">@Kate Goldenring</span>: Till and I believe the best way to do general purpose service chaining with Preview 2 is by locally connecting outbound requests to incoming handlers without going over the network.  That allows us to do concurrent I/O with minimal buffering, which is not possible otherwise via composition given the current state of the component model.  For middleware applications that don't need to stream request or response bodies across component boundaries, composition can still be a good option, though.</p>
+
+
+
+<a name="402082337"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402082337" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402082337">(Nov 14 2023 at 22:33)</a>:</h4>
+<p><span class="user-mention" data-user-id="582009">@Kate Goldenring</span>: The plan for Preview 3 is to include native async and stream support in the component model, which will allow concurrent I/O across composed component boundaries.</p>
+
+
+
+<a name="402082616"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402082616" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402082616">(Nov 14 2023 at 22:35)</a>:</h4>
+<p>one way to explain this that may be helpful: in preview 2, scheduling of concurrent IO is managed with wasi:io/poll and wasi:io/stream, which are component model interfaces that expose resources (pollable, input-stream, output-stream)</p>
+
+
+
+<a name="402082804"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402082804" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402082804">(Nov 14 2023 at 22:36)</a>:</h4>
+<p>in order to import a component model interface that exposes any sort of io (meaning, anything in the interface returns a pollable or stream, like the wasi-http interface does), you also need to import the wasi:io package's interfaces from that same component</p>
+
+
+
+<a name="402082864"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402082864" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402082864">(Nov 14 2023 at 22:37)</a>:</h4>
+<p>and you can only have a single import of the wasi:io package's imports per component</p>
+
+
+
+<a name="402082938"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402082938" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402082938">(Nov 14 2023 at 22:37)</a>:</h4>
+<p>this effectively means, every time you import an interface such as http, you have to import it from a component that provides the entire world of io and every other interface that uses io</p>
+
+
+
+<a name="402083106"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083106" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083106">(Nov 14 2023 at 22:38)</a>:</h4>
+<p><span class="user-mention" data-user-id="253989">@Peter Huene</span> do you have thoughts on the <code>wasi-virt</code> situation I described above?</p>
+
+
+
+<a name="402083142"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083142" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083142">(Nov 14 2023 at 22:39)</a>:</h4>
+<p>wasi-virt is the only component that tries to provide this complete wrapper of your world, but wasi-virt itself is incomplete so it doesnt actually do it yet. once joel (or someone else) fixes the problems with wasi-virt, it will provide the entire set of interfaces you import, even if all you need to do is override one part of the filesystem, it needs to virtualize your http as well</p>
+
+
+
+<a name="402083176"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083176" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083176">(Nov 14 2023 at 22:39)</a>:</h4>
+<p>ive called this style of component composition "onion composition" previous, because each layer you add on has to wrap the entire other layer, like an onion</p>
+
+
+
+<a name="402083282"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083282" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083282">(Nov 14 2023 at 22:40)</a>:</h4>
+<p>in short, it is not ideal. it is just the way these things have to work, at the moment, because wasi:io is an ordinary wit package.</p>
+
+
+
+<a name="402083376"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083376" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083376">(Nov 14 2023 at 22:41)</a>:</h4>
+<p>the goal for preview 3 (though, preview 3 is just whatever ships at the end of 2024, and who knows if this will be complete, so id actually prefer we start calling it something else like "first-class component model async" or something) is that instead of being a wit package, the primitives for scheduling and streams become component model primitives</p>
+
+
+
+<a name="402083425"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083425" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083425">(Nov 14 2023 at 22:41)</a>:</h4>
+<p>at which point we have a lot more power with how they can be implemented, they dont have to follow many of the rules of the canonical ABI as it exists today</p>
+
+
+
+<a name="402083460"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083460" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083460">(Nov 14 2023 at 22:41)</a>:</h4>
+<p>and then we can have composition of components that use the stream and scheduling primitives without having to do that onion composition</p>
+
+
+
+<a name="402083651"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083651" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083651">(Nov 14 2023 at 22:43)</a>:</h4>
+<p>among other things, that will make service chaining between http much simpler, because one element in the chain wont have to onion-wrap the other - if the inner element needs filesystem, the outer element doesnt have to virtualize that filesystem</p>
+
+
+
+<a name="402083700"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402083700" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402083700">(Nov 14 2023 at 22:43)</a>:</h4>
+<p>hopefully all of that makes sense, please let me help clarify if it doesnt!</p>
+
+
+
+<a name="402557515"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402557515" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402557515">(Nov 16 2023 at 21:10)</a>:</h4>
+<p>Here's an update on the state of <code>wasi-virt</code> support for <code>wasi:http/incoming-handler</code>.  First, a summary of the problem:</p>
+<ul>
+<li>In the component model, imports cannot refer to exported types, so the current <code>wasi-virt</code> model of using <code>wasm-compose</code> to compose a virtualization component (virt.wasm) with an application component (app.wasm) won't work if app.wasm targets <code>wasi:http/incoming-handler</code>.  Specifically, virt.wasm cannot import <code>wasi:http/incoming-handler#handle</code> from app.wasm because the parameter types (<code>incoming-request</code> and <code>response-outparam</code>) are the types virt.wasm is exporting to app.wasm.</li>
+<li>You can technically work around the above problem by introducing a third component (call it wrapper.wasm) which imports both the host and virt.wasm versions of <code>wasi:http/types</code>, plus some helper functions from virt.wasm to convert from the former to the latter.  wrapper.wasm exports a version of <code>wasi:http/incoming-handler#handle</code> that accepts the host's versions of <code>incoming-request</code> and <code>response-outparam</code>, uses the helper functions from virt.wasm to convert them to the virtualized versions of those types, and calls app.wasm's version of <code>wasi:http/incoming-handler#handle</code>.  This can all be expressed in the component model, but not in WIT or any tool that deals with WIT.</li>
+</ul>
+<p>After discussing this with <span class="user-mention" data-user-id="253994">@Alex Crichton</span>, we've concluded that although it's technically possible to implement the three-component solution described above with some low-level WASM file manipulation, it would be better to add syntax to WIT which allows it to be expressed at that level.  That's not something we'll want to tackle until after WASI Preview 2 ships, though.  So we feel that this is not the right time to try to support <code>wasi:http/incoming-handler</code> in <code>wasi-virt</code>.  Instead, we plan to make the WIT syntax additions a priority post WASI Preview 2, at which point we'll have what we need to work on <code>wasi-virt</code>.</p>
+
+
+
+<a name="402558342"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/402558342" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#402558342">(Nov 16 2023 at 21:17)</a>:</h4>
+<p>Here's a diagram, in case it helps.<br>
+<a href="/user_uploads/15107/o7jaLd60HgokMX2_VkjN60qA/cycle.drawio1.png">cycle.drawio1.png</a></p>
+<div class="message_inline_image"><a href="/user_uploads/15107/o7jaLd60HgokMX2_VkjN60qA/cycle.drawio1.png" title="cycle.drawio1.png"><img src="/user_uploads/15107/o7jaLd60HgokMX2_VkjN60qA/cycle.drawio1.png"></a></div>
+
+
+
+<a name="403240434"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/403240434" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Luke Wagner <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#403240434">(Nov 20 2023 at 20:26)</a>:</h4>
+<p>Great to hear you're digging into virtualization, and these challenges make sense.  Two ideas:</p>
+<ul>
+<li>The "introduce a third component" option sounds like a reasonable starting point.  While it is currently difficult to achieve this composition using <code>wasm-compose</code> today using <code>wasm-compose</code>'s existing input syntax, <span class="user-mention" data-user-id="253989">@Peter Huene</span> and others have been working hard on a new input syntax for <code>wasm-compose</code> that captures pretty much the full expressivity of component linking (and with a new readable curly-brace syntax in the style of, and literally super-setting WIT).  I'm pretty sure your use case should be quite neatly expressible in this syntax (tentatively called "WAC" for "WebAssembly Composition"), so maybe ping Peter to use your use case as a motivating example?</li>
+<li>It should also be possible to avoid the need for a third/wrapper component by taking advantage of the fact that a parent component can <em>both</em> supply the imports <em>and</em> alias the exports of any child instance it creates (using <code>instantiate</code>).  The challenge here is that it's less clear what the developer tooling should look like b/c we're authoring core functions that are lifted into the child component (passed in via <code>with</code>, not exported) and we're lowering exports of the child component (accessed via <code>alias export</code>, not imported).  I've been imagining what this might look like using a proc-macro on a static variable in Rust setting and using ESM future features (based on source-phase imports) in a JS setting, so I'm happy to chat about that in more detail some time.</li>
+</ul>
+
+
+
+<a name="405409409"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/%60wasi-http%60%20middleware%20is%20infeasible%3F/near/405409409" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ryan Levick (rylev) <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/.60wasi-http.60.20middleware.20is.20infeasible.3F.html#405409409">(Dec 01 2023 at 17:34)</a>:</h4>
+<p>I've created a POC for doing middleware style chaining using wasi-http: <a href="https://github.com/rylev/wasi-http-middleware-prototype">https://github.com/rylev/wasi-http-middleware-prototype</a></p>
+<p>The middleware calls down the middleware chain by calling into its outgoing-handler import which is intercepted by the runtime and forwarded to the downstream component which receives the request (without knowing that it actually came from a middleware component).</p>
+<p>Currently the demo code always forwards the outgoing-handler's request to the downstream components, but we'll want to come up with some protocol for distinguishing between passing a request down a middleware chain and making a legitimate HTTP call. <span class="user-mention" data-user-id="480579">@Lann Martin</span> had the idea of using the special TLD <code>.alt</code> for this.</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/rylev/wasi-http-middleware-prototype" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/3e64106eac40b6ff5a81a2fc0e0e03f357292104\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f303333636139663334343636333238663463316364353430363734663838393164383736643865313635373562303031386431363839366566646333396364612f72796c65762f776173692d687474702d6d6964646c65776172652d70726f746f74797065)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/rylev/wasi-http-middleware-prototype" title="GitHub - rylev/wasi-http-middleware-prototype">GitHub - rylev/wasi-http-middleware-prototype</a></div><div class="message_embed_description">Contribute to rylev/wasi-http-middleware-prototype development by creating an account on GitHub.</div></div></div>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

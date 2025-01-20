@@ -1,0 +1,350 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #3426 Call membarrier() after making JIT... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html">wasmtime / issue #3426 Call membarrier() after making JIT...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="257071323"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257071323" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257071323">(Oct 11 2021 at 14:23)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-940079184">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>I'm trying to read up a bit more on the AArch64 requirements here to understand better why these are required. I'm currently reaching the conclusion though of wondering if we need this due to the safety of Rust, but you know much more than me so I'm hoping that you can educate me!</p>
+<p>In the ARM manual 2.2.5 that talks about self-modifying code and 2.4.4 talks about cache coherency, but at least for us JIT code isn't self-modifying and for cache coherency I figured that Rust safety guarantees would save us from having to execute these barriers. For example the <code>Module</code>, when created, is only visible to the calling thread. For any other thread to actually get access to the <code>Module</code> there'd have to be some form of external synchronization (e.g. a mutex, a channel, etc). Do the typical memory-barrier instructions, though, not cover the instruction cache?</p>
+<p>One other question I'd have is that when I was benchmarking loading precompiled modules I found that the <code>mprotect</code> call on AArch64 took a very long time in the kernel performing icache synchronization. Does this system call add more overhead on top of that? Or is w/e the kernel doing in there also required on top of this synchronization?</p>
+<p>I suppose my main question is, in the context of safe Rust programs where we're guaranteed that making <code>Module</code> visible to other threads guarantees a correct memory barrier, is this still required? This sort of reminds me of <code>Arc::clone</code> in the standard library where increasing the reference count actually uses a <code>Relaxed</code> memory barrier because actually sending the new clone of the <code>Arc</code> to another thread requires some form of external synchronization, so there's no need to double it up.</p>
+</blockquote>
+
+
+
+<a name="257593130"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257593130" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257593130">(Oct 14 2021 at 19:39)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943668513">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@alexcrichton The issue here I think is that the implicit happens-before edge that we get from synchronization in data-race-free programs is <em>not</em> sufficient, because the dcache and icache are not automatically coherent, if I'm understanding the manual right.</p>
+<p>For example, the sequence of instructions in the manul B2.2.4 (page B2-131 in my PDF) does a <code>DC CVAU</code> to "clean the data cache", then a <code>DSB ISH</code> to "ensure visibility of the data cleaned from cache", then a <code>IC IVAU</code> to "invalidate instruction cache". That to me indicates that the usual MESI stuff that ensures a modifed line in dcache will be seen by icache does not occur automatically. (In contrast on x86 there is (i) full MESI coherence between icache and dcache, and (ii) a special set of bits that track when lines have been fetched, causing self-modifying-code pipeline flushes when modified, so <em>everything</em> is automatic; but that's expensive hardware and we don't have that luxury on other platforms...)</p>
+<p>In theory we could do something better than a syscall that runs a little "sync the caches" handler on <em>every</em> core, though (presumably this is doing some sort of IPI?). We could run the "sync the caches" bit in two halves -- flush the dcache line when we write new code, then flush the icache line before jumping to code <em>if we know we need to</em>. The latter bit is tricky: we don't want to do it on every function call, obviously, or else we'd tank performance (all icache misses all the time). So we want to somehow track if <em>this</em> core has done an icache flush recently enough to pick up whatever changes.</p>
+<p>The part I haven't quite worked out about the above, though, is that there's a TOCTOU issue: we could do the check, decide we're on a core with a fresh icache, then the kernel could migrate our thread to another core just before we do the call. Short of playing tricks with affinity, maybe we can't get around that and <em>do</em> need the <code>membarrier()</code> that hits every core.</p>
+<p>Thoughts?</p>
+</blockquote>
+
+
+
+<a name="257594126"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257594126" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257594126">(Oct 14 2021 at 19:47)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943673900">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>(Clarification on above: the <code>IC IVAU</code> is broadcast across the coherence domain apparently, but the <code>ISB</code> ("instruction barrier" which I assume is a pipeline serialization) is necessary; that's the bit that we need to track recency of last flush on cores for, unless we serialize the pipeline every time we invoke a Wasm function pointer from the host (which IMHO we shouldn't do!).</p>
+</blockquote>
+
+
+
+<a name="257594155"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257594155" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257594155">(Oct 14 2021 at 19:47)</a>:</h4>
+<p>cfallin edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943673900">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>(Clarification on above: the <code>IC IVAU</code> is broadcast across the coherence domain apparently, but the <code>ISB</code> ("instruction barrier" which I assume is a pipeline serialization) is necessary; that's the bit that we need to track recency of last flush on cores for, unless we serialize the pipeline every time we invoke a Wasm function pointer from the host (which IMHO we shouldn't do!).)</p>
+</blockquote>
+
+
+
+<a name="257594294"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257594294" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257594294">(Oct 14 2021 at 19:48)</a>:</h4>
+<p>cfallin edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943668513">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@alexcrichton The issue here I think is that the implicit happens-before edge that we get from synchronization in data-race-free programs is <em>not</em> sufficient, because the dcache and icache are not automatically coherent, if I'm understanding the manual right.</p>
+<p>For example, the sequence of instructions in the manual B2.2.4 (page B2-131 in my PDF) does a <code>DC CVAU</code> to "clean the data cache", then a <code>DSB ISH</code> to "ensure visibility of the data cleaned from cache", then a <code>IC IVAU</code> to "invalidate instruction cache". That to me indicates that the usual MESI stuff that ensures a modifed line in dcache will be seen by icache does not occur automatically. (In contrast on x86 there is (i) full MESI coherence between icache and dcache, and (ii) a special set of bits that track when lines have been fetched, causing self-modifying-code pipeline flushes when modified, so <em>everything</em> is automatic; but that's expensive hardware and we don't have that luxury on other platforms...)</p>
+<p>In theory we could do something better than a syscall that runs a little "sync the caches" handler on <em>every</em> core, though (presumably this is doing some sort of IPI?). We could run the "sync the caches" bit in two halves -- flush the dcache line when we write new code, then flush the icache line before jumping to code <em>if we know we need to</em>. The latter bit is tricky: we don't want to do it on every function call, obviously, or else we'd tank performance (all icache misses all the time). So we want to somehow track if <em>this</em> core has done an icache flush recently enough to pick up whatever changes.</p>
+<p>The part I haven't quite worked out about the above, though, is that there's a TOCTOU issue: we could do the check, decide we're on a core with a fresh icache, then the kernel could migrate our thread to another core just before we do the call. Short of playing tricks with affinity, maybe we can't get around that and <em>do</em> need the <code>membarrier()</code> that hits every core.</p>
+<p>Thoughts?</p>
+</blockquote>
+
+
+
+<a name="257594685"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257594685" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257594685">(Oct 14 2021 at 19:51)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943676987">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>Ah, and one more clarification I wanted to mention re: other comments above and the manual is that "self-modifying code" in this context is actually applicable, because although our JIT code doesn't literally modify itself, to the core (and to a microarchitect) it's all the same -- we are executing data that we've written to memory so we have to worry about when that data becomes visible to instruction-fetch.</p>
+</blockquote>
+
+
+
+<a name="257604981"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257604981" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257604981">(Oct 14 2021 at 20:59)</a>:</h4>
+<p>akirilov-arm <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943728016">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@cfallin you are essentially correct about everything, so thanks a lot for these replies - they save me a lot of writing!</p>
+<p>I just want to add a couple of details - in essence this pull request is about adding a "broadcast" <code>ISB</code>, which is not part of the Arm architecture and which the <code>membarrier()</code> system call (with these particular parameters) provides an equivalent to (and yes, the system call name is a bit deceptive because here we are not dealing with the familiar barriers that prevent data races). Indeed, <code>ISB</code> is a pipeline serialization or "context synchronization event" in the architecture's parlance.</p>
+<p>My changes are incomplete (hence I said that they were the first part of a fix) because the code that is dealing with the actual cache flushing is still missing - I will add that bit after the corresponding gap in the <code>compiler-builtins</code> crate is filled in. Cache flushing is in fact the easy part of the problem - precisely because <code>IC IVAU</code> is broadcast in the whole coherence domain, as Chris mentioned, so no system calls would be necessary.</p>
+<blockquote>
+<p>One other question I'd have is that when I was benchmarking loading precompiled modules I found that the mprotect call on AArch64 took a very long time in the kernel...<br>
+@alexcrichton That sounds a bit like the problem #2890 is trying to solve - or is it something different?</p>
+</blockquote>
+</blockquote>
+
+
+
+<a name="257605813"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257605813" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257605813">(Oct 14 2021 at 21:05)</a>:</h4>
+<p>akirilov-arm edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943728016">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@cfallin you are essentially correct about everything, so thanks a lot for these replies - they save me a lot of writing!</p>
+<p>I just want to add a couple of details - in essence this pull request is about adding a "broadcast" <code>ISB</code>, which is not part of the Arm architecture and which the <code>membarrier()</code> system call (with these particular parameters) provides an equivalent to (and yes, the system call name is a bit deceptive because here we are not dealing with the familiar barriers that prevent data races). Indeed, <code>ISB</code> is a pipeline serialization or "context synchronization event" in the architecture's parlance and a recency tracking mechanism could be beneficial because we do not need the serialization after generating every single bit of code - e.g. if several functions are compiled in parallel by different worker threads, we could wait till all compilations complete before executing an <code>ISB</code> instruction on the current processor, as long as it does not try to run any of the functions in the meantime.</p>
+<p>My changes are incomplete (hence I said that they were the first part of a fix) because the code that is dealing with the actual cache flushing is still missing - I will add that bit after the corresponding gap in the <code>compiler-builtins</code> crate is filled in. Cache flushing is in fact the easy part of the problem - precisely because <code>IC IVAU</code> is broadcast in the whole coherence domain, as Chris mentioned, so no system calls would be necessary.</p>
+<blockquote>
+<p>One other question I'd have is that when I was benchmarking loading precompiled modules I found that the mprotect call on AArch64 took a very long time in the kernel...</p>
+</blockquote>
+<p>@alexcrichton That sounds a bit like the problem #2890 is trying to solve - or is it something different?</p>
+</blockquote>
+
+
+
+<a name="257610050"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257610050" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257610050">(Oct 14 2021 at 21:36)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943753979">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>Oh wow this is tricky, which I suppose should be expected of anything caching related. </p>
+<p>So to make sure I understand, the first step recommended by the manual is that the data cache is flushed out (since we just wrote functions into memory) and then all instruction caches are brought up to date with the <code>IC IVAU</code> instruction. Then there's also the requirement of running <code>ISB</code> on all cores to flush out the instruction pipelines because otherwise some instruction in the pipeline may no longer be correct. Is that right?</p>
+<p>In any case it sounds like it definitely doesn't suffice to have data-race-free code here since that basically only guarantees data-cache coherency, not instruction-cache coherency. Otherwise if the mapping of JIT code is reused from some previous mapping then an icache may have the old mapping still cached.</p>
+<p>Also to confirm, this PR is just the run-<code>isb</code>-on-all-cores piece, and the <code>compiler-builtins</code> bits will do the <code>IC IVAU</code> stuff?</p>
+<blockquote>
+<p>@alexcrichton That sounds a bit like the problem #2890 is trying to solve - or is it something different?</p>
+</blockquote>
+<p>When I run <a href="https://gist.github.com/alexcrichton/320af45116d1d52a5802a9254c0ea067">this program</a> on an aarch64 machine the example output I get is:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">mprotect</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">no</span><span class="w"> </span><span class="n">touched</span><span class="w"> </span><span class="n">pages</span><span class="w"> </span><span class="mi">960</span><span class="n">ns</span><span class="w"></span>
+<span class="n">mprotect</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">touched</span><span class="w"> </span><span class="n">pages</span><span class="w"> </span><span class="mf">43.838609</span><span class="n">ms</span><span class="w"></span>
+</code></pre></div>
+<p>According to <code>perf</code> most of the time is spent in <code>__flush_icache_range</code> in the kernel. Given that this takes so long it seems like <code>mprotect</code> is doing some sort of synchronization in the kernel, I just don't know what kind. Is that entirely unrelated to the synchronization happening here though with <code>ISB</code> and such?</p>
+</blockquote>
+
+
+
+<a name="257610379"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257610379" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257610379">(Oct 14 2021 at 21:39)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943755989">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>I suppose another question I could ask is whether kernel-level guarantees factor in here at all. We're always creating a new <code>mmap</code> for allocated code so that means that the memory was previously unmapped. Does the kernel guarantee that when a mapping is unmapped that all cores are updated automatically to flush all related caches for that mapping? If that's the case then we may be able to skip synchronization since we know caches are empty for this range and no one will otherwise try to use it while we're writing to it.</p>
+</blockquote>
+
+
+
+<a name="257611462"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257611462" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257611462">(Oct 14 2021 at 21:49)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943762098">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@alexcrichton I bet the <code>membarrier()</code> taking 43ms is due to IPIs and latency of entering the kernel on every other core; especially on the big 128-core machine we have to play with, that will take a while! (This is via <code>smp_call_function_many()</code> invoked in kernel/sched/membarrier.c, and that helper seems to broadcast the IPI and let them all go at once, but there is still the long tail if any core has disabled preemption temporarily.)</p>
+<p>Re: fresh addresses ameliorating this, iirc at least some cores have PIPT (physically-indexed, physically-tagged) caches, so it's possible a physical address (a particular pageframe) could be reused even if the virtual address is new, and there could be a stale cacheline, I think; but @akirilov-arm can say if that's too paranoid :-)</p>
+</blockquote>
+
+
+
+<a name="257612051"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257612051" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257612051">(Oct 14 2021 at 21:54)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943765095">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@cfallin but in the example program I'm not calling <code>membarrier</code>, just <code>mprotect</code>, so does that mean that <code>mprotect</code> is doing the same thing?</p>
+</blockquote>
+
+
+
+<a name="257612265"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257612265" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257612265">(Oct 14 2021 at 21:56)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943766361">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>Oh, I misread that, sorry; that's a good question! Maybe that is "just" TLB shootdown overhead then, hard to say without more detailed profiling...</p>
+</blockquote>
+
+
+
+<a name="257612749"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257612749" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257612749">(Oct 14 2021 at 22:00)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-943768609">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>(Actually, not TLB shootdown if all the time is spent in <code>__flush_icache_range</code> as you say. I need more caffeine in this tea, sorry.)</p>
+<p>This does make me think: if the <code>mprotect()</code> is doing an IPI to every core anyway, that certainly implies a full pipeline synchronization when the core handles the interrupt, if nothing else; maybe in practice this already covers us? Although it feels a little brittle to depend on a side-effect of the kernel's implementation, especially if it's doing a smart on-demand thing and does different things if pages are touched vs. not.</p>
+</blockquote>
+
+
+
+<a name="257662112"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257662112" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257662112">(Oct 15 2021 at 08:18)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-944097415">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<blockquote>
+<p>Although it feels a little brittle to depend on a side-effect of the kernel's implementation, especially if it's doing a smart on-demand thing and does different things if pages are touched vs. not.</p>
+</blockquote>
+<p>I guess you could ask a maintainer if this is guaranteed? And if not maybe Wasmtime depending on it will make it guaranteed due to "don't break the userspace"? <a href="https://linuxreviews.org/WE_DO_NOT_BREAK_USERSPACE">https://linuxreviews.org/WE_DO_NOT_BREAK_USERSPACE</a></p>
+</blockquote>
+
+
+
+<a name="257771685"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257771685" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257771685">(Oct 15 2021 at 22:01)</a>:</h4>
+<p>akirilov-arm <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-944739509">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@alexcrichton</p>
+<blockquote>
+<p>... then all instruction caches are brought up to date with the <code>IC IVAU</code> instruction.</p>
+</blockquote>
+<p>Technically the cache contents are discarded (IVAU = Invalidate by Virtual Address to the point of Unification), but that has an equivalent effect.</p>
+<blockquote>
+<p>Then there's also the requirement of running <code>ISB</code> on all cores to flush out the instruction pipelines because otherwise some instruction in the pipeline may no longer be correct. Is that right?</p>
+</blockquote>
+<p>Yes, that's right. Note that while the number of instructions in the pipeline may not sound like a lot (especially if we ignore the instruction window associated with out-of-order execution), Cortex-A77, for example, has <a href="https://www.anandtech.com/show/14384/arm-announces-cortexa77-cpu-ip/2">a 1500 entry macro-op cache</a>, whose contents jump straight from the fetch to the rename stage of the pipeline. In other words, the pipeline may contain thousands of instructions, not all of them speculative!</p>
+<blockquote>
+<p>Also to confirm, this PR is just the run-<code>isb</code>-on-all-cores piece, and the <code>compiler-builtins</code> bits will do the <code>IC IVAU</code> stuff?</p>
+</blockquote>
+<p>Correct.</p>
+<blockquote>
+<p>I suppose another question I could ask is whether kernel-level guarantees factor in here at all. We're always creating a new <code>mmap</code> for allocated code so that means that the memory was previously unmapped. Does the kernel guarantee that when a mapping is unmapped that all cores are updated automatically to flush all related caches for that mapping?</p>
+</blockquote>
+<p>When I asked our kernel team (which includes several maintainers, one half of the general AArch64 maintainers in particular) about that, the answer was that the only guarantee that the kernel could provide is that a TLB flush would occur (and even that is not 100% guaranteed); no data and instruction cache effects should be assumed. I'd take a more nuanced view towards the "don't break the userspace rule", especially since we are not talking about a clear-cut API and/or ABI issue here.</p>
+<p>Another quirk of the architecture is that TLB invalidations are broadcast in the coherence domain as well, which means that in principle an IPI is not necessary. Speaking of which, architecturally exception entries (e.g. in response to interrupts) are context synchronization events, that is equivalent to <code>ISB</code>.</p>
+<p>@cfallin</p>
+<blockquote>
+<p>... at least some cores have PIPT (physically-indexed, physically-tagged) caches... </p>
+</blockquote>
+<p>It is actually an architectural requirement that data and unified caches behave as PIPT (section D5.11 in the manual), while there are several options for instruction caches, one of which is PIPT, indeed.</p>
+<blockquote>
+<p>... it's possible a physical address (a particular pageframe) could be reused even if the virtual address is new, and there could be a stale cacheline, I think; but @akirilov-arm can say if that's too paranoid :-)</p>
+</blockquote>
+<p>Maybe just a bit <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>, but IMHO it is a possibility especially under memory pressure because clean (i.e. unmodified) file-backed memory pages  are prime candidates to be reclaimed for allocation requests (since they could always be restored from persistent storage on demand). E.g. one of the executable pages of the Wasmtime binary that has been used in the past (so parts of it could be resident in an instruction cache) could be reclaimed to satisfy the allocation request for a code buffer used by the JIT compiler.</p>
+<p>As for the behaviour of Alex' example program, I'll have a look too because, again, in general I don't expect an IPI in response to <code>mprotect()</code> (which, if guaranteed to occur on all processors, would indeed make <code>membarrier()</code> redundant).</p>
+</blockquote>
+
+
+
+<a name="257773322"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257773322" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257773322">(Oct 15 2021 at 22:14)</a>:</h4>
+<p>akirilov-arm edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-944739509">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@alexcrichton</p>
+<blockquote>
+<p>... then all instruction caches are brought up to date with the <code>IC IVAU</code> instruction.</p>
+</blockquote>
+<p>Technically the cache contents are discarded (IVAU = Invalidate by Virtual Address to the point of Unification), but that has an equivalent effect.</p>
+<blockquote>
+<p>Then there's also the requirement of running <code>ISB</code> on all cores to flush out the instruction pipelines because otherwise some instruction in the pipeline may no longer be correct. Is that right?</p>
+</blockquote>
+<p>Yes, that's right. Note that while the number of instructions in the pipeline may not sound like a lot (especially if we ignore the instruction window associated with out-of-order execution), Cortex-A77, for example, has <a href="https://www.anandtech.com/show/14384/arm-announces-cortexa77-cpu-ip/2">a 1500 entry macro-op cache</a>, whose contents jump straight from the fetch to the rename stage of the pipeline. In other words, the pipeline may contain thousands of instructions, not all of them speculative!</p>
+<blockquote>
+<p>Also to confirm, this PR is just the run-<code>isb</code>-on-all-cores piece, and the <code>compiler-builtins</code> bits will do the <code>IC IVAU</code> stuff?</p>
+</blockquote>
+<p>Correct.</p>
+<blockquote>
+<p>I suppose another question I could ask is whether kernel-level guarantees factor in here at all. We're always creating a new <code>mmap</code> for allocated code so that means that the memory was previously unmapped. Does the kernel guarantee that when a mapping is unmapped that all cores are updated automatically to flush all related caches for that mapping?</p>
+</blockquote>
+<p>When I asked our kernel team (which includes several maintainers, one half of the general AArch64 maintainers in particular) about that, the answer was that the only guarantee that the kernel could provide is that a TLB flush would occur (and even that is not 100% certain); no data and instruction cache effects should be assumed. I'd take a more nuanced view towards the "don't break the userspace" rule, especially since we are not talking about a clear-cut API and/or ABI issue here.</p>
+<p>Another quirk of the architecture is that TLB invalidations are broadcast in the coherence domain as well, which means that in principle an IPI is not necessary. Speaking of which, exception entries (e.g. in response to interrupts, system calls, etc.) are context synchronization events, that is architecturally equivalent to <code>ISB</code>. In particular, this means that the thread generating the code does not need to execute <code>ISB</code> because <code>mprotect()</code> has the same effect (it's a bit more complicated than that, but no need for those details).</p>
+<p>@cfallin</p>
+<blockquote>
+<p>... at least some cores have PIPT (physically-indexed, physically-tagged) caches... </p>
+</blockquote>
+<p>It is actually an architectural requirement that data and unified caches behave as PIPT (section D5.11 in the manual), while there are several options for instruction caches, one of which is PIPT, indeed.</p>
+<blockquote>
+<p>... it's possible a physical address (a particular pageframe) could be reused even if the virtual address is new, and there could be a stale cacheline, I think; but @akirilov-arm can say if that's too paranoid :-)</p>
+</blockquote>
+<p>Maybe just a bit <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>, but IMHO it is a possibility especially under memory pressure because clean (i.e. unmodified) file-backed memory pages  are prime candidates to be reclaimed for allocation requests (since they could always be restored from persistent storage on demand). E.g. one of the executable pages of the Wasmtime binary that has been used in the past (so parts of it could be resident in an instruction cache) could be reclaimed to satisfy the allocation request for a code buffer used by the JIT compiler.</p>
+<p>As for the behaviour of Alex' example program, I'll have a look too because, again, in general I don't expect an IPI in response to <code>mprotect()</code> (which, if guaranteed to occur on all processors, would indeed make <code>membarrier()</code> redundant).</p>
+</blockquote>
+
+
+
+<a name="257773767"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257773767" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257773767">(Oct 15 2021 at 22:18)</a>:</h4>
+<p>akirilov-arm edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-944739509">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@alexcrichton</p>
+<blockquote>
+<p>... then all instruction caches are brought up to date with the <code>IC IVAU</code> instruction.</p>
+</blockquote>
+<p>Technically the cache contents are discarded (IVAU = Invalidate by Virtual Address to the point of Unification), but that has an equivalent effect.</p>
+<blockquote>
+<p>Then there's also the requirement of running <code>ISB</code> on all cores to flush out the instruction pipelines because otherwise some instruction in the pipeline may no longer be correct. Is that right?</p>
+</blockquote>
+<p>Yes, that's right. Note that while the number of instructions in the pipeline may not sound like a lot (especially if we ignore the instruction window associated with out-of-order execution), Cortex-A77, for example, has <a href="https://www.anandtech.com/show/14384/arm-announces-cortexa77-cpu-ip/2">a 1500 entry macro-op cache</a>, whose contents jump straight from the fetch to the rename stage of the pipeline. In other words, the pipeline may contain thousands of instructions, not all of them speculative!</p>
+<blockquote>
+<p>Also to confirm, this PR is just the run-<code>isb</code>-on-all-cores piece, and the <code>compiler-builtins</code> bits will do the <code>IC IVAU</code> stuff?</p>
+</blockquote>
+<p>Correct.</p>
+<blockquote>
+<p>I suppose another question I could ask is whether kernel-level guarantees factor in here at all. We're always creating a new <code>mmap</code> for allocated code so that means that the memory was previously unmapped. Does the kernel guarantee that when a mapping is unmapped that all cores are updated automatically to flush all related caches for that mapping?</p>
+</blockquote>
+<p>When I asked our kernel team (which includes several maintainers, one half of the general AArch64 maintainers in particular) about that, the answer was that the only guarantee that the kernel could provide is that a TLB flush would occur (and even that is not 100% certain); no data and instruction cache effects should be assumed. I'd take a more nuanced view towards the "don't break the userspace" rule, especially since we are not talking about a clear-cut API and/or ABI issue here.</p>
+<p>Another quirk of the architecture is that TLB invalidations are broadcast in the coherence domain as well, which means that in principle an IPI is not necessary. Speaking of which, exception entries (e.g. in response to interrupts, system calls, etc.) are context synchronization events, that is architecturally equivalent to <code>ISB</code>. In particular, this means that the thread generating the code does not need to execute <code>ISB</code> because <code>mprotect()</code> has the same effect by virtue of being a system call (it's a bit more complicated than that, but no need for those details).</p>
+<p>@cfallin</p>
+<blockquote>
+<p>... at least some cores have PIPT (physically-indexed, physically-tagged) caches... </p>
+</blockquote>
+<p>It is actually an architectural requirement that data and unified caches behave as PIPT (section D5.11 in the manual), while there are several options for instruction caches, one of which is PIPT, indeed.</p>
+<blockquote>
+<p>... it's possible a physical address (a particular pageframe) could be reused even if the virtual address is new, and there could be a stale cacheline, I think; but @akirilov-arm can say if that's too paranoid :-)</p>
+</blockquote>
+<p>Maybe just a bit <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>, but IMHO it is a possibility, especially under memory pressure, because clean (i.e. unmodified) file-backed memory pages  are prime candidates to be reclaimed for allocation requests (since they could always be restored from persistent storage on demand). E.g. one of the executable pages of the Wasmtime binary that has been used in the past (so parts of it could be resident in an instruction cache) could be reclaimed to satisfy the allocation request for a code buffer used by the JIT compiler.</p>
+<p>As for the behaviour of Alex' example program, I'll have a look too because, again, in general I don't expect an IPI in response to <code>mprotect()</code> (which, if guaranteed to occur on all processors, would indeed make the <code>membarrier()</code> call redundant).</p>
+</blockquote>
+
+
+
+<a name="257776510"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/257776510" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#257776510">(Oct 15 2021 at 22:45)</a>:</h4>
+<p>akirilov-arm edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-944739509">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>@alexcrichton</p>
+<blockquote>
+<p>... then all instruction caches are brought up to date with the <code>IC IVAU</code> instruction.</p>
+</blockquote>
+<p>Technically the cache contents are discarded (IVAU = Invalidate by Virtual Address to the point of Unification), but that has an equivalent effect.</p>
+<blockquote>
+<p>Then there's also the requirement of running <code>ISB</code> on all cores to flush out the instruction pipelines because otherwise some instruction in the pipeline may no longer be correct. Is that right?</p>
+</blockquote>
+<p>Yes, that's right. Note that while the number of instructions in the pipeline may not sound like a lot (especially if we ignore the instruction window associated with out-of-order execution), Cortex-A77, for example, has <a href="https://www.anandtech.com/show/14384/arm-announces-cortexa77-cpu-ip/2">a 1500 entry macro-op cache</a>, whose contents jump straight from the fetch to the rename stage of the pipeline. In other words, the pipeline may contain thousands of instructions, not all of them speculative!</p>
+<blockquote>
+<p>Also to confirm, this PR is just the run-<code>isb</code>-on-all-cores piece, and the <code>compiler-builtins</code> bits will do the <code>IC IVAU</code> stuff?</p>
+</blockquote>
+<p>Correct.</p>
+<blockquote>
+<p>I suppose another question I could ask is whether kernel-level guarantees factor in here at all. We're always creating a new <code>mmap</code> for allocated code so that means that the memory was previously unmapped. Does the kernel guarantee that when a mapping is unmapped that all cores are updated automatically to flush all related caches for that mapping?</p>
+</blockquote>
+<p>When I asked our kernel team (which includes several maintainers, one half of the general AArch64 maintainers in particular) about that, the answer was that the only guarantee that the kernel could provide is that a TLB flush would occur (and even that is not 100% certain); no data and instruction cache effects should be assumed. I'd take a more nuanced view towards the "don't break the userspace" rule, especially since we are not talking about a clear-cut API and/or ABI issue here.</p>
+<p>Another quirk of the architecture is that TLB invalidations are broadcast in the coherence domain as well, which means that in principle an IPI is not necessary. Speaking of which, exception entries (e.g. in response to interrupts, system calls, etc.) are context synchronization events, that is architecturally equivalent to <code>ISB</code>. In particular, this means that the thread generating the code does not need to execute <code>ISB</code> because <code>mprotect()</code> has the same effect by virtue of being a system call (it's a bit more complicated than that, but no need for those details).</p>
+<p>@cfallin</p>
+<blockquote>
+<p>... at least some cores have PIPT (physically-indexed, physically-tagged) caches... </p>
+</blockquote>
+<p>It is actually an architectural requirement that data and unified caches behave as PIPT (section D5.11 in the manual), while there are several options for instruction caches, one of which is indeed PIPT. For instance, <a href="https://developer.arm.com/documentation/100616/0401">the Technical Reference Manual (TRM) for Neoverse N1</a> states in section A6.1 that L1 caches behave as PIPT.</p>
+<blockquote>
+<p>... it's possible a physical address (a particular pageframe) could be reused even if the virtual address is new, and there could be a stale cacheline, I think; but @akirilov-arm can say if that's too paranoid :-)</p>
+</blockquote>
+<p>Maybe just a bit <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>, but IMHO it is a possibility, especially under memory pressure, because clean (i.e. unmodified) file-backed memory pages  are prime candidates to be reclaimed for allocation requests (since they could always be restored from persistent storage on demand). E.g. one of the executable pages of the Wasmtime binary that has been used in the past (so parts of it could be resident in an instruction cache) could be reclaimed to satisfy the allocation request for a code buffer used by the JIT compiler.</p>
+<p>As for the behaviour of Alex' example program, I'll have a look too because, again, in general I don't expect an IPI in response to <code>mprotect()</code> (which, if guaranteed to occur on all processors, would indeed make the <code>membarrier()</code> call redundant).</p>
+</blockquote>
+
+
+
+<a name="258096446"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/258096446" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#258096446">(Oct 18 2021 at 20:40)</a>:</h4>
+<p>akirilov-arm <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-946147907">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>Yes, I am taking a look.</p>
+<p>To go on a bit of a tangent, <a href="https://www.vusec.net/projects/fpvi-scsb">some recent research</a> has uncovered a vulnerability, Speculative Code Store Bypass (SCSB, tracked by CVE-2021-0089 and CVE-2021-26313 on Intel and AMD processors respectively), that demonstrates the limitations of the approach on x86. The suggested mitigation seems to be pretty much equivalent to part of what the Arm architecture requires.</p>
+</blockquote>
+
+
+
+<a name="258378579"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233426%20Call%20membarrier%28%29%20after%20making%20JIT.../near/258378579" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233426.20Call.20membarrier.28.29.20after.20making.20JIT.2E.2E.2E.html#258378579">(Oct 20 2021 at 14:33)</a>:</h4>
+<p>akirilov-arm <a href="https://github.com/bytecodealliance/wasmtime/pull/3426#issuecomment-947728562">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3426">issue #3426</a>:</p>
+<blockquote>
+<p>It turns out that when the Linux kernel makes a memory mapping executable, it also <a href="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/arch/arm64/include/asm/pgtable.h?h=v5.14.14#n312">performs</a> the necessary cache flushing on AArch64. Setting aside the discussion of whether we should rely on an implementation detail like that or not, the real point is that this behaviour still does not solve the issue that this PR is taking care of, namely the requirement to run <code>ISB</code> on all processors that might execute the new code. In fact, the implementation <a href="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/arch/arm64/mm/flush.c?h=v5.14.14#n23">guarantees</a> that there will be no inter-processor interrupts.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

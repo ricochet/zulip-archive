@@ -1,0 +1,56 @@
+[
+    {
+        "content": "<p>I'm trying to build a runtime that  passes callbacks to WASM modules. For example the host may open a connection to a remote API but does not want to pass full control of that API to a module and instead passes a callback that in some way validates the request before sending it.</p>\n<p>I'm using wasmtime from Rust and the only example I can find uses <code>Func::wrap</code> to define a function that can be placed in the store for the module to access. However I'm not sure if this is really a callback in that I'm not sure if it actually passes control back to the host</p>\n<p>I really want something like a trap that says \"okay, I've put the relevant data in the store, now I want to host to do something\". Is this something that wasmtime supports? Or do I need to rethink the control flow by executing a module function to completion, pausing to do host stuff, then executing the next function?</p>",
+        "id": 365623830,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686588808
+    },
+    {
+        "content": "<p>There is no separate \"callback\" functionality per-se; a function defined via <code>Func::wrap</code> does indeed call back into the host.</p>",
+        "id": 365624670,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1686589015
+    },
+    {
+        "content": "<p>Thanks! I guess my next question is how <code>IntoFunc</code> works because right now the compiler error doesn't give a lot of info. I tried creating a callback like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">api_get</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Func</span>::<span class=\"n\">wrap</span><span class=\"p\">(</span>\n<span class=\"w\">    </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">caller</span>: <span class=\"nc\">Caller</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">State</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">id</span>: <span class=\"kt\">u32</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">validate</span><span class=\"p\">(</span><span class=\"n\">id</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">            </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">api</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">(</span><span class=\"n\">id</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">                </span><span class=\"nb\">Ok</span><span class=\"p\">(</span><span class=\"n\">data</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">data</span><span class=\"p\">),</span>\n<span class=\"w\">                </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{}</span>\n<span class=\"w\">            </span><span class=\"p\">};</span>\n<span class=\"w\">        </span><span class=\"p\">}</span>\n<span class=\"w\">        </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"nb\">None</span>\n<span class=\"w\">    </span><span class=\"p\">},</span>\n<span class=\"p\">);</span>\n</code></pre></div>\n<p>But this doesn't satisfy <code>IntoFunc</code> for reasons unknown to me. How do I express that this function should accept parameters and return a value?</p>",
+        "id": 365628873,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686589975
+    },
+    {
+        "content": "<p>I believe the issue is that you're returning <code>Option&lt;_&gt;</code>. You'll have to find a way to represent the return value as one (or more, if your guests support multi-value) primitive wasm types.</p>",
+        "id": 365631325,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1686590528
+    },
+    {
+        "content": "<p>I've been playing with it a bit and I agree that is one of the issues. However what's confusing me is the closure signature. The compiler is not happy with <code>|caller, id|</code> or <code>|id, caller|</code> or <code>|caller| |id|</code>.</p>",
+        "id": 365632573,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686590880
+    },
+    {
+        "content": "<p>Like this doesn't satisfy <code>IntoFunc</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">Func</span>::<span class=\"n\">wrap</span>::<span class=\"o\">&lt;</span><span class=\"n\">State</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">caller</span>: <span class=\"nc\">Caller</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">State</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">id</span>: <span class=\"kt\">u32</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">     </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"mi\">5</span>\n<span class=\"p\">});</span>\n</code></pre></div>",
+        "id": 365633149,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686591043
+    },
+    {
+        "content": "<p>For that one I believe it would be <code>&lt;State, (u32,), u32&gt;</code></p>",
+        "id": 365633650,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1686591170
+    },
+    {
+        "content": "<p>Ok this works:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">Func</span>::<span class=\"n\">wrap</span>::<span class=\"o\">&lt;</span><span class=\"n\">State</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"kt\">u32</span><span class=\"p\">,),</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"n\">id</span>: <span class=\"kt\">u32</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"mi\">5</span>\n<span class=\"p\">});</span>\n</code></pre></div>\n<p>but then I lose the Caller context. For my purposes I may not need it, though.</p>",
+        "id": 365634501,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686591385
+    },
+    {
+        "content": "<p>Thanks again for your help Lann!</p>",
+        "id": 365634557,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686591405
+    }
+]

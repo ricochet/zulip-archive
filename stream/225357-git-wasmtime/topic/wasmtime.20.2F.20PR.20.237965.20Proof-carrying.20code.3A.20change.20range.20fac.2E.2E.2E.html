@@ -1,0 +1,383 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #7965 Proof-carrying code: change range fac... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html">wasmtime / PR #7965 Proof-carrying code: change range fac...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="422491667"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422491667" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422491667">(Feb 20 2024 at 19:57)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a> from <code>cfallin:pcc-range-fix</code> to <code>bytecodealliance:main</code>:</p>
+<blockquote>
+<p>Previously, the proof-carrying code (PCC) mechanism optionally described each value in the program with at most one fact of the form:</p>
+<ul>
+<li>A static range (min, max are <code>u64</code>s);</li>
+<li>A dynamic range (min, max are symbolic expressions: sums of global values or SSA values and offsets)</li>
+</ul>
+<p>This worked well enough in filetests that exercised PCC for static and dynamic Wasm memory cases: the fact language was expressive enough to describe all the invariants.</p>
+<p>However, as soon as the optimizer started to combine different accesses together -- for example, by sharing one <code>select_spectre_guard</code> across multiple accesses -- it quickly became apparent that we might need to describe both a static <em>and</em> dynamic range for one value. The existing system fails to check, producing <code>Conflict</code> facts, on the new test in <code>pcc_memory.rs</code> here.</p>
+<p>To make the fact language more expressive, I worked through a series of more expressive variants until finding one that seems to work:</p>
+<ul>
+<li>
+<p>First, a variant with combined static <em>and</em> dynamic ranges: e.g., <code>range(0, 0xffff, 0, gv1)</code> means that a value is within the given static range <em>and</em> also less than or equal to <code>gv1</code>. This allows the intersection of dynamic and static facts to work, but has a lot of weird edge-cases because it's like two analyses glued together in a product type; we really want to cross-compare against the two sometimes, e.g. if we know static range facts about the symbolic expressions and want to apply those elsewhere. It also led to weird logic due to redundancy: the expressions could also be constants (no "base value") and so we handled the constant-value case twice. It seemed that actually the two worlds should be merged completely.</p>
+</li>
+<li>
+<p>Next, a variant with <em>only</em> <code>Expr</code>s, and two cases for a range: <code>Exact</code> (with one or more expressions that are known to be equivalent to the value) and <code>Inclusive</code>, with <code>min</code> and <code>max</code> <em>lists</em>. In both cases we want lists because we may know that a value is, for example, less than both <code>v1</code> and <code>gv2</code>; both are needed to prove different things, and the relative order of the two is not known so it cannot be simplified.</p>
+<p>This was almost right; it fell apart only when working out <code>apply_inequality</code> where it became apparent that we need to sometimes state that a value is exactly equal to some expressions <em>and</em> less than others (e.g., exactly <code>v1</code> and also in a 32-bit range).</p>
+<p>Aside from that it was also a bit awkward to have a four-case (or three-case for commutative) breakdown in all ops: exact+exact, exact+inclusive, inclusive+inclusive.</p>
+</li>
+<li>
+<p>Finally, the variant in this PR: every range is described by three lists, the <code>min</code>, <code>equal</code> and <code>max</code> sets of expressions.</p>
+</li>
+</ul>
+<p>The way this works is: for any value for which we have a fact, we collect lower and upper bounds, and also expressions we know it's equivalent to. Like an egraph, we don't drop facts or "simplify" along the way, because any of the bits may be useful later. However we don't explode in memory or analysis time because this is bounded by the stated facts: we locally derive the "maximum fact" for the result of an addition, then check if it implies the stated fact on the actual result, then keep only that stated fact.</p>
+<p>The value described by these sets is within the interval that is the intersection of all combinations of min/max values; this makes <code>intersect</code> quite simple (union the sets of bounds, and the equalities, because it must be both). Some of the other ops and tests -- <code>union</code>, and especially "is this value in the range" or "does this range imply this other range" -- are a little intricate, but I think correct. To pick a random example: an expression is within a range if we can prove that it is greater than or equal to all lower bounds, and vice-versa for upper bounds; OR if it is exactly equal to one of the equality bounds. Equality is structural on <code>Expr</code>s (i.e., the default derived <code>Eq</code> is valid) because they are not redundant: there is only one way to express <code>v1+1</code>, and we can never prove that <code>v1 == v2</code> within the context of one expression.</p>
+<p>I will likely write up a bunch more in the top doc-comment and throughout the code; this is meant to get the working system in first. (I'm also happy to do this as part of this PR if preferred.)</p>
+<p>There are also some ideas for performance improvement if needed, e.g. by interning <code>ValueRange</code>s and then memoizing the operations (<code>intersect(range2, range5) = range7</code> in a lookup table). I haven't measured perf yet.</p>
+<p>I also haven't fuzzed this yet but will do so and then submit any required bugfixes separately. Hopefully we can get this turned on soon!</p>
+</blockquote>
+
+
+
+<a name="422491668"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422491668" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422491668">(Feb 20 2024 at 19:57)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/abrown">abrown</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>.</p>
+
+
+
+<a name="422491669"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422491669" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422491669">(Feb 20 2024 at 19:57)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers">wasmtime-compiler-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>.</p>
+
+
+
+<a name="422491671"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422491671" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422491671">(Feb 20 2024 at 19:57)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/alexcrichton">alexcrichton</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>.</p>
+
+
+
+<a name="422491674"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422491674" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422491674">(Feb 20 2024 at 19:57)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers">wasmtime-core-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>.</p>
+
+
+
+<a name="422491691"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422491691" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422491691">(Feb 20 2024 at 19:57)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>.</p>
+
+
+
+<a name="422501078"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422501078" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422501078">(Feb 20 2024 at 21:06)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>.</p>
+
+
+
+<a name="422506971"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506971" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506971">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891572829">PR review</a>:</p>
+<blockquote>
+<p>Overall LGTM, just a few questions and general suspicion flagging.</p>
+<p>But most importantly: shouldn't there be a new clif filetest or two for the GVN behavior that warranted this fact representation change?</p>
+</blockquote>
+
+
+
+<a name="422506973"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506973" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506973">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891572829">PR review</a>:</p>
+<blockquote>
+<p>Overall LGTM, just a few questions and general suspicion flagging.</p>
+<p>But most importantly: shouldn't there be a new clif filetest or two for the GVN behavior that warranted this fact representation change?</p>
+</blockquote>
+
+
+
+<a name="422506975"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506975" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506975">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496515907">PR review comment</a>:</p>
+<blockquote>
+<p>It seems like <code>Max</code> should be a variant of <code>Expr</code> rather than <code>BaseExpr</code>? Because it seems like offsets shouldn't matter once we reach <code>Max</code>? So having both a non-zero offset and a base of <code>Max</code> seems like something we should make unrepresentable.</p>
+</blockquote>
+
+
+
+<a name="422506976"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506976" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506976">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496495610">PR review comment</a>:</p>
+<blockquote>
+<p>Why did this need to become an <code>i128</code>? That's kind of scary given that we have smallvecs of <code>Expr</code>s.</p>
+</blockquote>
+
+
+
+<a name="422506977"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506977" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506977">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496509246">PR review comment</a>:</p>
+<blockquote>
+<p>What if <code>lhs.base == BaseExpr::Max</code> but <code>lhs.offset &gt; rhs.offset</code>?</p>
+</blockquote>
+
+
+
+<a name="422506978"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506978" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506978">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496535824">PR review comment</a>:</p>
+<blockquote>
+<p>The <code>O(n^2)</code> loop is a little scary here but I guess in practice this is sized at most by the number of unique values we GVN together? Which seems like it should generally be relatively small? But also something that is ~unbounded and user-controllable <span aria-label="grimacing" class="emoji emoji-1f62c" role="img" title="grimacing">:grimacing:</span> </p>
+<p>But I guess they aren't controlling the actual facts used during a wasm load and the inputs to an <code>i32.load</code> instruction are basically any <code>i32</code> value. So I think this is maybe okay?</p>
+<p>Seems like something we should think about and have a comment for calming readers down.</p>
+</blockquote>
+
+
+
+<a name="422506979"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506979" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506979">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496500094">PR review comment</a>:</p>
+<blockquote>
+<p>I guess let's just get something working first and worry about performance later, but having a bunch of smallvecs is a little concerning. In general, we try to keep all the guts of the data in <code>DataFlowGraph</code> be <code>Copy</code> and use things like <code>cranelift_entity::EntityList</code> to manage non-POD data within. But yeah, we can come back to this in the future.</p>
+</blockquote>
+
+
+
+<a name="422506980"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506980" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506980">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496517681">PR review comment</a>:</p>
+<blockquote>
+<p>This feels like a suspicious operation. Rounding down seems sus when we are talking about proving that accesses are in-bounds!</p>
+</blockquote>
+
+
+
+<a name="422506981"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506981" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506981">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496519986">PR review comment</a>:</p>
+<blockquote>
+<p>Seems like this could be cleaned up with <a href="https://doc.rust-lang.org/nightly/std/fmt/struct.Formatter.html#method.debug_set">https://doc.rust-lang.org/nightly/std/fmt/struct.Formatter.html#method.debug_set</a></p>
+</blockquote>
+
+
+
+<a name="422506983"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422506983" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422506983">(Feb 20 2024 at 21:48)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496547668">PR review comment</a>:</p>
+<blockquote>
+<p>Interesting that we can return any of <code>equal</code> and be correct here. Does it matter? How are callers using this method? Does it make sense to tweak what is being asked here?</p>
+</blockquote>
+
+
+
+<a name="422508378"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422508378" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422508378">(Feb 20 2024 at 21:58)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891668843">PR review</a>.</p>
+
+
+
+<a name="422508379"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422508379" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422508379">(Feb 20 2024 at 21:58)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496581746">PR review comment</a>:</p>
+<blockquote>
+<p>Yeah, I agree; efficiency concerns aside (back to that below) it became necessary because given symbolic expressions, the offset has a domain of... about 3/2 of a <code>u64</code>: it sometimes needs to be <code>i64</code>, and sometimes needs to be a full <code>u64</code>. I've papered over that with 128 bits, though in theory it needs "only" 65. It does feel generally better (less potentially subtly wrong) to use <code>i128::from(..)</code> everywhere and be able to perform universal arithmetic, rather than carefully thinking through all the intermedia underflow/overflow cases.</p>
+</blockquote>
+
+
+
+<a name="422508545"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422508545" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422508545">(Feb 20 2024 at 22:00)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891670643">PR review</a>.</p>
+
+
+
+<a name="422508546"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422508546" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422508546">(Feb 20 2024 at 22:00)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496583226">PR review comment</a>:</p>
+<blockquote>
+<p>Indeed! I had actually started down that road, but both managing the efficient refs-to-list-arena representation and getting the logic right at the same time was getting to be a bit too much; so I wanted to get it working first. As mentioned at the end of the commit message I do think we can do something at a high level: intern <code>ValueRange</code>s and then memoize operations over them (which addresses the quadratic bit below too).</p>
+</blockquote>
+
+
+
+<a name="422508623"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422508623" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422508623">(Feb 20 2024 at 22:00)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496583889">PR review comment</a>:</p>
+<blockquote>
+<p>Indeed! It's specifically for lower bounds: when scaling up, we want lower bounds to approximate <em>downward</em>, not upward. I'll add that use-case to the comment.</p>
+</blockquote>
+
+
+
+<a name="422508624"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422508624" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422508624">(Feb 20 2024 at 22:00)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891671412">PR review</a>.</p>
+
+
+
+<a name="422508896"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422508896" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422508896">(Feb 20 2024 at 22:02)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496581746">PR review comment</a>.</p>
+
+
+
+<a name="422534151"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534151" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534151">(Feb 21 2024 at 02:45)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>.</p>
+
+
+
+<a name="422534167"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534167" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534167">(Feb 21 2024 at 02:45)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891956612">PR review</a>.</p>
+
+
+
+<a name="422534169"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534169" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534169">(Feb 21 2024 at 02:45)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496806459">PR review comment</a>:</p>
+<blockquote>
+<p>Good point on this and below; reworked so there is no <code>BaseExpr</code> and <code>Expr</code> is now the enum with <code>Max</code> as a variant.</p>
+</blockquote>
+
+
+
+<a name="422534182"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534182" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534182">(Feb 21 2024 at 02:45)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891956683">PR review</a>.</p>
+
+
+
+<a name="422534183"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534183" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534183">(Feb 21 2024 at 02:45)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496806507">PR review comment</a>:</p>
+<blockquote>
+<p>Good idea, fixed!</p>
+</blockquote>
+
+
+
+<a name="422534207"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534207" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534207">(Feb 21 2024 at 02:45)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891956921">PR review</a>.</p>
+
+
+
+<a name="422534208"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534208" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534208">(Feb 21 2024 at 02:45)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496806712">PR review comment</a>:</p>
+<blockquote>
+<p>Added some comments regarding this to help clarify.</p>
+</blockquote>
+
+
+
+<a name="422534272"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534272" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534272">(Feb 21 2024 at 02:46)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891957299">PR review</a>.</p>
+
+
+
+<a name="422534274"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534274" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534274">(Feb 21 2024 at 02:46)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496807000">PR review comment</a>:</p>
+<blockquote>
+<p>Added some notes on offset sizes here as well.</p>
+</blockquote>
+
+
+
+<a name="422534687"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534687" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534687">(Feb 21 2024 at 02:51)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891961731">PR review</a>.</p>
+
+
+
+<a name="422534688"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422534688" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422534688">(Feb 21 2024 at 02:51)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496810243">PR review comment</a>:</p>
+<blockquote>
+<p>I played with this a bit but (i) I want the single-item case to be bare (no braces) to avoid cluttering up the syntax (otherwise e.g. <code>range(64, {0}, {255})</code>) and (ii) <code>debug_set</code> takes the <code>Debug</code> of elements but I want the <code>Display</code>; could adapt for both but then it's arguably more and weirder code than the above (to my eyes at least!).</p>
+</blockquote>
+
+
+
+<a name="422536003"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422536003" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422536003">(Feb 21 2024 at 03:07)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1891979051">PR review</a>.</p>
+
+
+
+<a name="422536004"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422536004" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422536004">(Feb 21 2024 at 03:07)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1496822320">PR review comment</a>:</p>
+<blockquote>
+<p>So, this is a very interesting point: I was able to control the number of <code>equal</code> expressions by writing a bunch of addresses that simplify to the same value. (E.g., loads from <code>p</code> and <code>p + (4-4)</code>.) Lower and upper bounds on the other hand are not user-controllable as the dynamic ones arise from memories and any given access only touches one memory (and static ones are simplified so that only one lower and one upper remain). Great catch and thank you for thinking of this!</p>
+<p>The need for "equal" constraints arises from the transitivity -- we need to represent the values <code>v1</code> and <code>gv1</code> when we see <code>icmp gte v1, gv1</code> -- but I suspect we might be able to get away with at most one. This does mean we lose information sometimes but...</p>
+<p>(A possible sketch of a strategy: when we merge, always keep the "lesser" expression per the arbitrary lexicographical ordering; as long as we're consistent, we keep the comparison info for <code>v1</code> vs. <code>gv1</code> but not <code>v2</code> vs. <code>gv1</code>, across all related facts, and all related facts should merge if we have two loads of addresses <code>v1</code> and <code>v2</code> that ended up merging during opt.)</p>
+</blockquote>
+
+
+
+<a name="422557590"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422557590" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422557590">(Feb 21 2024 at 07:18)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>.</p>
+
+
+
+<a name="422558076"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422558076" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422558076">(Feb 21 2024 at 07:23)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#issuecomment-1956036061">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>:</p>
+<blockquote>
+<p>With some more testing I've found the equality mechanism to be a little fragile (specifically around constants, as well as the above-mentioned quadratic representation for multiple merged SSA vals), and I need to go have a think; so I'm gonna switch this to "draft" mode.</p>
+</blockquote>
+
+
+
+<a name="422646755"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422646755" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422646755">(Feb 21 2024 at 15:43)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#discussion_r1497814109">PR review comment</a>:</p>
+<blockquote>
+<blockquote>
+<p>(A possible sketch of a strategy: when we merge, always keep the "lesser" expression per the arbitrary lexicographical ordering; as long as we're consistent, we keep the comparison info for <code>v1</code> vs. <code>gv1</code> but not <code>v2</code> vs. <code>gv1</code>, across all related facts, and all related facts should merge if we have two loads of addresses <code>v1</code> and <code>v2</code> that ended up merging during opt.)</p>
+</blockquote>
+<p>This sounds very reasonable to me.</p>
+</blockquote>
+
+
+
+<a name="422646756"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/422646756" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#422646756">(Feb 21 2024 at 15:43)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#pullrequestreview-1893566342">PR review</a>.</p>
+
+
+
+<a name="423083422"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%237965%20Proof-carrying%20code%3A%20change%20range%20fac.../near/423083422" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.237965.20Proof-carrying.20code.3A.20change.20range.20fac.2E.2E.2E.html#423083422">(Feb 23 2024 at 19:45)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/7965#issuecomment-1961894973">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/7965">PR #7965</a>:</p>
+<blockquote>
+<p>After a little more thought around both the specific last issues seen here, and the efficiency in general of the larger facts, I had the above-mentioned think, and now I have a thought on a new approach that I'd like to document here before (unfortunately) having to context-switch away for a bit.</p>
+<p>To recap, the current state is:</p>
+<ul>
+<li>
+<p><code>main</code> today has PCC that works fine for static checks (memory with sufficiently large guard regions); the range facts are compact <code>Copy</code> structs that describe statically-known integer bounds.</p>
+</li>
+<li>
+<p>The difficulties arise when modeling symbolic expressions and comparisons between them that arise with dynamic checks -- specifically, tying together a compare with a conditional-select -- when this interacts either with optimizations merging things together or with constant values.</p>
+</li>
+</ul>
+<p>In my view, these difficulties are symptoms of trying to represent a "slice" of the overall worldview (partial order relation between program values) in facts on individual values. That is, from the perspective of an individual value, we have to carry around its inequalities with a bunch of other values in case we need them. Furthermore, because facts are attached to values, when constants are involved, we can lose track of things: a constant value can be rematerialized or incorporated in a bunch of different places and does not have a stable identity like an SSA value <code>v1</code> does.</p>
+<p>So, IMHO a reasonable solution might be to build a "whole worldview" data structure, and share it across the function. One can see this as taking this PR a bit further: this PR lets a fact on a single value talk about multiple relations (so single facts go from atomic tidbits to slices of the whole world); instead let's build "the whole world" and then point into it.</p>
+<p>To be more concrete, I envision a "partial order relation DAG" with nodes that represent <em>sets</em> of equal values, either symbolic (SSA values, global values) or concrete (integer constants), and edges that represent less-than-or-equal relations. Edge labels represent known "distance" (e.g. <code>5</code> on edge from <code>x</code> to <code>y</code> means <code>x + 5 &lt;= y</code>), and edges can also be labeled with predicates that make them true (value <code>v1</code>, the result of an <code>icmp</code>, implies <code>v2 &lt;= v3</code>).</p>
+<p>The idea is that we can point to any given node in this DAG from a fact on a value in the IR; these DAG nodes don't actually need to track the set of equal values (that's implicit in the set of all nodes that point to them); and we can do a union-find-like thing to efficiently answer less-than queries. Basically we can implement <code>le(node1, node2, Option&lt;pred&gt;) -&gt; Option&lt;distance&gt;</code> where we get a <code>Some(min_distance)</code> if there is some path from one node to another (enabling edges labeled under <code>pred</code> if present), where <code>min_distance</code> is the sum of edge labels. Then we can compress the path by adding a direct edge (transitivity!) to make further queries more efficient. I suspect this will lead to a fairly efficient overall check of a function body, because the same comparisons will be done over and over. (E.g., different offsets from a base pointer into a struct, all less than the guard-region size.)</p>
+<p>As mentioned I need to context-switch away for a bit but I'll try to get back to this at some point!<br>
+</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

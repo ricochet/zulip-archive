@@ -1,0 +1,71 @@
+<html>
+<head><meta charset="utf-8"><title>Failure to adapt reactor with component adapter · wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/index.html">wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Failure.20to.20adapt.20reactor.20with.20component.20adapter.html">Failure to adapt reactor with component adapter</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="365710262"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Failure%20to%20adapt%20reactor%20with%20component%20adapter/near/365710262" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bailey Hayes <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Failure.20to.20adapt.20reactor.20with.20component.20adapter.html#365710262">(Jun 13 2023 at 00:49)</a>:</h4>
+<p>Are folks able to adapt reactor wasi modules on wasmtime main?</p>
+<p>I'm looking to create a reactor go component based on the module produced here: <a href="https://github.com/dev-wasm/dev-wasm-go/tree/main/http">https://github.com/dev-wasm/dev-wasm-go/tree/main/http</a></p>
+<p>I ran into the same issues that others have reported but I haven't seen a root cause and solution for it yet:</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>Caused<span class="w"> </span>by:
+<span class="w">    </span><span class="m">0</span>:<span class="w"> </span>module<span class="w"> </span>requires<span class="w"> </span>an<span class="w"> </span>import<span class="w"> </span>interface<span class="w"> </span>named<span class="w"> </span><span class="sb">`</span>wasi_snapshot_preview1<span class="sb">`</span>
+</code></pre></div>
+<p>To eliminate any differences that are go specific, I've tried to breakdown the reactor workflow for rust. Initial sanity check with <code>cargo component new foo --lib</code> works. Then I went through breaking down the steps that cargo component runs through.</p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code><span class="c1"># Built a reactor adapter in wasmtime</span>
+<span class="c1"># note wasm-encoder and wit-bindgen deps are updated to workspace, e.g. { path = "../wasm-tools/crates/wasm-encoder" }</span>
+<span class="c1"># reactor is the default</span>
+<span class="nb">cd</span><span class="w"> </span>wasmtime
+cargo<span class="w"> </span>build<span class="w"> </span>-p<span class="w"> </span>wasi-preview1-component-adapter<span class="w"> </span>--target<span class="w"> </span>wasm32-unknown-unknown<span class="w"> </span>--release
+
+<span class="c1"># validate the adapter</span>
+<span class="nv">release</span><span class="o">=</span>target/wasm32-unknown-unknown/release/wasi_preview1_component_adapter.wasm
+cargo<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>verify-component-adapter<span class="w"> </span>--<span class="w"> </span><span class="nv">$release</span>
+
+<span class="nb">export</span><span class="w"> </span><span class="nv">COMPONENT_ADAPTER</span><span class="o">=</span><span class="sb">`</span><span class="nb">pwd</span><span class="sb">`</span><span class="nv">$release</span>
+</code></pre></div>
+<p>All good so far. I noticed there isn't a good e2e test for the adapter yet so I converted the cargo-component created lib to use bare wit-bindgen. </p>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>cargo<span class="w"> </span>component<span class="w"> </span>new<span class="w"> </span>smoke<span class="w"> </span>--lib
+<span class="c1"># hack backwards to wit-bindgen</span>
+</code></pre></div>
+<p>Modified Cargo.toml to use local wit-bindgen<br>
+<code>wit-bindgen = { path = "../../wit-bindgen/crates/guest-rust"}</code></p>
+<p>Modified <a href="http://lib.rs">lib.rs</a> to use wit-bindgen bindgings and removed cargo-component bindings wrapper. </p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">wit_bindgen</span>::<span class="n">generate</span><span class="o">!</span><span class="p">(</span><span class="k">in</span><span class="w"> </span><span class="s">"./wit/world.wit"</span><span class="p">);</span>
+
+<span class="k">struct</span> <span class="nc">Component</span><span class="p">;</span>
+
+<span class="n">export_example</span><span class="o">!</span><span class="p">(</span><span class="n">Component</span><span class="p">);</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Example</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Component</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="sd">/// Say hello!</span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">hello_world</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="nb">String</span> <span class="p">{</span>
+<span class="w">        </span><span class="s">"Hello, World!"</span><span class="p">.</span><span class="n">to_string</span><span class="p">()</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code><span class="c1"># build then adapt</span>
+cargo<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>wasm32-wasi<span class="w"> </span>--release
+wasm-tools<span class="w"> </span>component<span class="w"> </span>new<span class="w"> </span>-o<span class="w"> </span>smoke.component.wasm<span class="w"> </span>--adapt<span class="w"> </span><span class="s2">"</span><span class="nv">$COMPONENT_ADAPTER</span><span class="s2">"</span><span class="w"> </span>target/wasm32-wasi/release/smoke.wasm
+</code></pre></div>
+<p>Same error :/</p>
+<p>Environment:<br>
+I have all tools (cargo-component, wasm-tools, wit-bindgen, wasmtime) set on latest main with the exception of wasm-tools with the resources commit reverted for compatibility with wit-bindgen. All tests in each of the projects passes. I'm falling back to using local paths for all deps so that I can have trace printlns but the original error also occurs with released versions and wasmtime on main.</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/dev-wasm/dev-wasm-go/tree/main/http" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/7c71d12066cb1196f493961fd8fa921d6d520ac9\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f653661326137646166643534313038363466323137396564303263643039306562346365353330633831383333323832333262613765636635303730326563332f6465762d7761736d2f6465762d7761736d2d676f)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/dev-wasm/dev-wasm-go/tree/main/http" title="dev-wasm-go/http at main · dev-wasm/dev-wasm-go">dev-wasm-go/http at main · dev-wasm/dev-wasm-go</a></div><div class="message_embed_description">Simple devcontainer for Golang + WASM development. Contribute to dev-wasm/dev-wasm-go development by creating an account on GitHub.</div></div></div>
+
+
+
+<a name="365711242"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/Failure%20to%20adapt%20reactor%20with%20component%20adapter/near/365711242" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bailey Hayes <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/Failure.20to.20adapt.20reactor.20with.20component.20adapter.html#365711242">(Jun 13 2023 at 00:57)</a>:</h4>
+<p>Simple mistake. Answer here: <a href="#narrow/stream/206238-general/topic/Unable.20to.20create.20wasm.20component.20with.20wasm-tools/near/358507133">https://bytecodealliance.zulipchat.com/#narrow/stream/206238-general/topic/Unable.20to.20create.20wasm.20component.20with.20wasm-tools/near/358507133</a></p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

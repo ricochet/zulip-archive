@@ -1,0 +1,119 @@
+<html>
+<head><meta charset="utf-8"><title>Doing a Scheme call using Cranelift · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift.html">Doing a Scheme call using Cranelift</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="423354152"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Doing%20a%20Scheme%20call%20using%20Cranelift/near/423354152" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Adel Prokurov <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift.html#423354152">(Feb 26 2024 at 09:18)</a>:</h4>
+<p>So I was investigating into usage of Cranelift as a backend for my Scheme runtime. For this it needs to support indirect tail-calls and it seems to be in Cranelift already. Next thing is that argument count should be passed to the callee somehow. <br>
+What I thought of is passing argument count as first argument and then callee could check it, is it a good idea?</p>
+
+
+
+<a name="423354406"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Doing%20a%20Scheme%20call%20using%20Cranelift/near/423354406" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Adel Prokurov <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift.html#423354406">(Feb 26 2024 at 09:20)</a>:</h4>
+<p>Calls will always be indirect so I could just pass my own <code>SigRef</code> everywhere, question is: would it break calling Cranelift convention if I do such calls? Like theoretically more arguments could be passed to a function that it expects, it should check this argument count register inside on its own</p>
+
+
+
+<a name="423418213"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Doing%20a%20Scheme%20call%20using%20Cranelift/near/423418213" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift.html#423418213">(Feb 26 2024 at 15:17)</a>:</h4>
+<p>FYI, Cranelift currently only supports tail calls when both the caller and callee function use the <code>tail</code> calling convention.</p>
+<blockquote>
+<p>Next thing is that argument count should be passed to the callee somehow. What I thought of is passing argument count as first argument and then callee could check it, is it a good idea? [...] would it break calling Cranelift convention if I do such calls?</p>
+</blockquote>
+<p>The Cranelift-level function signatures must match. But that doesn't mean that the Scheme-level function signatures must match, if you lower all Scheme functions such that they use the same Cranelift-level function signature (which is what I think you are getting at?)</p>
+<p>Wasmtime does something similar for dynamic-y calls. We call it the "array" calling convention, and the same fixed native/cranelift-level signature is used for all Wasm function signatures when using this calling convention (Wasmtime has three calling conventions).</p>
+<p>The native/Cranelift-level function signature is:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/300fe46d29b00c8ec49a38be4ced541e8b6d1c61/crates/runtime/src/vmcontext.rs#L34">https://github.com/bytecodealliance/wasmtime/blob/300fe46d29b00c8ec49a38be4ced541e8b6d1c61/crates/runtime/src/vmcontext.rs#L34</a></p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="sd">/// A function pointer that exposes the array calling convention.</span>
+<span class="sd">///</span>
+<span class="sd">/// Regardless of the underlying Wasm function type, all functions using the</span>
+<span class="sd">/// array calling convention have the same Rust signature.</span>
+<span class="sd">///</span>
+<span class="sd">/// Arguments:</span>
+<span class="sd">///</span>
+<span class="sd">/// * Callee `vmctx` for the function itself.</span>
+<span class="sd">///</span>
+<span class="sd">/// * Caller's `vmctx` (so that host functions can access the linear memory of</span>
+<span class="sd">///   their Wasm callers).</span>
+<span class="sd">///</span>
+<span class="sd">/// * A pointer to a buffer of `ValRaw`s where both arguments are passed into</span>
+<span class="sd">///   this function, and where results are returned from this function.</span>
+<span class="sd">///</span>
+<span class="sd">/// * The capacity of the `ValRaw` buffer. Must always be at least</span>
+<span class="sd">///   `max(len(wasm_params), len(wasm_results))`.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">type</span> <span class="nc">VMArrayCallFunction</span><span class="w"> </span><span class="o">=</span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">"C"</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">VMOpaqueContext</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">VMOpaqueContext</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">ValRaw</span><span class="p">,</span><span class="w"> </span><span class="kt">usize</span><span class="p">);</span>
+</code></pre></div>
+<p>(and here is the corresponding code that construct the <code>cranelift_codegen::ir::Signature</code>: <a href="https://github.com/bytecodealliance/wasmtime/blob/300fe46d29b00c8ec49a38be4ced541e8b6d1c61/crates/cranelift/src/lib.rs#L118">https://github.com/bytecodealliance/wasmtime/blob/300fe46d29b00c8ec49a38be4ced541e8b6d1c61/crates/cranelift/src/lib.rs#L118</a>)</p>
+<p>If you use this native/Cranelift-level function signature, functions can dynamically check that the number of actual arguments passed matches their expected number of formal parameters.</p>
+
+
+
+<a name="424139521"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Doing%20a%20Scheme%20call%20using%20Cranelift/near/424139521" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Adel Prokurov <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift.html#424139521">(Mar 01 2024 at 01:15)</a>:</h4>
+<p>Thanks! I've settled for using my own codegen backend at the moment as I need quite custom callconv with no callee-saves and allow function signatures to not match</p>
+
+
+
+<a name="426273818"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Doing%20a%20Scheme%20call%20using%20Cranelift/near/426273818" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Adel Prokurov <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift.html#426273818">(Mar 13 2024 at 07:25)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="253990">fitzgen (he/him)</span> <a href="#narrow/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift/near/423418213">said</a>:</p>
+<blockquote>
+<p>FYI, Cranelift currently only supports tail calls when both the caller and callee function use the <code>tail</code> calling convention.</p>
+<blockquote>
+<p>Next thing is that argument count should be passed to the callee somehow. What I thought of is passing argument count as first argument and then callee could check it, is it a good idea? [...] would it break calling Cranelift convention if I do such calls?</p>
+</blockquote>
+<p>The Cranelift-level function signatures must match. But that doesn't mean that the Scheme-level function signatures must match, if you lower all Scheme functions such that they use the same Cranelift-level function signature (which is what I think you are getting at?)</p>
+<p>Wasmtime does something similar for dynamic-y calls. We call it the "array" calling convention, and the same fixed native/cranelift-level signature is used for all Wasm function signatures when using this calling convention (Wasmtime has three calling conventions).</p>
+<p>The native/Cranelift-level function signature is:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/300fe46d29b00c8ec49a38be4ced541e8b6d1c61/crates/runtime/src/vmcontext.rs#L34">https://github.com/bytecodealliance/wasmtime/blob/300fe46d29b00c8ec49a38be4ced541e8b6d1c61/crates/runtime/src/vmcontext.rs#L34</a></p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="sd">/// A function pointer that exposes the array calling convention.</span>
+<span class="sd">///</span>
+<span class="sd">/// Regardless of the underlying Wasm function type, all functions using the</span>
+<span class="sd">/// array calling convention have the same Rust signature.</span>
+<span class="sd">///</span>
+<span class="sd">/// Arguments:</span>
+<span class="sd">///</span>
+<span class="sd">/// * Callee `vmctx` for the function itself.</span>
+<span class="sd">///</span>
+<span class="sd">/// * Caller's `vmctx` (so that host functions can access the linear memory of</span>
+<span class="sd">///   their Wasm callers).</span>
+<span class="sd">///</span>
+<span class="sd">/// * A pointer to a buffer of `ValRaw`s where both arguments are passed into</span>
+<span class="sd">///   this function, and where results are returned from this function.</span>
+<span class="sd">///</span>
+<span class="sd">/// * The capacity of the `ValRaw` buffer. Must always be at least</span>
+<span class="sd">///   `max(len(wasm_params), len(wasm_results))`.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">type</span> <span class="nc">VMArrayCallFunction</span><span class="w"> </span><span class="o">=</span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">"C"</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">VMOpaqueContext</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">VMOpaqueContext</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">ValRaw</span><span class="p">,</span><span class="w"> </span><span class="kt">usize</span><span class="p">);</span>
+</code></pre></div>
+<p>(and here is the corresponding code that construct the <code>cranelift_codegen::ir::Signature</code>: <a href="https://github.com/bytecodealliance/wasmtime/blob/300fe46d29b00c8ec49a38be4ced541e8b6d1c61/crates/cranelift/src/lib.rs#L118">https://github.com/bytecodealliance/wasmtime/blob/300fe46d29b00c8ec49a38be4ced541e8b6d1c61/crates/cranelift/src/lib.rs#L118</a>)</p>
+<p>If you use this native/Cranelift-level function signature, functions can dynamically check that the number of actual arguments passed matches their expected number of formal parameters.</p>
+</blockquote>
+<p>Ok actually I've got a question now: if I were to intorduce "array" calling convention how would that work? If I allocate array for arguments in caller and then do <code>return_call</code> it would destroy the array</p>
+
+
+
+<a name="426318999"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Doing%20a%20Scheme%20call%20using%20Cranelift/near/426318999" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift.html#426318999">(Mar 13 2024 at 11:52)</a>:</h4>
+<p>for the combination of tail calls and functions that can dynamically pass any number of arguments/returns, the most straightforward solution that pops to mind is to heap allocate, rather than stack allocate, that array and then resize it as necessary (potentially with calling out to the host/vm to do that resizing when necessary; should reach a steady state and amortize that cost pretty quickly)</p>
+<p>another alternative is to impose some reasonable implementation limit on the max number of arguments/returns (say 1000) and then static allocate the array</p>
+
+
+
+<a name="426319087"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Doing%20a%20Scheme%20call%20using%20Cranelift/near/426319087" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Doing.20a.20Scheme.20call.20using.20Cranelift.html#426319087">(Mar 13 2024 at 11:53)</a>:</h4>
+<p>(for Wasmtime, we don't need to support tail calls through the array calling convention, so we don't have this particular issue)</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

@@ -1,0 +1,44 @@
+[
+    {
+        "content": "<p>I made a Minecraft plugin in Java that, via JNI, allows you to make Minecraft plugins using shared libraries. I'm now realizing the shared libraries part is unstable, and thus I wanted to offer WASM libraries as an alternative (but not a replacement, because both approaches has their own tradeoffs).</p>\n<p>If you've never used JNI, what you need to know is that a function exported from this shared library would look like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[no_mangle]</span>\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">extern</span><span class=\"w\"> </span><span class=\"s\">\"system\"</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">__on__PluginEnableEvent</span><span class=\"p\">(</span><span class=\"n\">env</span>: <span class=\"nc\">JNIEnv</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">obj</span>: <span class=\"nc\">JObject</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">   </span><span class=\"c1\">// ...</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>JNIEnv is supposed to be a Rust abstraction for the unsigned 64-bit integer that represents that address for JNIEnv, of course. Same with JObject.</p>\n<p>...and when I use wasmtime's wasi tool to compile, it's compiled to a signed 32-bit integer. Both of them. And even if I cast the address to a signed 32-bit integer, I get this specific error:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"mi\">0</span>: <span class=\"nc\">memory</span><span class=\"w\"> </span><span class=\"n\">fault</span><span class=\"w\"> </span><span class=\"n\">at</span><span class=\"w\"> </span><span class=\"n\">wasm</span><span class=\"w\"> </span><span class=\"n\">address</span><span class=\"w\"> </span><span class=\"mh\">0xc4bbef50</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">linear</span><span class=\"w\"> </span><span class=\"n\">memory</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">size</span><span class=\"w\"> </span><span class=\"mh\">0x130000</span>\n<span class=\"w\">    </span><span class=\"mi\">1</span>: <span class=\"nc\">wasm</span><span class=\"w\"> </span><span class=\"n\">trap</span>: <span class=\"nc\">out</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">bounds</span><span class=\"w\"> </span><span class=\"n\">memory</span><span class=\"w\"> </span><span class=\"n\">access</span><span class=\"o\">'</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">wasm</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">187</span>:<span class=\"mi\">18</span>\n</code></pre></div>\n<p>I assume at this point that I'm trying to do something impossible that's never going to be supported. But I titled the post this way because, if I'm right, then the question I'd ask next would be too long to fit into the field: If WASM cannot do it, is there another portable, platform-agnostic binary format similar to WASM that could do this?</p>",
+        "id": 388441280,
+        "sender_full_name": "IoI xD",
+        "timestamp": 1693535575
+    },
+    {
+        "content": "<p>WebAssembly programs effectively run in their own address space meaning that if <code>JNIEnv</code> is a pointer to something on the host, for example, that can't be dereferenced in wasm because wasm doesn't have access to that. You'll need to either copy data into the wasm program or otherwise have an abstract \"handle\" that the wasm program uses which the host operates on behalf of wasm. For example <code>JNIEnv</code> might be behind a handle where the guest wasm calls a function which causes the host to use the <code>JNIEnv</code> value it can access. </p>\n<p>FWIW this is all what the component model is targeted at solving -- providing abstractions for common types like resources (handles), strings, lists, etc, and all the management of that is done via bindings generation in the host and the guest</p>",
+        "id": 388443645,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1693537253
+    },
+    {
+        "content": "<p>That's what I figured. I could try the latter.<br>\nRust compiles JNIEnv to i32, though. Would I have to change the type in the function signatures to a new type?</p>",
+        "id": 388580824,
+        "sender_full_name": "IoI xD",
+        "timestamp": 1693593755
+    },
+    {
+        "content": "<p>Right, you wouldn't actually carry anything like a <code>JNIEnv</code> into the guest Rust -- that type carries a lot of implications with it (actual pointer, how to use it, etc). The \"handle\" approach usually works by keeping an external (host-side) table of pointers/state, and giving indices into this table to the guest as handles. You wouldn't want to pass the raw pointer in as e.g. an <code>i64</code> because then you're trusting the guest Wasm to preserve its value, and allowing it to control raw memory accesses, which defeats the point of the sandbox</p>",
+        "id": 388583626,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1693594877
+    },
+    {
+        "content": "<p>basically, you need to build a \"proxy\" layer where all of these types stay outside, and you design an API at the Wasm level that uses basic Wasm types</p>",
+        "id": 388583689,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1693594906
+    },
+    {
+        "content": "<p>(this is more or less what wit-bindgen does automatically, which is why Alex refers to the component model; it's fairly bleeding-edge at the moment though, fwiw)</p>",
+        "id": 388583818,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1693594954
+    },
+    {
+        "content": "<p>I see.</p>",
+        "id": 388587818,
+        "sender_full_name": "IoI xD",
+        "timestamp": 1693596891
+    }
+]

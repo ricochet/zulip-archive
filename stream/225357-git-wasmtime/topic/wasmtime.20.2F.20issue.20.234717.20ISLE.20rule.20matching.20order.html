@@ -1,0 +1,748 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #4717 ISLE rule matching order · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html">wasmtime / issue #4717 ISLE rule matching order</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="293641454"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293641454" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293641454">(Aug 16 2022 at 00:20)</a>:</h4>
+<p>elliottt opened <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>While working on finishing the migration of the x64 backend to ISLE, I encountered a case where guarding a rule on specific ISA features being enabled caused the rule to never fire. The problem was that the rule I added overlapped with another rule except in the ISA feature check, and the other rule took precedence. Here's an example from elsewhere in the codebase:        <br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/codegen/src/isa/x64/lower.isle#L1799-L1809">https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/codegen/src/isa/x64/lower.isle#L1799-L1809</a>    </p>
+<p>The LHS of the two rules only differs in the patterns to the first argument of <code>(has_type)</code>: both rules match <code>(ty_32_or_64 ty)</code> while the rule on line 1799 also matches <code>(use_bmi1)</code>. The rule on line 1799 has been given a priority of <code>1</code> to ensure that it's checked before the rule on line 1806, but ideally we wouldn't need to give this annotation here.        </p>
+<p>My proposal is that we switch to compiling rules by matching rules top-down, left-to-right.    </p>
+<h4>Benefit</h4>
+<p>The benefit of this change would be that we could tell statically when a rule was not reachable, and raise an error when it would never fire.    </p>
+<h4>Implementation</h4>
+<p>For matching on <code>enum</code> values we could take the approach outlined in <a href="https://www.cs.tufts.edu/~nr/cs257/archive/luc-maranget/jun08.pdf">https://www.cs.tufts.edu/~nr/cs257/archive/luc-maranget/jun08.pdf</a>. For handling extractors we could take inspiration from GHC's implementation of <a href="https://gitlab.haskell.org/ghc/ghc/-/wikis/view-patterns#compilation">view patterns</a>.        </p>
+<h4>Alternatives</h4>
+<p>We could continue to develop heuristics to determine when rules might be unconditionally shadowed, and inform the programmer through an error or warning.</p>
+</blockquote>
+
+
+
+<a name="293642134"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293642134" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293642134">(Aug 16 2022 at 00:30)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1216014041">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>Thanks @elliottt for bringing this up. I have some thoughts on this inspired by our conversations over the past week, together with our experience with this aspect of ISLE over the past year, that I've written up on the subject below.</p>
+<h1>ISLE rule-ordering semantics simplification</h1>
+<p>This issue proposes to simplify the ISLE rule-ordering semantics to<br>
+"first matching rule wins", as a result of a year of experience with<br>
+the language as it currently stands (a more complex ordering<br>
+heuristic) and the issues that this causes.</p>
+<h2>Overview: Current Design</h2>
+<p>ISLE currently has semantics for rule ordering that generally follow<br>
+the "most specific rule wins" principle. The goal is that the user, or<br>
+a tool, should be able to write rules in any order and the resulting<br>
+compiler backend should be the same no matter how these rules are<br>
+ordered.</p>
+<p>Inside the ISLE compiler, this is implemented by sorting edges when<br>
+inserting into the match trie. The sort-order is implied by the<br>
+<code>PatternInst</code> enum and the order of its arms: lower-ordered ops come<br>
+first at any given node in the tree.</p>
+<p>The ISLE language contains a concession to allow for manual ordering:<br>
+any rule can be annotated with an explicit numeric priority, and rules<br>
+are sorted by priority first before being merged into a match trie.</p>
+<h2>Reasons for Current Design</h2>
+<h3>Intuitive "More-Specific-First" Matching</h3>
+<p>The first reason given for the current design is that it allows for a<br>
+natural "general case then more specific cases" ordering of rule<br>
+cases. One can start a group of rules with the most basic handling,<br>
+and then get into trickier cases later. This aids reading<br>
+comprehension.</p>
+<h3>Compatibility with Rule-Generating Tools</h3>
+<p>One might build a tool that generates a large body of lowering rules<br>
+from some algorithm that finds equivalences (as in<br>
+superoptimization). For such a tool, it is convenient to be able to<br>
+(i) just dump the list of rules, without sorting first; and (ii) allow<br>
+the user to include these rules without having to think about how they<br>
+order with respect to handwritten rules.</p>
+<h3>Independence of Rules for Verification</h3>
+<p>When verifying the correctness of ISLE lowering rules against<br>
+semantics of the input and output language, it is useful if the<br>
+semantics of the language are as-if a rule could fire when the<br>
+left-hand side matches at all, regardless of other rules that<br>
+exist. An "unordered" / "unspecified" semantics is closer to this than<br>
+"first rule wins".</p>
+<h2>Issues</h2>
+<h3>Unclear mental model</h3>
+<p>THe primary issue is that the mental model required to be held by the<br>
+ISLE programmer is unclear. If the ISLE programmer <em>truly</em> does not<br>
+care which rule applies, then all is well. But in real development of<br>
+compiler backends, one does very much care: one needs to make sure<br>
+that some special cases are actually handled (or else they are useless<br>
+dead code that, worse, may be untested); and sometimes one rule that<br>
+is shadowed by another is actually incorrect in the shadowed case, so<br>
+one <em>relies</em> on the ordering heuristic for <em>correctness</em>.</p>
+<p>In general, development of ISLE rules requires the programmer to<br>
+understand how the language operates so that they can control which<br>
+rule fires. If the ordering rules are complex and subtle, or worse are<br>
+"unspecified", then we get a body of rules that either has silent<br>
+shadowing, or brittle reliance on particular ordering heuristics that<br>
+may change. Even if we attempt to clearly specify the semantics, there<br>
+are subtleties that arise because of the way that external Rust code<br>
+can be invoked: we don't know when some conditions are disjoint or<br>
+not, fallible or infallible, and a set of prioritization rules that<br>
+relies on "fallible before infallible" and disjointness thus requires,<br>
+in the limit, a full and complete understanding of our helpers'<br>
+semantics (via explicit specification or some other method).</p>
+<p>One can make an argument that wen building a complex artifact, one<br>
+needs one's tools to be as <em>predictable</em> as possible. Complexity is<br>
+fine, if it is in service of a well-understood goal (e.g., compiling<br>
+Rust code to x86 machine code). But <em>unclear semantics</em> are not.</p>
+<h3>"Experimental nature" of Priority Usage</h3>
+<p>The clearest extraction of the issue here comes in our standard advice<br>
+for getting proper lowering output: just write the rules, and if the<br>
+ordering is wrong, apply some priorities.</p>
+<p>Consider what this is implying: it is saying that the DSL's semantics<br>
+are unknowable, or at least it's not worth knowing ahead of time what<br>
+will happen; instead, one must <em>experiment</em> and then apply corrective<br>
+action if the heuristic gets it wrong.</p>
+<p>This is problematic because the developer may not always take the time<br>
+to do so ("I'm just adding a quick lowering case, it will probably be<br>
+hit") -- and because in cases where the metacompiler <em>does</em> get it<br>
+right without priorities, an implicit dependence on the current<br>
+heuristics is baked in at that point and must be frozen (see below).</p>
+<p>In my opinion, it is not feasible to write high-reliability software<br>
+if one's tools are unpredictable. Predictable and repeatable behavior<br>
+is the cornerstone of writing correct lowerings.</p>
+<h3>"Most specific first" is not simple or unambiguous</h3>
+<p>But isn't "most specific first" a predictable design point?</p>
+<p>It turns out, empirically, the answer is "no". We have had a number of<br>
+bugs where the heuristics do not do what we would expect, mostly<br>
+because fallible and infallible extractors are not properly ordered<br>
+(see e.g. #4685), and the interaction of explicit priorites with<br>
+implicit ones is complex (#4093, #4117). We have a pending issue to<br>
+explicitly define what the ordering even <em>is</em> (#3575) but we haven't<br>
+been able to do so in a simple way (and it is changing as we fix the<br>
+above bugs).</p>
+<p>The basic issue is that because we are doing more than simple<br>
+tree-matching -- because we can invoke arbitrary Rust code and we have<br>
+written helpers that check predicates and conditions in various ways,<br>
+and because some checks are fallible and some are not -- "specific" is<br>
+unclear. This is aside from the general issue (noted<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/isle/isle/src/trie.rs#L42-L50">here</a>)<br>
+that when one has a tree-shaped rather than list-shaped pattern match,<br>
+specificity is a <em>partial order</em>. (Two patterns can both subsume a<br>
+general one by being specific in different dimensions.) One can break<br>
+that tie arbitrarily, but that just adds more complexity.</p>
+<p>In general, humans (other than those who hack on <code>islec</code>) seem not to<br>
+think in terms of these complex heuristics, or at least seem to<br>
+sometimes have a different expectation than what the compiler really<br>
+does.</p>
+<h3>Empirical evidence of mental-model mismatch</h3>
+<p>To add some evidence to this claim, see the following code reviews: </p>
+<ul>
+<li>#3706 (<a href="https://github.com/bytecodealliance/wasmtime/pull/3706#pullrequestreview-858875849">link</a>)</li>
+<li>#4401 (<a href="https://github.com/bytecodealliance/wasmtime/pull/4401#discussion_r916124277">link</a>)</li>
+<li>#4399 (<a href="https://github.com/bytecodealliance/wasmtime/pull/4399#discussion_r916122904">link</a>)</li>
+<li>#3561: aarch64 backend fix to already-committed issue</li>
+<li>
+<p>#3560: a documentation change to add a note that rule-ordering is<br>
+  just a heuristic and not to rely on it (note that the first three<br>
+  examples above came after this update!)</p>
+</li>
+<li>
+<p>#3751: a proposal for a "locally ordered list of rules", as a<br>
+  stopgap fix for some cases, and general agreement that this would<br>
+  reduce confusion</p>
+</li>
+<li>
+<p>and more I have likely missed.</p>
+</li>
+</ul>
+<p>Developers working in ISLE seem to have a mental model that rules are<br>
+evaluated top-down. This is likely for several reasons. First, it is<br>
+the natural "reading order"; thinking in terms of parallel,<br>
+reorderable conditions is not natural for most programmers. Second,<br>
+existing languages <em>with match facilities</em> condition programmers this<br>
+way, <em>including Rust</em> (as well as ML, Haskell, Scala, etc). Third, it<br>
+is clear that there must be <em>some</em> order, and if the ordering<br>
+heuristic is otherwise muddy or badly specified, or sometimes changing<br>
+(see above), then a programmer will likely fall back on "first rule<br>
+first".</p>
+<p>In general we want to follow the Principle of Least Surprise: we<br>
+should have a simple, predictable tool that behaves like most people<br>
+who pick it up think it should.</p>
+<p>The task at hand (writing a correct compiler) is hard enough; any<br>
+complexity in the tool that is not necessary should be<br>
+discarded. Explicitness is a strong principle that results in tools<br>
+one can trust and do precise work with.</p>
+<h3>Subtle bugs in heuristics, and heuristics as load-bearing for correctness</h3>
+<p>Finally, as seen in several of the above-linked issues and PRs, we<br>
+have had multiple bugs in the ordering heuristics and have had to make<br>
+changes to get them right.</p>
+<p>If a hard-to-understand heuristic is difficult for an ISLE developer<br>
+to keep track of, a hard-to-understand heuristic *that sometimes<br>
+changes* is even worse.</p>
+<p>The "experimental answer" to rule ordering -- try it out, add a<br>
+priority if needed -- implicitly creates dependencies on the current<br>
+heuristics. If we do so, and then change the heuristics to fix <em>other</em><br>
+cases to behave as we expect they would, we are liable to silently<br>
+alter how rules apply (action-at-a-distance) and subtly break parts of<br>
+the compiler. Test coverage can hedge against this, but relying on<br>
+test coverage to patch over footguns in the language is a game that<br>
+dynamically-typed languages play; we don't want to do that if we can<br>
+help it.</p>
+<p>This potential for latent correctness bugs is <em>terrifying</em> and is<br>
+itself a strong reason to migrate away from this status quo, <br>
+[message truncated]</p>
+</blockquote>
+
+
+
+<a name="293642190"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293642190" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293642190">(Aug 16 2022 at 00:31)</a>:</h4>
+<p>cfallin edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1216014041">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>Thanks @elliottt for bringing this up. I have some thoughts on this inspired by our conversations over the past week, together with our experience with this aspect of ISLE over the past year, that I've written up on the subject below.</p>
+<h1>ISLE rule-ordering semantics simplification</h1>
+<p>This issue proposes to simplify the ISLE rule-ordering semantics to<br>
+"first matching rule wins", as a result of a year of experience with<br>
+the language as it currently stands (a more complex ordering<br>
+heuristic) and the issues that this causes.</p>
+<h2>Overview: Current Design</h2>
+<p>ISLE currently has semantics for rule ordering that generally follow<br>
+the "most specific rule wins" principle. The goal is that the user, or<br>
+a tool, should be able to write rules in any order and the resulting<br>
+compiler backend should be the same no matter how these rules are<br>
+ordered.</p>
+<p>Inside the ISLE compiler, this is implemented by sorting edges when<br>
+inserting into the match trie. The sort-order is implied by the<br>
+<code>PatternInst</code> enum and the order of its arms: lower-ordered ops come<br>
+first at any given node in the tree.</p>
+<p>The ISLE language contains a concession to allow for manual ordering:<br>
+any rule can be annotated with an explicit numeric priority, and rules<br>
+are sorted by priority first before being merged into a match trie.</p>
+<h2>Reasons for Current Design</h2>
+<h3>Intuitive "More-Specific-First" Matching</h3>
+<p>The first reason given for the current design is that it allows for a<br>
+natural "general case then more specific cases" ordering of rule<br>
+cases. One can start a group of rules with the most basic handling,<br>
+and then get into trickier cases later. This aids reading<br>
+comprehension.</p>
+<h3>Compatibility with Rule-Generating Tools</h3>
+<p>One might build a tool that generates a large body of lowering rules<br>
+from some algorithm that finds equivalences (as in<br>
+superoptimization). For such a tool, it is convenient to be able to<br>
+(i) just dump the list of rules, without sorting first; and (ii) allow<br>
+the user to include these rules without having to think about how they<br>
+order with respect to handwritten rules.</p>
+<h3>Independence of Rules for Verification</h3>
+<p>When verifying the correctness of ISLE lowering rules against<br>
+semantics of the input and output language, it is useful if the<br>
+semantics of the language are as-if a rule could fire when the<br>
+left-hand side matches at all, regardless of other rules that<br>
+exist. An "unordered" / "unspecified" semantics is closer to this than<br>
+"first rule wins".</p>
+<h2>Issues</h2>
+<h3>Unclear mental model</h3>
+<p>The primary issue is that the mental model required to be held by the<br>
+ISLE programmer is unclear. If the ISLE programmer <em>truly</em> does not<br>
+care which rule applies, then all is well. But in real development of<br>
+compiler backends, one does very much care: one needs to make sure<br>
+that some special cases are actually handled (or else they are useless<br>
+dead code that, worse, may be untested); and sometimes one rule that<br>
+is shadowed by another is actually incorrect in the shadowed case, so<br>
+one <em>relies</em> on the ordering heuristic for <em>correctness</em>.</p>
+<p>In general, development of ISLE rules requires the programmer to<br>
+understand how the language operates so that they can control which<br>
+rule fires. If the ordering rules are complex and subtle, or worse are<br>
+"unspecified", then we get a body of rules that either has silent<br>
+shadowing, or brittle reliance on particular ordering heuristics that<br>
+may change. Even if we attempt to clearly specify the semantics, there<br>
+are subtleties that arise because of the way that external Rust code<br>
+can be invoked: we don't know when some conditions are disjoint or<br>
+not, fallible or infallible, and a set of prioritization rules that<br>
+relies on "fallible before infallible" and disjointness thus requires,<br>
+in the limit, a full and complete understanding of our helpers'<br>
+semantics (via explicit specification or some other method).</p>
+<p>One can make an argument that wen building a complex artifact, one<br>
+needs one's tools to be as <em>predictable</em> as possible. Complexity is<br>
+fine, if it is in service of a well-understood goal (e.g., compiling<br>
+Rust code to x86 machine code). But <em>unclear semantics</em> are not.</p>
+<h3>"Experimental nature" of Priority Usage</h3>
+<p>The clearest extraction of the issue here comes in our standard advice<br>
+for getting proper lowering output: just write the rules, and if the<br>
+ordering is wrong, apply some priorities.</p>
+<p>Consider what this is implying: it is saying that the DSL's semantics<br>
+are unknowable, or at least it's not worth knowing ahead of time what<br>
+will happen; instead, one must <em>experiment</em> and then apply corrective<br>
+action if the heuristic gets it wrong.</p>
+<p>This is problematic because the developer may not always take the time<br>
+to do so ("I'm just adding a quick lowering case, it will probably be<br>
+hit") -- and because in cases where the metacompiler <em>does</em> get it<br>
+right without priorities, an implicit dependence on the current<br>
+heuristics is baked in at that point and must be frozen (see below).</p>
+<p>In my opinion, it is not feasible to write high-reliability software<br>
+if one's tools are unpredictable. Predictable and repeatable behavior<br>
+is the cornerstone of writing correct lowerings.</p>
+<h3>"Most specific first" is not simple or unambiguous</h3>
+<p>But isn't "most specific first" a predictable design point?</p>
+<p>It turns out, empirically, the answer is "no". We have had a number of<br>
+bugs where the heuristics do not do what we would expect, mostly<br>
+because fallible and infallible extractors are not properly ordered<br>
+(see e.g. #4685), and the interaction of explicit priorites with<br>
+implicit ones is complex (#4093, #4117). We have a pending issue to<br>
+explicitly define what the ordering even <em>is</em> (#3575) but we haven't<br>
+been able to do so in a simple way (and it is changing as we fix the<br>
+above bugs).</p>
+<p>The basic issue is that because we are doing more than simple<br>
+tree-matching -- because we can invoke arbitrary Rust code and we have<br>
+written helpers that check predicates and conditions in various ways,<br>
+and because some checks are fallible and some are not -- "specific" is<br>
+unclear. This is aside from the general issue (noted<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/isle/isle/src/trie.rs#L42-L50">here</a>)<br>
+that when one has a tree-shaped rather than list-shaped pattern match,<br>
+specificity is a <em>partial order</em>. (Two patterns can both subsume a<br>
+general one by being specific in different dimensions.) One can break<br>
+that tie arbitrarily, but that just adds more complexity.</p>
+<p>In general, humans (other than those who hack on <code>islec</code>) seem not to<br>
+think in terms of these complex heuristics, or at least seem to<br>
+sometimes have a different expectation than what the compiler really<br>
+does.</p>
+<h3>Empirical evidence of mental-model mismatch</h3>
+<p>To add some evidence to this claim, see the following code reviews: </p>
+<ul>
+<li>#3706 (<a href="https://github.com/bytecodealliance/wasmtime/pull/3706#pullrequestreview-858875849">link</a>)</li>
+<li>#4401 (<a href="https://github.com/bytecodealliance/wasmtime/pull/4401#discussion_r916124277">link</a>)</li>
+<li>#4399 (<a href="https://github.com/bytecodealliance/wasmtime/pull/4399#discussion_r916122904">link</a>)</li>
+<li>#3561: aarch64 backend fix to already-committed issue</li>
+<li>
+<p>#3560: a documentation change to add a note that rule-ordering is<br>
+  just a heuristic and not to rely on it (note that the first three<br>
+  examples above came after this update!)</p>
+</li>
+<li>
+<p>#3751: a proposal for a "locally ordered list of rules", as a<br>
+  stopgap fix for some cases, and general agreement that this would<br>
+  reduce confusion</p>
+</li>
+<li>
+<p>and more I have likely missed.</p>
+</li>
+</ul>
+<p>Developers working in ISLE seem to have a mental model that rules are<br>
+evaluated top-down. This is likely for several reasons. First, it is<br>
+the natural "reading order"; thinking in terms of parallel,<br>
+reorderable conditions is not natural for most programmers. Second,<br>
+existing languages <em>with match facilities</em> condition programmers this<br>
+way, <em>including Rust</em> (as well as ML, Haskell, Scala, etc). Third, it<br>
+is clear that there must be <em>some</em> order, and if the ordering<br>
+heuristic is otherwise muddy or badly specified, or sometimes changing<br>
+(see above), then a programmer will likely fall back on "first rule<br>
+first".</p>
+<p>In general we want to follow the Principle of Least Surprise: we<br>
+should have a simple, predictable tool that behaves like most people<br>
+who pick it up think it should.</p>
+<p>The task at hand (writing a correct compiler) is hard enough; any<br>
+complexity in the tool that is not necessary should be<br>
+discarded. Explicitness is a strong principle that results in tools<br>
+one can trust and do precise work with.</p>
+<h3>Subtle bugs in heuristics, and heuristics as load-bearing for correctness</h3>
+<p>Finally, as seen in several of the above-linked issues and PRs, we<br>
+have had multiple bugs in the ordering heuristics and have had to make<br>
+changes to get them right.</p>
+<p>If a hard-to-understand heuristic is difficult for an ISLE developer<br>
+to keep track of, a hard-to-understand heuristic *that sometimes<br>
+changes* is even worse.</p>
+<p>The "experimental answer" to rule ordering -- try it out, add a<br>
+priority if needed -- implicitly creates dependencies on the current<br>
+heuristics. If we do so, and then change the heuristics to fix <em>other</em><br>
+cases to behave as we expect they would, we are liable to silently<br>
+alter how rules apply (action-at-a-distance) and subtly break parts of<br>
+the compiler. Test coverage can hedge against this, but relying on<br>
+test coverage to patch over footguns in the language is a game that<br>
+dynamically-typed languages play; we don't want to do that if we can<br>
+help it.</p>
+<p>This potential for latent correctness bugs is <em>terrifying</em> and is<br>
+itself a strong reason to migrate away from this statu<br>
+[message truncated]</p>
+</blockquote>
+
+
+
+<a name="293642646"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293642646" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293642646">(Aug 16 2022 at 00:38)</a>:</h4>
+<p>cfallin edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1216014041">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>Thanks @elliottt for bringing this up. I have some thoughts on this inspired by our conversations over the past week, together with our experience with this aspect of ISLE over the past year, that I've written up on the subject below.</p>
+<h1>ISLE rule-ordering semantics simplification</h1>
+<p>This issue proposes to simplify the ISLE rule-ordering semantics to<br>
+"first matching rule wins", as a result of a year of experience with<br>
+the language as it currently stands (a more complex ordering<br>
+heuristic) and the issues that this causes.</p>
+<h2>Overview: Current Design</h2>
+<p>ISLE currently has semantics for rule ordering that generally follow<br>
+the "most specific rule wins" principle. The goal is that the user, or<br>
+a tool, should be able to write rules in any order and the resulting<br>
+compiler backend should be the same no matter how these rules are<br>
+ordered.</p>
+<p>Inside the ISLE compiler, this is implemented by sorting edges when<br>
+inserting into the match trie. The sort-order is implied by the<br>
+<code>PatternInst</code> enum and the order of its arms: lower-ordered ops come<br>
+first at any given node in the tree.</p>
+<p>The ISLE language contains a concession to allow for manual ordering:<br>
+any rule can be annotated with an explicit numeric priority, and rules<br>
+are sorted by priority first before being merged into a match trie.</p>
+<h2>Reasons for Current Design</h2>
+<h3>Intuitive "More-Specific-First" Matching</h3>
+<p>The first reason given for the current design is that it allows for a<br>
+natural "general case then more specific cases" ordering of rule<br>
+cases. One can start a group of rules with the most basic handling,<br>
+and then get into trickier cases later. This aids reading<br>
+comprehension.</p>
+<h3>Compatibility with Rule-Generating Tools</h3>
+<p>One might build a tool that generates a large body of lowering rules<br>
+from some algorithm that finds equivalences (as in<br>
+superoptimization). For such a tool, it is convenient to be able to<br>
+(i) just dump the list of rules, without sorting first; and (ii) allow<br>
+the user to include these rules without having to think about how they<br>
+order with respect to handwritten rules.</p>
+<h3>Independence of Rules for Verification</h3>
+<p>When verifying the correctness of ISLE lowering rules against<br>
+semantics of the input and output language, it is useful if the<br>
+semantics of the language are as-if a rule could fire when the<br>
+left-hand side matches at all, regardless of other rules that<br>
+exist. An "unordered" / "unspecified" semantics is closer to this than<br>
+"first rule wins".</p>
+<h2>Issues</h2>
+<h3>Unclear mental model</h3>
+<p>The primary issue is that the mental model required to be held by the<br>
+ISLE programmer is unclear. If the ISLE programmer <em>truly</em> does not<br>
+care which rule applies, then all is well. But in real development of<br>
+compiler backends, one does very much care: one needs to make sure<br>
+that some special cases are actually handled (or else they are useless<br>
+dead code that, worse, may be untested); and sometimes one rule that<br>
+is shadowed by another is actually incorrect in the shadowed case, so<br>
+one <em>relies</em> on the ordering heuristic for <em>correctness</em>.</p>
+<p>In general, development of ISLE rules requires the programmer to<br>
+understand how the language operates so that they can control which<br>
+rule fires. If the ordering rules are complex and subtle, or worse are<br>
+"unspecified", then we get a body of rules that either has silent<br>
+shadowing, or brittle reliance on particular ordering heuristics that<br>
+may change. Even if we attempt to clearly specify the semantics, there<br>
+are subtleties that arise because of the way that external Rust code<br>
+can be invoked: we don't know when some conditions are disjoint or<br>
+not, fallible or infallible, and a set of prioritization rules that<br>
+relies on "fallible before infallible" and disjointness thus requires,<br>
+in the limit, a full and complete understanding of our helpers'<br>
+semantics (via explicit specification or some other method).</p>
+<p>One can make an argument that when building a complex artifact, one<br>
+needs one's tools to be as <em>predictable</em> as possible. Complexity is<br>
+fine, if it is in service of a well-understood goal (e.g., compiling<br>
+Rust code to x86 machine code). But <em>unclear semantics</em> are not.</p>
+<h3>"Experimental nature" of Priority Usage</h3>
+<p>The clearest extraction of the issue here comes in our standard advice<br>
+for getting proper lowering output: just write the rules, and if the<br>
+ordering is wrong, apply some priorities.</p>
+<p>Consider what this is implying: it is saying that the DSL's semantics<br>
+are unknowable, or at least it's not worth knowing ahead of time what<br>
+will happen; instead, one must <em>experiment</em> and then apply corrective<br>
+action if the heuristic gets it wrong.</p>
+<p>This is problematic because the developer may not always take the time<br>
+to do so ("I'm just adding a quick lowering case, it will probably be<br>
+hit") -- and because in cases where the metacompiler <em>does</em> get it<br>
+right without priorities, an implicit dependence on the current<br>
+heuristics is baked in at that point and must be frozen (see below).</p>
+<p>In my opinion, it is not feasible to write high-reliability software<br>
+if one's tools are unpredictable. Predictable and repeatable behavior<br>
+is the cornerstone of writing correct lowerings.</p>
+<h3>"Most specific first" is not simple or unambiguous</h3>
+<p>But isn't "most specific first" a predictable design point?</p>
+<p>It turns out, empirically, the answer is "no". We have had a number of<br>
+bugs where the heuristics do not do what we would expect, mostly<br>
+because fallible and infallible extractors are not properly ordered<br>
+(see e.g. #4685), and the interaction of explicit priorites with<br>
+implicit ones is complex (#4093, #4117). We have a pending issue to<br>
+explicitly define what the ordering even <em>is</em> (#3575) but we haven't<br>
+been able to do so in a simple way (and it is changing as we fix the<br>
+above bugs).</p>
+<p>The basic issue is that because we are doing more than simple<br>
+tree-matching -- because we can invoke arbitrary Rust code and we have<br>
+written helpers that check predicates and conditions in various ways,<br>
+and because some checks are fallible and some are not -- "specific" is<br>
+unclear. This is aside from the general issue (noted<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/isle/isle/src/trie.rs#L42-L50">here</a>)<br>
+that when one has a tree-shaped rather than list-shaped pattern match,<br>
+specificity is a <em>partial order</em>. (Two patterns can both subsume a<br>
+general one by being specific in different dimensions.) One can break<br>
+that tie arbitrarily, but that just adds more complexity.</p>
+<p>In general, humans (other than those who hack on <code>islec</code>) seem not to<br>
+think in terms of these complex heuristics, or at least seem to<br>
+sometimes have a different expectation than what the compiler really<br>
+does.</p>
+<h3>Empirical evidence of mental-model mismatch</h3>
+<p>To add some evidence to this claim, see the following code reviews: </p>
+<ul>
+<li>#3706 (<a href="https://github.com/bytecodealliance/wasmtime/pull/3706#pullrequestreview-858875849">link</a>)</li>
+<li>#4401 (<a href="https://github.com/bytecodealliance/wasmtime/pull/4401#discussion_r916124277">link</a>)</li>
+<li>#4399 (<a href="https://github.com/bytecodealliance/wasmtime/pull/4399#discussion_r916122904">link</a>)</li>
+<li>#3561: aarch64 backend fix to already-committed issue</li>
+<li>
+<p>#3560: a documentation change to add a note that rule-ordering is<br>
+  just a heuristic and not to rely on it (note that the first three<br>
+  examples above came after this update!)</p>
+</li>
+<li>
+<p>#3751: a proposal for a "locally ordered list of rules", as a<br>
+  stopgap fix for some cases, and general agreement that this would<br>
+  reduce confusion</p>
+</li>
+<li>
+<p>and more I have likely missed.</p>
+</li>
+</ul>
+<p>Developers working in ISLE seem to have a mental model that rules are<br>
+evaluated top-down. This is likely for several reasons. First, it is<br>
+the natural "reading order"; thinking in terms of parallel,<br>
+reorderable conditions is not natural for most programmers. Second,<br>
+existing languages <em>with match facilities</em> condition programmers this<br>
+way, <em>including Rust</em> (as well as ML, Haskell, Scala, etc). Third, it<br>
+is clear that there must be <em>some</em> order, and if the ordering<br>
+heuristic is otherwise muddy or badly specified, or sometimes changing<br>
+(see above), then a programmer will likely fall back on "first rule<br>
+first".</p>
+<p>In general we want to follow the Principle of Least Surprise: we<br>
+should have a simple, predictable tool that behaves like most people<br>
+who pick it up think it should.</p>
+<p>The task at hand (writing a correct compiler) is hard enough; any<br>
+complexity in the tool that is not necessary should be<br>
+discarded. Explicitness is a strong principle that results in tools<br>
+one can trust and do precise work with.</p>
+<h3>Subtle bugs in heuristics, and heuristics as load-bearing for correctness</h3>
+<p>Finally, as seen in several of the above-linked issues and PRs, we<br>
+have had multiple bugs in the ordering heuristics and have had to make<br>
+changes to get them right.</p>
+<p>If a hard-to-understand heuristic is difficult for an ISLE developer<br>
+to keep track of, a hard-to-understand heuristic *that sometimes<br>
+changes* is even worse.</p>
+<p>The "experimental answer" to rule ordering -- try it out, add a<br>
+priority if needed -- implicitly creates dependencies on the current<br>
+heuristics. If we do so, and then change the heuristics to fix <em>other</em><br>
+cases to behave as we expect they would, we are liable to silently<br>
+alter how rules apply (action-at-a-distance) and subtly break parts of<br>
+the compiler. Test coverage can hedge against this, but relying on<br>
+test coverage to patch over footguns in the language is a game that<br>
+dynamically-typed languages play; we don't want to do that if we can<br>
+help it.</p>
+<p>This potential for latent correctness bugs is <em>terrifying</em> and is<br>
+itself a strong reason to migrate away from this stat<br>
+[message truncated]</p>
+</blockquote>
+
+
+
+<a name="293644390"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293644390" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293644390">(Aug 16 2022 at 01:05)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1216031661">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>For another source on compiling pattern-match constructs with these top-down left-to-right semantics, Simon Peyton Jones' 1987 book, "<a href="https://www.microsoft.com/en-us/research/publication/the-implementation-of-functional-programming-languages/">The Implementation of Functional Programming Languages</a>", is available as a free PDF. Chapter 5 covers a reasonably straight-forward implementation.</p>
+</blockquote>
+
+
+
+<a name="293647047"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293647047" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293647047">(Aug 16 2022 at 01:53)</a>:</h4>
+<p>elliottt edited <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>While working on finishing the migration of the x64 backend to ISLE, I encountered a case where guarding a rule on specific ISA features being enabled caused the rule to never fire. The problem was that the rule I added overlapped with another rule except in the ISA feature check, and the other rule took precedence. Here's an example from elsewhere in the codebase:        <br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/codegen/src/isa/x64/lower.isle#L1799-L1809">https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/codegen/src/isa/x64/lower.isle#L1799-L1809</a>    </p>
+<p>The LHS of the two rules only differs in the patterns to the first argument of <code>(has_type)</code>: both rules match <code>(ty_32_or_64 ty)</code> while the rule on line 1799 also matches <code>(use_bmi1)</code>. The rule on line 1799 has been given a priority of <code>1</code> to ensure that it's checked before the rule on line 1806, but ideally we wouldn't need to give this annotation here.        </p>
+<p>My proposal is that we switch to compiling ISLE by matching rules top-down, left-to-right.    </p>
+<h4>Benefit</h4>
+<p>The benefit of this change would be that we could tell statically when a rule was not reachable, and raise an error when it would never fire.    </p>
+<h4>Implementation</h4>
+<p>For matching on <code>enum</code> values we could take the approach outlined in <a href="https://www.cs.tufts.edu/~nr/cs257/archive/luc-maranget/jun08.pdf">https://www.cs.tufts.edu/~nr/cs257/archive/luc-maranget/jun08.pdf</a>. For handling extractors we could take inspiration from GHC's implementation of <a href="https://gitlab.haskell.org/ghc/ghc/-/wikis/view-patterns#compilation">view patterns</a>.        </p>
+<h4>Alternatives</h4>
+<p>We could continue to develop heuristics to determine when rules might be unconditionally shadowed, and inform the programmer through an error or warning.</p>
+</blockquote>
+
+
+
+<a name="293821796"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293821796" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293821796">(Aug 17 2022 at 00:33)</a>:</h4>
+<p>elliottt <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1217308075">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>I ran into another instance of this today: the <code>sse_cmp_op</code> rule in the x64 lowering has overlapping cases for vectored floating point types. The rules on lines on 1504 and 1505 overlap with the rules on 1506 and 1507 respectively:<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/c569e7bea5ab9c2f9a617aa1ba7de3d926d880be/cranelift/codegen/src/isa/x64/inst.isle#L1499-L1507">https://github.com/bytecodealliance/wasmtime/blob/c569e7bea5ab9c2f9a617aa1ba7de3d926d880be/cranelift/codegen/src/isa/x64/inst.isle#L1499-L1507</a></p>
+<p>Any change in the heuristic that put the constant patterns before the fallible extractors would cause a panic during instruction emission, as the <code>vector_all_ones</code> rule uses the result of <code>sse_cmp_op</code> as the op for an <code>XmmRmR</code> instruction:<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/c569e7bea5ab9c2f9a617aa1ba7de3d926d880be/cranelift/codegen/src/isa/x64/inst.isle#L1520-L1527">https://github.com/bytecodealliance/wasmtime/blob/c569e7bea5ab9c2f9a617aa1ba7de3d926d880be/cranelift/codegen/src/isa/x64/inst.isle#L1520-L1527</a></p>
+</blockquote>
+
+
+
+<a name="293821859"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293821859" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293821859">(Aug 17 2022 at 00:34)</a>:</h4>
+<p>elliottt edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1217308075">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>I ran into another instance of this today: the <code>sse_cmp_op</code> rule in the x64 lowering has overlapping cases for vectored floating point types. The rules on lines on 1504 and 1505 overlap with the rules on 1506 and 1507 respectively:<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/c569e7bea5ab9c2f9a617aa1ba7de3d926d880be/cranelift/codegen/src/isa/x64/inst.isle#L1499-L1507">https://github.com/bytecodealliance/wasmtime/blob/c569e7bea5ab9c2f9a617aa1ba7de3d926d880be/cranelift/codegen/src/isa/x64/inst.isle#L1499-L1507</a></p>
+<p>Any change in the heuristic that put the constant patterns before the fallible extractors would cause a panic during instruction emission, as the <code>vector_all_ones</code> rule uses the result of <code>sse_cmp_op</code> as the op for an <code>XmmRmR</code> instruction, and the <code>cmpps</code> and <code>cmppd</code> instructions require an immediate argument:<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/c569e7bea5ab9c2f9a617aa1ba7de3d926d880be/cranelift/codegen/src/isa/x64/inst.isle#L1520-L1527">https://github.com/bytecodealliance/wasmtime/blob/c569e7bea5ab9c2f9a617aa1ba7de3d926d880be/cranelift/codegen/src/isa/x64/inst.isle#L1520-L1527</a></p>
+</blockquote>
+
+
+
+<a name="293938200"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/293938200" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#293938200">(Aug 17 2022 at 17:03)</a>:</h4>
+<p>elliottt <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1218279571">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>It's worth pointing out that for the example in <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1217308075">https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1217308075</a> we would still not be able to raise shadowing errors: the patterns that shadow the constant patterns are made up of fallible external extractors, and we don't have any insight into what will cause them to succeed or fail. This is the same situation that comes up in haskell with view patterns.</p>
+<p>However, we would benefit from predictable rule matching order, as the problematic rules on lines 1506 and 1507 would not suddenly fire due to heuristic changes.</p>
+</blockquote>
+
+
+
+<a name="294545365"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/294545365" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#294545365">(Aug 21 2022 at 13:36)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1221547832">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>It's occurred to me that we're trying to solve two different issues which might benefit from being treated separately. We're currently using priorities and heuristics to express validity preconditions as well as preferences between multiple valid rules. In other words, a key part of the optimizer's cost model is implicit in the ISLE rules for the backend. Changing the matching order to top-down doesn't change that.</p>
+<p>We could instead require every rule to express all of its preconditions, and have a separate way of expressing the cost model. That might mean that for usability we need new ISLE constructs for concisely expressing preconditions, I dunno. Ideally we'd let the user choose between several cost models when running Cranelift.</p>
+<p>In that approach, the order of rules doesn't matter, just like today. Formal verification is especially important then because, like today, if you get the preconditions wrong in some rule, it may happen to work a lot of the time due to other rules getting selected first; and like today, you can't tell if that's happening just by looking at the ISLE rules.</p>
+<p>One way to use a cost model is to impose a total ordering on rules. Different cost models impose different orderings so you can build different instruction selectors from the same rules. This can be done while building the compiler so there's no compile-time cost for that flexibility.</p>
+<p>But where it really helps to keep ISLE rules independent of cost model is if you start using e-graphs in the backend. The general idea is to take the full e-graph from mid-end optimization, apply all valid lowering rules at all e-nodes, and combine the results in a new e-graph. Now you can use the cost model in a way that takes dynamic context into account when there are partially overlapping rules, during extraction instead of during lowering. I think this subsumes peephole optimization.</p>
+<p>I've hand-waved away a lot of important details. The main thing is that I think it's worth thinking about other ways to let the consumer of ISLE rules decide what priority to give each rule, or even to find all matching rules. At the same time, backend developers do need to be able to control those priorities based on their knowledge of the ISA. I'm just no longer convinced that control should be expressed in the ISLE rules.</p>
+</blockquote>
+
+
+
+<a name="294597705"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/294597705" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#294597705">(Aug 22 2022 at 02:21)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1221715061">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>Thanks @jameysharp for your thoughts here!</p>
+<blockquote>
+<p>We could instead require every rule to express all of its preconditions, and have a separate way of expressing the cost model. That might mean that for usability we need new ISLE constructs for concisely expressing preconditions, I dunno. Ideally we'd let the user choose between several cost models when running Cranelift.</p>
+</blockquote>
+<p>Unfortunately, this proposal is basically the status quo today already. A <em>correct</em> rule should express all conditions necessary for it to fire. And the priority mechanism is a way for the user to provide a cost model. It's possible I'm not understanding some subtlety of your proposal, but to me it reduces more or less to: keep the current design, but do it without bugs (or add some unspecified other mechanism to help do it without bugs, but then... let's talk about that other mechanism, if we have one).</p>
+<p>The main body of my argument is that, in practice, this isn't working. The difficulty is not coming up with a working abstraction -- rules that explicitly encode all conditions needed for them to fire -- but the way that that requirement plays out in practice as compared to developers' working mental models. See the "Empirical evidence of mental-model mismatch" section in my comment above.</p>
+<p>Concretely: how do we ensure that this "all preconditions included" is the case? I already very carefully review for this, and (i) I have still missed some cases, leading to the bugs linked above, and (ii) we shouldn't have to rely on "think really hard and never make a mistake" to uphold such a property. Formal verification is one answer, but this too feels wrong: we shouldn't stick with an empirically difficult-to-use abstraction early in the pipeline just because we can catch it with a very heavyweight technique later. Bugs cheaper to catch the earlier one catches them and all that.</p>
+<blockquote>
+<p>But where it really helps to keep ISLE rules independent of cost model is if you start using e-graphs in the backend. The general idea is to take the full e-graph from mid-end optimization, apply all valid lowering rules at all e-nodes, and combine the results in a new e-graph. Now you can use the cost model in a way that takes dynamic context into account when there are partially overlapping rules, during extraction instead of during lowering. I think this subsumes peephole optimization.</p>
+</blockquote>
+<p>This I think deserves a largely separate discussion, and I do agree that it's interesting to think about a "late extraction" approach, but really quickly, I think that the proper way to approach this while designing for correctness would be to provide an explicit "multiple options" ("unordered rules") mechanism that works within a broader context of nailed-down, simple-to-understand total ordering, not the other way around. This is because I want the programmer to have to opt into considering all options and testing them.</p>
+<p>That I think leads to another way of expressing my broad concerns here, related to the "experimental approach" concerns above: if the default is any-rule-could-fire with some unknowable (and explicitly reconfigurable, under your proposal!) heuristic driving it, then the user has to consider how all possible rule firing orders could result in correct or incorrect lowerings. Human brains mostly aren't built (or mine isn't anyway) for considering combinatorial possibilities at every step. (This is why unstructured pthreads programming is so much harder than structured concurrency; ordered by default, explicitly unordered where specified, is far easier than the opposite.) The analogy to structured concurrency tells us how to proceed here as well: we want well-specified combinators that say "I really do mean that these three different rules are all equally valid and I have thought about the implications", rather than "I happened upon a bug experimentally in the everything-parallel world and want to serialize just this bit as a likely fix".</p>
+<p>Does that make some sense at least? Happy to talk further in the Cranelift meeting tomorrow; I really am curious how others feel about this, especially folks with more scars from real ISLE programming and debugging :-)</p>
+</blockquote>
+
+
+
+<a name="294616608"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/294616608" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#294616608">(Aug 22 2022 at 06:59)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1221931478">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<blockquote>
+<p>Concretely: how do we ensure that this "all preconditions included" is the case?</p>
+</blockquote>
+<p>Maybe by having a fuzzer which changes rule priority and disables rules at random and then doing differential fuzzing of the program execution with the rule set used for regular compilation where failure to codegen won't be considered a crash?</p>
+</blockquote>
+
+
+
+<a name="294707396"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/294707396" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#294707396">(Aug 22 2022 at 15:10)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1222495727">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<blockquote>
+<p>Maybe by having a fuzzer which changes rule priority and disables rules at random and then doing differential fuzzing of the program execution with the rule set used for regular compilation where failure to codegen won't be considered a crash?</p>
+</blockquote>
+<p>That's certainly an option (actually it's even an item in the 2022 Cranelift roadmap, IIRC); but I think that it sort of sits in a similar place to verification in this regard: it would catch issues but I think at a higher cost than simplifying semantics and making it easier to avoid bugs in the first place.</p>
+<p>In other words may main concern at the moment is that we have a tool whose behavior is hard to understand and predict, and whose behavior seems to differ from many peoples' intuitions, and hence the tool is hard to use; if we fix that then we can still do all sorts of fuzzing and verification but the need to lean on it will be less, and it can spend its time finding other interesting bugs.</p>
+</blockquote>
+
+
+
+<a name="294743987"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/294743987" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#294743987">(Aug 22 2022 at 18:24)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1222754143">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>We had a good discussion on this issue today in the Cranelift meeting; thanks all for the input!</p>
+<p>I unfortunately didn't take detailed comment-by-comment notes but by the end of the discussion we had emerging a consensus that the overlap checking is actually the most interesting part; and if we got that right, the ordering of the rules themselves in textual order is actually not as important. There is still the question of whether we have "locally unordered" groups of rules, allowing for the flexibility of some sort of cost model, or whether we have a total order, but overlap checking and explicit opt-in to overlap lets us solve the high-order correctness+explicitness issue.</p>
+<p>Basically the idea is: by default it is an error for one rule to shadow another. Shadowing should be clearly semantically defined at the language level, not just "engine can't prove disjoint": for example, we could say that any two rules are disjoint if they match a different enum arm or different constant against the same value (same expression from root arguments). Conversely we should probably say that external extractors have <em>no</em> disjointness at the language-semantics level, and allow for negation <em>at the language level</em> ("this extractor did not match") rather than building ad-hoc pairs of "A" and "not A" extractors.</p>
+<p>Then we make the existing rules we have "disjoint-clean" by adding in "not the earlier rule R, <em>and</em> ..." prefixes to their left-hand sides. This becomes easier if we can name rules explicitly (thanks @avanhatt for this idea).</p>
+<p>Then we can allow explicit "overlap with unconstrained priority" if/when we want: rather than "not R, and ..." as a left hand side, we can say "either R or ..."; or perhaps group R1 and R2 (with overlapping left-hand sides) in one syntactic "unordered group" (but there are reasons why this may not be practical when generated code is involved); or perhaps a separate out-of-band declaration that R1 and R2 are overlapping.</p>
+<p>I think that captures most of what we settled on, but I am probably forgetting some details; my apologies if so; please do add anything I've missed.</p>
+</blockquote>
+
+
+
+<a name="296847822"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/296847822" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#296847822">(Sep 02 2022 at 15:51)</a>:</h4>
+<p>akirilov-arm labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>While working on finishing the migration of the x64 backend to ISLE, I encountered a case where guarding a rule on specific ISA features being enabled caused the rule to never fire. The problem was that the rule I added overlapped with another rule except in the ISA feature check, and the other rule took precedence. Here's an example from elsewhere in the codebase:        <br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/codegen/src/isa/x64/lower.isle#L1799-L1809">https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/codegen/src/isa/x64/lower.isle#L1799-L1809</a>    </p>
+<p>The LHS of the two rules only differs in the patterns to the first argument of <code>(has_type)</code>: both rules match <code>(ty_32_or_64 ty)</code> while the rule on line 1799 also matches <code>(use_bmi1)</code>. The rule on line 1799 has been given a priority of <code>1</code> to ensure that it's checked before the rule on line 1806, but ideally we wouldn't need to give this annotation here.        </p>
+<p>My proposal is that we switch to compiling ISLE by matching rules top-down, left-to-right.    </p>
+<h4>Benefit</h4>
+<p>The benefit of this change would be that we could tell statically when a rule was not reachable, and raise an error when it would never fire.    </p>
+<h4>Implementation</h4>
+<p>For matching on <code>enum</code> values we could take the approach outlined in <a href="https://www.cs.tufts.edu/~nr/cs257/archive/luc-maranget/jun08.pdf">https://www.cs.tufts.edu/~nr/cs257/archive/luc-maranget/jun08.pdf</a>. For handling extractors we could take inspiration from GHC's implementation of <a href="https://gitlab.haskell.org/ghc/ghc/-/wikis/view-patterns#compilation">view patterns</a>.        </p>
+<h4>Alternatives</h4>
+<p>We could continue to develop heuristics to determine when rules might be unconditionally shadowed, and inform the programmer through an error or warning.</p>
+</blockquote>
+
+
+
+<a name="296847999"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/296847999" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#296847999">(Sep 02 2022 at 15:52)</a>:</h4>
+<p>github-actions[bot] <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-1235659045">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<h4>Subscribe to Label Action</h4>
+<p>cc @cfallin, @fitzgen</p>
+<p>&lt;details&gt;<br>
+This issue or pull request has been labeled: "isle"</p>
+<p>Thus the following users have been cc'd because of the following labels:</p>
+<ul>
+<li>cfallin: isle</li>
+<li>fitzgen: isle</li>
+</ul>
+<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>
+<p><a href="https://github.com/bytecodealliance/subscribe-to-label-action">Learn more.</a><br>
+&lt;/details&gt;</p>
+</blockquote>
+
+
+
+<a name="438144923"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/438144923" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#438144923">(May 12 2024 at 00:48)</a>:</h4>
+<p>jameysharp closed <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>While working on finishing the migration of the x64 backend to ISLE, I encountered a case where guarding a rule on specific ISA features being enabled caused the rule to never fire. The problem was that the rule I added overlapped with another rule except in the ISA feature check, and the other rule took precedence. Here's an example from elsewhere in the codebase:        <br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/codegen/src/isa/x64/lower.isle#L1799-L1809">https://github.com/bytecodealliance/wasmtime/blob/0f944937c0c3d90946eaa6199f0baa5ed991c80d/cranelift/codegen/src/isa/x64/lower.isle#L1799-L1809</a>    </p>
+<p>The LHS of the two rules only differs in the patterns to the first argument of <code>(has_type)</code>: both rules match <code>(ty_32_or_64 ty)</code> while the rule on line 1799 also matches <code>(use_bmi1)</code>. The rule on line 1799 has been given a priority of <code>1</code> to ensure that it's checked before the rule on line 1806, but ideally we wouldn't need to give this annotation here.        </p>
+<p>My proposal is that we switch to compiling ISLE by matching rules top-down, left-to-right.    </p>
+<h4>Benefit</h4>
+<p>The benefit of this change would be that we could tell statically when a rule was not reachable, and raise an error when it would never fire.    </p>
+<h4>Implementation</h4>
+<p>For matching on <code>enum</code> values we could take the approach outlined in <a href="https://www.cs.tufts.edu/~nr/cs257/archive/luc-maranget/jun08.pdf">https://www.cs.tufts.edu/~nr/cs257/archive/luc-maranget/jun08.pdf</a>. For handling extractors we could take inspiration from GHC's implementation of <a href="https://gitlab.haskell.org/ghc/ghc/-/wikis/view-patterns#compilation">view patterns</a>.        </p>
+<h4>Alternatives</h4>
+<p>We could continue to develop heuristics to determine when rules might be unconditionally shadowed, and inform the programmer through an error or warning.</p>
+</blockquote>
+
+
+
+<a name="438144924"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234717%20ISLE%20rule%20matching%20order/near/438144924" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234717.20ISLE.20rule.20matching.20order.html#438144924">(May 12 2024 at 00:48)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/4717#issuecomment-2106074280">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4717">issue #4717</a>:</p>
+<blockquote>
+<p>I think this issue has largely been resolved by the overlap checker and trie-again work. Explicit rule priorities are obnoxious sometimes but it seems to be pretty clear to people how they work.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

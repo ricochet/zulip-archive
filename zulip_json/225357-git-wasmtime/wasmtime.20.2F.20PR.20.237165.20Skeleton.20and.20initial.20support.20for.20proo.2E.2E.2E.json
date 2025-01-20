@@ -1,0 +1,422 @@
+[
+    {
+        "content": "<p>cfallin opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a> from <code>cfallin:pcc</code> to <code>bytecodealliance:main</code>:</p>\n<blockquote>\n<p>This PR adds basic support for \"facts\" to annotate SSA values and VCode VRegs. The idea is that these facts describe properties of the values -- currently, \"in a given range\" or \"points to valid memory of a given size\" -- and by validating a chain of facts along the whole derivation of an accessed memory address, we can verify that the memory access is safe.</p>\n<p>This is the start of work on the ideas described in #6090. It is a new approach that subsumes/replaces \"VeriWasm\": it replaces the post-hoc derive-all-facts analysis approach (which is slow and brittle) with a cooperative approach in which the codegen frontend generates a \"proof witness\" of sorts, we preserve that, and we check that in the machine code (actually the pre-regalloc VCode, and then we can use the regalloc's symbolic checker to obtain the same guarantee).</p>\n<p>Right now, this includes (i) the \"fact\" data structures, (ii) support for parsing these facts in CLIF and dumping them back out, (iii) propagation of facts from CLIF to VCode, when no optimization is enabled, and (iv) validation of a few basic facts in VCode for the AArch64 backend. Everything else is still TODO and will come in further PRs.</p>\n<p>Right now, this is sufficient to take the CLIF</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">test</span><span class=\"w\"> </span><span class=\"n\">compile</span>\n<span class=\"n\">set</span><span class=\"w\"> </span><span class=\"n\">enable_pcc</span><span class=\"o\">=</span><span class=\"kc\">true</span>\n<span class=\"n\">target</span><span class=\"w\"> </span><span class=\"n\">aarch64</span>\n\n<span class=\"n\">function</span><span class=\"w\"> </span><span class=\"o\">%</span><span class=\"n\">simple1</span><span class=\"p\">(</span><span class=\"kt\">i64</span><span class=\"w\"> </span><span class=\"n\">vmctx</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">i32</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">i8</span> <span class=\"p\">{</span>\n<span class=\"n\">block0</span><span class=\"p\">(</span><span class=\"n\">v0</span><span class=\"w\"> </span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"n\">points_to</span><span class=\"p\">(</span><span class=\"mh\">0x1_0000_0000</span><span class=\"p\">)</span>: <span class=\"kt\">i64</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">v1</span><span class=\"w\"> </span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">(</span><span class=\"mi\">32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mh\">0xffff_ffff</span><span class=\"p\">)</span>: <span class=\"kt\">i32</span><span class=\"p\">)</span>:\n    <span class=\"nc\">v2</span><span class=\"w\"> </span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">(</span><span class=\"mi\">64</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mh\">0xffff_ffff</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">uextend</span><span class=\"p\">.</span><span class=\"kt\">i64</span><span class=\"w\"> </span><span class=\"n\">v1</span>\n<span class=\"w\">    </span><span class=\"n\">v3</span><span class=\"w\"> </span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"n\">points_to</span><span class=\"p\">(</span><span class=\"mh\">0x1</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">iadd</span><span class=\"p\">.</span><span class=\"kt\">i64</span><span class=\"w\"> </span><span class=\"n\">v0</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">v2</span>\n<span class=\"w\">    </span><span class=\"n\">v4</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">load</span><span class=\"p\">.</span><span class=\"kt\">i8</span><span class=\"w\"> </span><span class=\"n\">safe</span><span class=\"w\"> </span><span class=\"n\">v3</span>\n<span class=\"w\">    </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"n\">v4</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>where the <code>v0 ! fact</code> syntax annotates <code>v0</code> with a fact, and validate that the <code>load</code> is in fact safe. The <code>safe</code> memory-flag forces this check; if the <code>points_to</code> range is shrunk, or <code>v1</code> is changed to an <code>i64</code> and its max range is increased, this code will fail to compile with</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\"> </span><span class=\"n\">ERROR</span><span class=\"w\"> </span><span class=\"n\">cranelift_filetests</span>::<span class=\"n\">concurrent</span><span class=\"w\"> </span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"n\">FAIL</span>: <span class=\"nc\">compile</span>\n<span class=\"n\">FAIL</span><span class=\"w\"> </span><span class=\"n\">cranelift</span><span class=\"o\">/</span><span class=\"n\">filetests</span><span class=\"o\">/</span><span class=\"n\">filetests</span><span class=\"o\">/</span><span class=\"n\">pcc</span><span class=\"o\">/</span><span class=\"n\">simple</span><span class=\"p\">.</span><span class=\"n\">clif</span>: <span class=\"nc\">compile</span>\n\n<span class=\"n\">Caused</span><span class=\"w\"> </span><span class=\"n\">by</span>:\n    <span class=\"nc\">Proof</span><span class=\"o\">-</span><span class=\"n\">carrying</span><span class=\"o\">-</span><span class=\"n\">code</span><span class=\"w\"> </span><span class=\"n\">validation</span><span class=\"w\"> </span><span class=\"n\">error</span>: <span class=\"nc\">MissingFact</span>\n</code></pre></div>\n<p>The idea is to continue further work along these lines:</p>\n<ul>\n<li>Add support for validating facts produced by aarch64 add, shift, ... instructions -- whatever is used in basic address generation.</li>\n<li>Add support for validating amode usage in x64 as well.</li>\n<li>Propagate facts through the egraph layer so they are preserved during optimization.</li>\n<li>Add a richer <code>points_to</code> language for facts to describe <em>what</em> they point to, so a load of a memory base address (for example) from <code>vmctx</code> yields another value with an attached fact (points to a region of this size...). These are the \"memory capabilities\" described in #6090.</li>\n<li>Emit facts on <code>vmctx</code> and on memory-access sequences generated by <code>cranelift-wasm</code>, and add the <code>safe</code> flag to loads/stores wherever possible. At this point, we should be able to validate single- and multi-memory Wasm modules with static memory configurations.</li>\n<li>Add support for annotations on bounds-check logic. After this, we should be able to validate dynamic memories, and table accesses as well.</li>\n<li>Finally, add a \"strong enforcing\" mode that disallows all non-<code>safe</code> loads/stores, and add whatever memory-capability info is needed so that, e.g., loads of func pointers, VM state, and everything else from <code>vmctx</code> is covered.</li>\n</ul>\n<p>After my initial exploration and ideas in #6090, these ideas were further discussed with @fitzgen, @elliottt, @jameysharp, and others; and a large part of this PR was</p>\n<p>Co-authored-by: Nick Fitzgerald &lt;<a href=\"mailto:fitzgen@gmail.com\">fitzgen@gmail.com</a>&gt;</p>\n</blockquote>",
+        "id": 395136345,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696550580
+    },
+    {
+        "content": "<p><strong>cfallin</strong> requested <a href=\"https://github.com/elliottt\">elliottt</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395136348,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696550580
+    },
+    {
+        "content": "<p><strong>cfallin</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers\">wasmtime-compiler-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395136350,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696550581
+    },
+    {
+        "content": "<p><strong>cfallin</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers\">wasmtime-core-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395136352,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696550581
+    },
+    {
+        "content": "<p><strong>cfallin</strong> requested <a href=\"https://github.com/fitzgen\">fitzgen</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395136353,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696550581
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395140668,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696553168
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395295842,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696610303
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662499082\">PR review</a>:</p>\n<blockquote>\n<p>Very excited for this! r=me with comments, some of which can be deferred to follow up PRs.</p>\n</blockquote>",
+        "id": 395319904,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621784
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662499082\">PR review</a>:</p>\n<blockquote>\n<p>Very excited for this! r=me with comments, some of which can be deferred to follow up PRs.</p>\n</blockquote>",
+        "id": 395319905,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621784
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349132761\">PR review comment</a>:</p>\n<blockquote>\n<p>Function arguments <em>and</em> global values, eventually, since heap bases and bounds and things are typically global values.</p>\n</blockquote>",
+        "id": 395319907,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349136661\">PR review comment</a>:</p>\n<blockquote>\n<p>typo: <em>to</em> communicate intent</p>\n</blockquote>",
+        "id": 395319908,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349123117\">PR review comment</a>:</p>\n<blockquote>\n<p>I would assume that if a load is safe, it does <em>not</em> need to be checked, because it is, after all, safe.</p>\n<p>Maybe we can rename this to \"sandboxed\" or something?</p>\n<p>It is unfortunate that we already use \"trusted\" and \"untrusted\" for something slightly different...</p>\n</blockquote>",
+        "id": 395319909,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349204212\">PR review comment</a>:</p>\n<blockquote>\n<p>Would be nice to attach a string to this variant so we know what is unimplemented.</p>\n</blockquote>",
+        "id": 395319910,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349205314\">PR review comment</a>:</p>\n<blockquote>\n<p>Is this whether <code>self</code> subsumes <code>other</code> or the other way around? Should document.</p>\n</blockquote>",
+        "id": 395319911,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349202420\">PR review comment</a>:</p>\n<blockquote>\n<p>I think we might actually be able to avoid this for a while, at the cost of making loading bases and such from the vmctx axiomatic. Heap bases are always global values (that get translated into vmctx accesses when ) and if we allow frontends to attach facts directly to global values, then we don't need a grammar for describing the vmctx layout. So this would mean that loading heap bases out of the vmctx would become trusted and unchecked (note that the vmctx layout itself would always be trusted) but this seems like a fine intermediate stepping stone and actually maybe even a reasonable trade off to keep long term.</p>\n<p>Does that make sense? I feel like this description was a little all over the place.</p>\n</blockquote>",
+        "id": 395319912,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349213833\">PR review comment</a>:</p>\n<blockquote>\n<p>And otherwise we could set it to <code>bit_width::MAX</code> -- any reason we shouldn't do that and returning <code>None</code> instead is preferred?</p>\n</blockquote>",
+        "id": 395319913,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349209546\">PR review comment</a>:</p>\n<blockquote>\n<p>Rather than putting this as a method on <code>Fact</code>, it might be cleaner to factor out a context and put the method there (along with the extend method, check methods, and future methods):</p>\n<ul>\n<li><code>a.binop(b)</code> always reads kinda subpar to me</li>\n<li>the context can hold constant-for-the-extent-of-fact-checking data like pointer width, so we are threading less arguments everywhere</li>\n</ul>\n<p>This would essentially give us</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"c1\">// old</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">c</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"p\">.</span><span class=\"n\">add</span><span class=\"p\">(</span><span class=\"n\">b</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">add_width</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">pointer_width</span><span class=\"p\">)</span>\n\n<span class=\"c1\">// new</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">c</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">ctx</span><span class=\"p\">.</span><span class=\"n\">add</span><span class=\"p\">(</span><span class=\"n\">a</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">add_width</span><span class=\"p\">);</span>\n</code></pre></div>\n<p>which I think looks a lot nicer.</p>\n<p>Doesn't need to happen in this PR of course, but I just point it out since you refactored this method to be an instance method rather than a static method and I don't think that is actually nicer. Hopefully we both like the context version better :)</p>\n</blockquote>",
+        "id": 395319914,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349212601\">PR review comment</a>:</p>\n<blockquote>\n<p>Stylistic nitpick: I'd personally either name <code>computed_region</code> just <code>region</code> so we can use short-hand struct literal syntax for the field, or even inline the variable into the struct literal field.</p>\n</blockquote>",
+        "id": 395319915,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349214882\">PR review comment</a>:</p>\n<blockquote>\n<p>It is sort of already defined by the fact we are using a <code>u64</code> for <code>max</code>, but it might be good to reiterate that we are interpreting values as unsigned here.</p>\n</blockquote>",
+        "id": 395319916,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349215003\">PR review comment</a>:</p>\n<blockquote>\n<p>Ditto regarding unsignedness.</p>\n</blockquote>",
+        "id": 395319917,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349249180\">PR review comment</a>:</p>\n<blockquote>\n<p>This is essentially <code>add</code> but with a signed offset, right? Can we name it accordingly and/or have it call out to <code>add</code> after the check for negative offsets?</p>\n</blockquote>",
+        "id": 395319918,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349248621\">PR review comment</a>:</p>\n<blockquote>\n<p>Wait why is it okay to unwrap here? Shouldn't this use <code>?</code> to propagate?</p>\n</blockquote>",
+        "id": 395319919,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349249395\">PR review comment</a>:</p>\n<blockquote>\n<p>Ditto regarding unwrap.</p>\n</blockquote>",
+        "id": 395319920,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349216375\">PR review comment</a>:</p>\n<blockquote>\n<p>Integer conversions a tricky and <code>as</code> can be a footgun; let's future proof:</p>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>                let max = max.checked_mul(u64::from(factor))?;\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 395319921,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349250258\">PR review comment</a>:</p>\n<blockquote>\n<p>Maybe name this <code>check_vcode_facts</code> to leave the door open for <code>check_clif_facts</code> as well?</p>\n</blockquote>",
+        "id": 395319922,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349251096\">PR review comment</a>:</p>\n<blockquote>\n<p>At the top of this function is where we would create the <code>PccContext</code> thing I mentioned earlier that factors out pointer width (and eventually other stuff) and has the <code>add</code> method etc...</p>\n</blockquote>",
+        "id": 395319923,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349247452\">PR review comment</a>:</p>\n<blockquote>\n<p>On this topic: it might be worth drawing out a diagram of our lattice in the docs for <code>Fact</code> or something and a note about what our representation is for the things where it isn't obvious (top/bottom). Something like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"sd\">///                None</span>\n<span class=\"sd\">///               /     \\</span>\n<span class=\"sd\">///              /       \\</span>\n<span class=\"sd\">///             /         \\</span>\n<span class=\"sd\">///     Some(ValueMax)  Some(PointsTo)</span>\n<span class=\"sd\">///             \\         /</span>\n<span class=\"sd\">///              \\       /</span>\n<span class=\"sd\">///               \\     /</span>\n<span class=\"sd\">///            Err(PccError)</span>\n<span class=\"sd\">///</span>\n<span class=\"sd\">/// * The top of the lattice, representing any value, is `None`.</span>\n<span class=\"sd\">///</span>\n<span class=\"sd\">/// * The bottom of the lattice, representing the lack of any (valid)</span>\n<span class=\"sd\">///   value, is an error.</span>\n<span class=\"sd\">///</span>\n<span class=\"sd\">/// * The intermediate values are either a maximum bound on the value,</span>\n<span class=\"sd\">///   or that the value is a pointer to a memory region. Various</span>\n<span class=\"sd\">///   arithmetic operations are valid on various combinations of these</span>\n<span class=\"sd\">///   facts. Adding two `MaxValue`s will produce a new `MaxValue` with</span>\n<span class=\"sd\">///   a maximum of the sum of the parts' maximums. Adding a `MaxValue`</span>\n<span class=\"sd\">///   to a `PointsTo` will produce a new `PointsTo` that is pointing</span>\n<span class=\"sd\">///   to a smaller memory region. Etc...</span>\n</code></pre></div>\n<p>Although, now that I think about it, I don't think this is even really a lattic? Maybe a semi-lattice. I don't think we have both a bottom and a top... I guess the real bottom would be \"no value\" for dead code, but we don't really have that given that we aren't propagating facts ourselves, merely checking them.</p>\n<p>And I guess I would expect <code>None</code> to represent \"no value\" rather than \"any value\" so maybe that is why I am hung up on this <code>None</code> stuff.</p>\n<p>I don't know, again this comment is all over the place and rambly and doesn't have a real concrete suggestion.</p>\n<p>What do you think?</p>\n</blockquote>",
+        "id": 395319924,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349233030\">PR review comment</a>:</p>\n<blockquote>\n<p>Again: is it better to return <code>None</code> than to do a saturating multiplication? I honestly don't know. But if we are using <code>None</code> for \"any value\" then this essentially means that we have two representations for \"any value\": <code>None</code> and <code>Some(Fact::ValueMax { max: u64::MAX })</code>.</p>\n</blockquote>",
+        "id": 395319925,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621785
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662703115\">PR review</a>.</p>",
+        "id": 395320024,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621824
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349255178\">PR review comment</a>:</p>\n<blockquote>\n<p>Checked vs unchecked maybe? So you set the unchecked bitflag to opt out of PCC checking.</p>\n</blockquote>",
+        "id": 395320025,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696621825
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662779485\">PR review</a>.</p>",
+        "id": 395326742,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696625244
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349308830\">PR review comment</a>:</p>\n<blockquote>\n<p>I too had wondered if we could making global-value assertions axiomatic to avoid a richer assertion language so I'm glad you asked. I can definitely see downsides but it seems nice as a starting point.</p>\n</blockquote>",
+        "id": 395326743,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696625244
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395328315,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696626157
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662795594\">PR review</a>.</p>",
+        "id": 395328374,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696626200
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349319222\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah, yeah, I like the \"checked\" terminology. I'll go with <code>checked</code> for now (with \"unchecked\" being the default) for backwards compatibility.</p>\n</blockquote>",
+        "id": 395328375,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696626200
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395332514,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628535
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832026\">PR review</a>.</p>",
+        "id": 395332518,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628540
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341529\">PR review comment</a>:</p>\n<blockquote>\n<p>Added!</p>\n</blockquote>",
+        "id": 395332520,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628540
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832080\">PR review</a>.</p>",
+        "id": 395332525,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628544
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341566\">PR review comment</a>:</p>\n<blockquote>\n<p>Fixed!</p>\n</blockquote>",
+        "id": 395332527,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628544
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832105\">PR review</a>.</p>",
+        "id": 395332532,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628547
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341582\">PR review comment</a>:</p>\n<blockquote>\n<p>I've thought about this for a bit too; I think I'd still like to try actually describing memory layout (and I have some thoughts on how to do it while keeping <code>Fact</code> cheap with shared \"memcaps\" that are shared across the func). The basic reason is to avoid growing the trusted base. If we provide an axiom on what the loaded value from <code>vmctx</code> is, then we're trusting that load to match what we've stated; but the load-generation machinery is exactly what we're trying to verify with all of this in the first place. Now, arbitrary program logic may create more complex conditions / isel cases than a controlled <code>vmctx</code> case, but maybe not; in either case, I'd rather have the machine load instructions actually verified.</p>\n</blockquote>",
+        "id": 395332533,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628547
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832127\">PR review</a>.</p>",
+        "id": 395332534,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628549
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341592\">PR review comment</a>:</p>\n<blockquote>\n<p>I opted to split it out into <code>UnimplementedBackend</code> and <code>UnimplementedInst</code> -- slight preference for programmatic errors rather than strings (which preclude any sort of parsing and make test asserts harder). Hopefully that gets the spirit of this at least, noting what's unimplemented :-)</p>\n</blockquote>",
+        "id": 395332535,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628549
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832148\">PR review</a>.</p>",
+        "id": 395332537,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628550
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341618\">PR review comment</a>:</p>\n<blockquote>\n<p>Made doc comment clearer!</p>\n</blockquote>",
+        "id": 395332538,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628550
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832172\">PR review</a>.</p>",
+        "id": 395332539,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628552
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341655\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 395332541,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628553
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832199\">PR review</a>.</p>",
+        "id": 395332548,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628555
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341671\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 395332549,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628555
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832228\">PR review</a>.</p>",
+        "id": 395332553,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628558
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341688\">PR review comment</a>:</p>\n<blockquote>\n<p>Yep, good point, added.</p>\n</blockquote>",
+        "id": 395332554,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628558
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341705\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 395332563,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628560
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832255\">PR review</a>.</p>",
+        "id": 395332564,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628560
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832284\">PR review</a>.</p>",
+        "id": 395332566,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628562
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341710\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 395332567,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628562
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832319\">PR review</a>.</p>",
+        "id": 395332570,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628565
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341735\">PR review comment</a>:</p>\n<blockquote>\n<p>Done; this method will return a <code>Some(..)</code> in any case we have a <code>ValueMax</code>, and at worst return the range of the given bitwidth.</p>\n<p>Re: <code>None</code> -- I guess the way I think about it is that \"we have no fact\" (in the same way that the facts attached to values are an array of <code>Option&lt;Fact&gt;</code>) -- we just can't say/derive anything. I'm not sure I want to describe this in terms of a (semi-)lattice as we don't have a meet-operation anywhere, and that's pretty intentional -- we aren't doing any fixpoint analysis or inference, we just check what's given. (I guess subsumption technically induces a partial order and a least-upper-bound might exist, but...)</p>\n</blockquote>",
+        "id": 395332571,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628565
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832347\">PR review</a>.</p>",
+        "id": 395332576,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628568
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341769\">PR review comment</a>:</p>\n<blockquote>\n<p>Good point; now this returns the \"minimal fact\" (the range of the whole bitwidth) instead if this overflows.</p>\n</blockquote>",
+        "id": 395332577,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628568
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832371\">PR review</a>.</p>",
+        "id": 395332581,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628571
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341790\">PR review comment</a>:</p>\n<blockquote>\n<p>I had thought of that initially, but the difference here is that it's an add-with-constant, and we don't have a <code>Const</code> (known exact value) in our facts (yet?). I didn't want to complicate things by adding that and working out all the details. I agree this would be a nice simplification if we do go there eventually!</p>\n</blockquote>",
+        "id": 395332582,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628571
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832400\">PR review</a>.</p>",
+        "id": 395332586,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628573
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341811\">PR review comment</a>:</p>\n<blockquote>\n<p>Fixed, to a <code>?</code> this time (the \"minimal fact\" here is a \"region of 0 bytes\" which isn't very useful).</p>\n</blockquote>",
+        "id": 395332587,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628573
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832482\">PR review</a>.</p>",
+        "id": 395332594,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628580
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341879\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 395332595,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628581
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#pullrequestreview-1662832507\">PR review</a>.</p>",
+        "id": 395332600,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628583
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165#discussion_r1349341897\">PR review comment</a>:</p>\n<blockquote>\n<p>I created this in the backend since some of the context (actually the only piece of context now, the pointer width) is machine-specific.</p>\n</blockquote>",
+        "id": 395332603,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628583
+    },
+    {
+        "content": "<p>cfallin has enabled auto merge for <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395332727,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696628667
+    },
+    {
+        "content": "<p>cfallin merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7165\">PR #7165</a>.</p>",
+        "id": 395340387,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696634355
+    }
+]

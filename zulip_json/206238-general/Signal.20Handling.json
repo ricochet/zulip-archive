@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>I was reading this article: <a href=\"https://withbighair.com/webassembly/2024/08/26/WebAssembly-and-signals.html\">https://withbighair.com/webassembly/2024/08/26/WebAssembly-and-signals.html</a> by <span class=\"user-mention\" data-user-id=\"435699\">@Chris Woods</span> (I believe?) and see that though you can compile programs with signals/signal handlers to run in Wasmtime, they aren't actually handled. There is an addendum about \"a story for another day\". </p>\n<p>Was there any progress or documentation on how to go about this? </p>\n<p>Thanks for any help!</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://withbighair.com/webassembly/2024/08/26/WebAssembly-and-signals.html\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/353babb93b82ff8c837a12c9264e74f982b8056b/68747470733a2f2f77697468626967686169722e636f6d2f696d616765732f7468657369676e616c7361726574616c6b696e6762696e672e6a706567&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://withbighair.com/webassembly/2024/08/26/WebAssembly-and-signals.html\" title=\"WebAssembly and Signal Handling\">WebAssembly and Signal Handling</a></div><div class=\"message_embed_description\">You can think of signal’s like user space interrupts. Essentially the running application is interrupted, and a signal handler function is invoked. This function is passed some data to describe why it is being interrupted. Once the function is invoked it can process a response to this “signal”. You’ve probably seen this on Linux. Geeks for Geeks has a great description of Signals. They are effectively used to communicate some information to the running process, a common use case is sending a signal to notify a process that is about to be terminated, thus allowing it to clean up resources, closing file handles, etc.</div></div></div>",
+        "id": 485736719,
+        "sender_full_name": "Nicholas Renner",
+        "timestamp": 1733189350
+    },
+    {
+        "content": "<p>in theory you should be able to run an isolated wasm module per signal handler too, but there's no spec for how to declare such wasm modules in a wasm component yet</p>",
+        "id": 485737389,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733189908
+    },
+    {
+        "content": "<p>Ohh, yeah, that's me! :)</p>\n<p>And yes, you hand handle them, within the limitations of WebAssembly (without stack switching) today. But it requires a change to the host to do it. I was planning on an article showing how it can be done in WAMR.</p>\n<p>Long story short; Most applications that use a signal handler, typically use them to detect a request to terminate the running application, and then they exit gracefully. Most of the applications I've come across do this by having a global boolean flag, called say <code>quit</code>. Then they have a busy / working loop, which is basicallyl <code>while (!quit) { /* work here */ }</code>.  These native applications have a single signal handler that sets the <code>quit</code> value to true when a terminate signal is caught. (This is also the example from my blog post).  - I've seen examples of this within the mongoose http server demos for example.</p>\n<p>To implement this same graceful termination, you would write the signal handler in the host environment. When the WASM application starts it would call the host and register the global variable <code>quit</code> as the flag to be set. As the host can see this global variable, it can write to it and change it. So now when the host receives the signal to quit, it sets the <code>quit</code> global to true, and the Wasm application's loop will terminate gracefully. </p>\n<p>This delivers the same functionality, but by necessity moves the signal handler out to the host.</p>\n<p>The 3rd part of this would be to use the setjmp / longjmp port to implement co-operative multi-tasking and an event loop. But that is most definetly a story for another day ;-)</p>\n<p>I hope this helps.</p>",
+        "id": 485745310,
+        "sender_full_name": "Chris Woods",
+        "timestamp": 1733195913
+    },
+    {
+        "content": "<p>Thanks for the quick reply!</p>\n<p>I unfortunately need a solution that doesn't require rewriting application code or moving things to host, while handling more than just exit scenarios.</p>\n<p>By having the host handle it do you mean something like is shown <a href=\"https://github.com/bytecodealliance/wasmtime/commit/7ee148ef5f12f9205b649eef0da960bd26753c2f#diff-f15dbb76cdebd32ca85b5bc620bf5abafdf53f84d4b7cd612d0dc8a27c5c2ed5\">here</a>?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/commit/7ee148ef5f12f9205b649eef0da960bd26753c2f#diff-f15dbb76cdebd32ca85b5bc620bf5abafdf53f84d4b7cd612d0dc8a27c5c2ed5\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/3a5fc01099a46ce581a0aa42642c926e9e3f5843/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343361313532623431633235386238363630663539336433343864323139323465343435356132323431666462386666623365316162343761333236646663302f62797465636f6465616c6c69616e63652f7761736d74696d652f636f6d6d69742f37656531343865663566313266393230356236343965656630646139363062643236373533633266&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/commit/7ee148ef5f12f9205b649eef0da960bd26753c2f#diff-f15dbb76cdebd32ca85b5bc620bf5abafdf53f84d4b7cd612d0dc8a27c5c2ed5\" title=\"Run custom signal handler tests on macOS (#7509) · bytecodealliance/wasmtime@7ee148e\">Run custom signal handler tests on macOS (#7509) · bytecodealliance/wasmtime@7ee148e</a></div><div class=\"message_embed_description\">This commit fixes a mistake where these tests were not being run on\nmacOS after signal handling was moved behind a `Config` flag instead of\nbeing a crate feature. Additionally these tests are moved...</div></div></div>",
+        "id": 485746889,
+        "sender_full_name": "Nicholas Renner",
+        "timestamp": 1733197119
+    },
+    {
+        "content": "<p>Yup, after a quick skim read, yeah, I think that's about the height of it. You'd need your main (host) application to catch the signal.</p>\n<p>Unless you implement an event loop in your WASM code, and async call backs from the host, where the requests to invoke the async functions are queued in some way. That's the only way I saw to do it.... hence the (for another day).</p>\n<p>There is only one stack (at the moment) and there is only one thread (at the moment). So if your application is currently executing, then your kinda stuck. Unless your runtime would allow you to pause execution, preserve it's current stack state, and then invoke another function for the signal handler. WAMR (which is the RT I've been focusing on) doesn't do this. So... </p>\n<p>Do you have any ideas? </p>\n<p>Re-writing code is something I'm trying to avoid, for the simple applications which catch just, say termination, it's easy enough to do with the concepts I outlined, and at least in c, the code changes can be hidden mostly by some macros. It's not a big deal. But for more complex situations where signals are used as a form of IPC, well, yeah, that's going to be more involved for sure.</p>",
+        "id": 485747790,
+        "sender_full_name": "Chris Woods",
+        "timestamp": 1733197801
+    },
+    {
+        "content": "<p>basically you could implement the old module-per-thread proposal but adapt it for signal handlers. also, you should omit signal-unsafe functions (malloc, etc) from the signal handler modules while at it, for obvious reasons. (if it breaks stuff, stuff was already broken anyway)</p>",
+        "id": 485786937,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733215125
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"703786\">@Soni L.</span>  Ohh, yeah.... you could, at least in WAMR which has thread support today, kick off a seperate thread from the host side, and use it to call functions in the same module. So you could capture the signal in the host, have it queue the request to call the signal handler via the thread, which would give you a largely WASM / guest code compatible solution.</p>",
+        "id": 485855922,
+        "sender_full_name": "Chris Woods",
+        "timestamp": 1733233537
+    },
+    {
+        "content": "<p>we would just build a wasm engine that can be used as an OS signal handler</p>",
+        "id": 485858453,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733234134
+    },
+    {
+        "content": "<p>like, make the relevant call to signal() instantiate an entire wasm module, then when the signal hits, use the wasm module to run the relevant wasm code within the signal context (and apply the necessary restrictions like forbidding memory.grow and whatnot)</p>",
+        "id": 485858887,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733234218
+    },
+    {
+        "content": "<p>afterwards it's just a matter of getting llvm/emscripten/etc to add support</p>",
+        "id": 485859202,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733234292
+    },
+    {
+        "content": "<p>(particularly, the signal.wasm module should be different from the main.wasm module in that it should not have libc implementations of malloc/free/etc, nor should it have wasi imports)</p>",
+        "id": 485859852,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733234434
+    },
+    {
+        "content": "<p>Well, yeah, we'd need to break the signal handling functions out of the compilation unit and place them, and any of their invoked fuctions into that other module. I see what your suggestion, basically keeping the same signal handling limitations in place.  Umm.... </p>\n<p>Or for code compatibility, could we do all of the signal handling in the host, and basically just register at start time for every possible signal we can, then when signal is called, we start and pause a thread. When a signal hits we schedule the function call back.</p>\n<p>Umm... some more thinking required, and I think inspriation for the next blog post ! ;-)</p>",
+        "id": 485867801,
+        "sender_full_name": "Chris Woods",
+        "timestamp": 1733236323
+    },
+    {
+        "content": "<p>nah, we don't think that's a good idea. besides, ideally you want it such that whatever you come up with for signal handling, is also useful for embedded wasm, where interrupts exist.</p>\n<p>having separate modules and embracing the restrictions is a good way to do it.</p>",
+        "id": 485877988,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733238699
+    },
+    {
+        "content": "<p>Ummm, interrupts exist everywhere, but the handlers to the bare min to shunt the work to another process. It's the same as a signal handler. It would be nice if we could interrupt the process and switch to a different stack for execution. But without stack switching and more drastic changes to the runtime this is going to be impossible. </p>\n<p>Changing the entire tool chain is going to be a lot of work... way beyond a blog post, that's for sure.... and for the most part, if like <span class=\"user-mention\" data-user-id=\"730457\">@Nicholas Renner</span> 's requirements you just want source compatibility, then I think the threading behind the curtiain would be ok.</p>",
+        "id": 485883445,
+        "sender_full_name": "Chris Woods",
+        "timestamp": 1733239985
+    },
+    {
+        "content": "<p>We implemented signal handling on an earlier prototype of what were working on in NaCl. It involved saving the register state on the stack and then using a sigreturn function that we added. I'm not sure we'll have as much flexibility here but we're going to play around with it.</p>",
+        "id": 485908858,
+        "sender_full_name": "Nicholas Renner",
+        "timestamp": 1733246337
+    },
+    {
+        "content": "<p>all we can say is \"works in wasm2c\"</p>",
+        "id": 485915821,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733248403
+    },
+    {
+        "content": "<p>all we* need is for Instance to be SignalSend(*), it need not be SignalSync</p>\n<p>(*) or rather, <code>&amp;mut Instance</code> needs to be SignalSend, since you can't call the deallocator in a signal (<code>&amp;mut</code> suppresses <code>Drop</code> while still carrying ownership).</p>",
+        "id": 485918168,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733249017
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"730457\">Nicholas Renner</span> <a href=\"#narrow/channel/206238-general/topic/Signal.20Handling/near/485908858\">said</a>:</p>\n<blockquote>\n<p>We implemented signal handling on an earlier prototype of what were working on in NaCl. It involved saving the register state on the stack and then using a sigreturn function that we added. I'm not sure we'll have as much flexibility here but we're going to play around with it.</p>\n</blockquote>\n<p>Yeah, the Runtime itself maintains state info, similar to CPU register states. The specification doesn't provide access to this. So it's impossible to record / preserve the state, at least from inside the WebAssembly byte code. Instead you will need support from the host environment and the runtime.</p>\n<p>It may be possible to do this via stack switching, which would effectively force the runtime to record similar information in order to allow execution to resume when the stack is switched. But you'd still need some way of triggering a stack switch from the host environment. This is likely to be runtime dependent.</p>",
+        "id": 485918377,
+        "sender_full_name": "Chris Woods",
+        "timestamp": 1733249066
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"703786\">Soni L.</span> <a href=\"#narrow/channel/206238-general/topic/Signal.20Handling/near/485915821\">said</a>:</p>\n<blockquote>\n<p>all we can say is \"works in wasm2c\"</p>\n</blockquote>\n<p>I'm sure it does! - Love wasm2c. </p>\n<p>For singal handling specifically, if the goal is to enable existing code to be ported to Wasm. Then we'd need something that has limited impact on the host code, ideally zero, but hey, beggers can't be choosers.</p>\n<p>Existing code doesn't have a seperate compilation module for signal handling, it's bundled with the existing .c and .o files. If you want to put the signal handling in a specific restricted module and run it in another thread, then you'd need to modify the code, or modify the compiler to do something like this for you. - I think you were suggesting this.</p>\n<p>That's a lot of effort.... .but if you've done it, I'd love to see it ! - It would be cool.</p>\n<p>Even if we've got this far, and we've Wasm code that's safe, we still need some way to trigger that function. In Wasm2C I'm sure you can register the wasm function directly, but that's not possible for WAMR, or I'm sure WasmTime. Instead we'd need to register a host function, which invokes the runtime to execute the wasm function. This level of indirection causes issues.</p>\n<p>We don't know what the runtime implementation does. Wasm2C is nice, since you can see exactly what it does - it's just a c function. But WAMR, WasmTime and others <em>may</em> be different. Before the wasm function starts to execute there could be memory allocations / frees etc. Certainly this is true in the Component Model interfaces. Therefore it will not be possible to directly call a wasm function from inside a signal handler.... at least not across runtimes. </p>\n<p>That's why I suggested just recording the signal, and allowing the signal handler to exit, and a second thread to actually invoke the function.</p>\n<p>Every runtime has it's pros and cons, and Wasm2c is nice. Directly invoking a wasm function from a singal handler is likely to be something that's specific to Wasm2c.</p>",
+        "id": 485921117,
+        "sender_full_name": "Chris Woods",
+        "timestamp": 1733249910
+    },
+    {
+        "content": "<p>likewise the threading idea is going to be, at least for now, specific to WAMR.</p>",
+        "id": 485921478,
+        "sender_full_name": "Chris Woods",
+        "timestamp": 1733250024
+    },
+    {
+        "content": "<p>defining a wasi-signal would be a good first step towards seeing what works for different runtimes</p>",
+        "id": 486066586,
+        "sender_full_name": "Soni L.",
+        "timestamp": 1733310484
+    }
+]

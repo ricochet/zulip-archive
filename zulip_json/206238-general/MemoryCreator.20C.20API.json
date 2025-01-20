@@ -1,0 +1,44 @@
+[
+    {
+        "content": "<p>Hey there!</p>\n<p>At dfinity, we are working on integrating wasmtime with our reference implementation written in Haskell. We bind to the C-API  and we have created <a href=\"https://github.com/dfinity/wasmtime-hs/\">wasmtime-hs</a>. </p>\n<p>While it is not an urgent issue at this point, we might want to manage the memory ourselves at some point. The rust API exposes an trait <a href=\"https://docs.wasmtime.dev/api/wasmtime/trait.MemoryCreator.html\">MemoryCreator</a> which allows for this. However, analogous functions seems to be missing from the C API. Are there any plans to add such functions? Are there any principle difficulties in implementing that interface for C?</p>\n<p>Many thanks, dsd</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dfinity/wasmtime-hs/\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/ad00c199ae82bb9303d40410e132ddbfceb5bd66\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f366634656461343239666133373738616566623931336462323639623434303839656365316636366364623530643865366630303932383865363533336161612f6466696e6974792f7761736d74696d652d6873)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dfinity/wasmtime-hs/\" title=\"GitHub - dfinity/wasmtime-hs: Haskell bindings to the wasmtime WASM engine\">GitHub - dfinity/wasmtime-hs: Haskell bindings to the wasmtime WASM engine</a></div><div class=\"message_embed_description\">Haskell bindings to the wasmtime WASM engine. Contribute to dfinity/wasmtime-hs development by creating an account on GitHub.</div></div></div>",
+        "id": 365958092,
+        "sender_full_name": "dsd",
+        "timestamp": 1686681021
+    },
+    {
+        "content": "<p>In general, all functionality exposed in the Rust API should also be exposed in the C API, it is just a matter of demand and effort.</p>\n<p>For this particular case, since C doesn't have the concept of traits and trait objects, we would need to have C-specific equivalents that are basically structs of function pointers and then add the relevant trait impls for those concrete structs of pointers. Will need a concrete struct of pointers and trait impl for that concrete type for both <code>MemoryCreator</code> and <code>LinearMemory</code></p>",
+        "id": 365961318,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1686681789
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> many thanks for the quick reply.</p>\n<p>So, essentially, when configuring the wasm store or instance, you pass a C-callback that creates memory. Internally, you would create an <code>impl</code> of <code>MemoryCreator</code> that wraps the callback. Likewise, the pointer returns from the callback would need to be turned into a <code>LinearMemory</code>. Is my understanding correct?</p>",
+        "id": 365968080,
+        "sender_full_name": "dsd",
+        "timestamp": 1686683342
+    },
+    {
+        "content": "<p>Along those lines yeah I think would work. A strawman might looks something like:</p>\n<div class=\"codehilite\" data-code-language=\"C\"><pre><span></span><code><span class=\"k\">typedef</span><span class=\"w\"> </span><span class=\"n\">wasmtime_error_t</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"n\">wasmtime_new_memory_t</span><span class=\"p\">)(</span>\n<span class=\"w\">    </span><span class=\"n\">wasm_memorytype_t</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">ty</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"kt\">size_t</span><span class=\"w\"> </span><span class=\"n\">minimum</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"kt\">size_t</span><span class=\"w\"> </span><span class=\"n\">maximum</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"kt\">size_t</span><span class=\"w\"> </span><span class=\"n\">reserved_size_in_bytes</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"kt\">size_t</span><span class=\"w\"> </span><span class=\"n\">guard_size_in_bytes</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"kt\">void</span><span class=\"w\"> </span><span class=\"o\">**</span><span class=\"n\">ret</span><span class=\"p\">);</span>\n\n<span class=\"k\">typedef</span><span class=\"w\"> </span><span class=\"kt\">void</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"n\">wasmtime_memory_get_t</span><span class=\"p\">)(</span>\n<span class=\"w\">    </span><span class=\"kt\">void</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">ptr</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"kt\">size_t</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">byte_size</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"kt\">size_t</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">maximum_byte_size</span><span class=\"p\">);</span>\n\n<span class=\"k\">typedef</span><span class=\"w\"> </span><span class=\"n\">wasmtime_error_t</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"n\">wasmtime_memory_grow_t</span><span class=\"p\">)(</span>\n<span class=\"w\">    </span><span class=\"kt\">void</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">ptr</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"kt\">size_t</span><span class=\"w\"> </span><span class=\"n\">new_size</span><span class=\"p\">);</span>\n\n<span class=\"k\">typedef</span><span class=\"w\"> </span><span class=\"k\">struct</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">  </span><span class=\"n\">wasmtime_new_memory_t</span><span class=\"w\"> </span><span class=\"n\">new_memory</span><span class=\"p\">;</span>\n<span class=\"w\">  </span><span class=\"n\">wasmtime_memory_get_t</span><span class=\"w\"> </span><span class=\"n\">get_memory</span><span class=\"p\">;</span>\n<span class=\"w\">  </span><span class=\"n\">wasmtime_memory_grow_t</span><span class=\"w\"> </span><span class=\"n\">grow_memory</span><span class=\"p\">;</span>\n<span class=\"p\">}</span><span class=\"w\"> </span><span class=\"n\">wasmtime_memory_creator_t</span><span class=\"p\">;</span>\n\n<span class=\"kt\">void</span><span class=\"w\"> </span><span class=\"nf\">wasmtime_config_memory_creator_set</span><span class=\"p\">(</span><span class=\"n\">wasmtime_config_t</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">config</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">wasmtime_memory_creator_t</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">creator</span><span class=\"p\">);</span>\n</code></pre></div>",
+        "id": 365970096,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1686683890
+    },
+    {
+        "content": "<p>perhaps with more contextual pointers in more places, soemthing like that</p>",
+        "id": 365970152,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1686683915
+    },
+    {
+        "content": "<p>and probably with more affordances for destructors as well so probably a <code>drop_memory</code> callback too</p>",
+        "id": 365970203,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1686683935
+    },
+    {
+        "content": "<p>but basically the Rust code would take these C function pointers and turn them into a trait implementation of <code>MemoryCreator</code> and <code>LinearMemory</code></p>",
+        "id": 365970299,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1686683960
+    }
+]

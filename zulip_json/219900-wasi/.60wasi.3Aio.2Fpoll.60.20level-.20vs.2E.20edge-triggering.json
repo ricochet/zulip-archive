@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>So it turns out the wild success I reported earlier porting <code>mio</code> and <code>tokio</code> to WASI Preview 2 wasn't so wildly successful after all.  Simple examples work, but things break when they get more complicated.  After an evening of debugging, I learned a few things:</p>\n<ul>\n<li><code>mio</code> really wants everything to be edge-triggered.  Native unix functions like <code>epoll</code> and <code>kqueue</code> can be configured for either edge- or level-triggering, and of course <code>mio</code> uses the edge option.  It also supports the more traditional POSIX <code>poll</code> function, which <em>only</em> supports level-triggering, but <code>mio</code> apparently converts that to edge-triggering with some fancy juggling that I don't completely understand yet.</li>\n<li><code>mio</code> already supports WASI Preview 1's <code>poll_oneoff</code>, but it apparently assumes it is edge-triggered.  I don't think that's true, though, is it?  This is a source of great confusion for me, because I was modeling the Preview 2 support on the <code>poll_oneoff</code> support.</li>\n<li>WASI Preview 2's <code>wasi:io/poll#poll</code> function is definitely level-triggered, so it needs the same treatment that POSIX <code>poll</code> gets.  Without it, <code>mio</code> will keep polling for both write- and read-ability and <code>wasi:io/poll#poll</code> will keep returning immediately because \"yes, the handle is still ready for writing like I just told you 1000 times already\".</li>\n</ul>\n<p>I'm going to keep cranking on this, but I could use some help answering this question: Is it correct to say that both Preview 1's <code>poll_oneoff</code> and Preview 2's <code>wasi:io/poll#poll</code> are level-triggered, i.e. if you ask either of them whether a socket is ready for writing, it will keep saying \"yes\" no matter how many times you ask it unless you actually do enough writing to trigger backpressure?</p>",
+        "id": 405382890,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701443485
+    },
+    {
+        "content": "<blockquote>\n<p>Is it correct to say that both Preview 1's poll_oneoff and Preview 2's wasi:io/poll#poll are level-triggered</p>\n</blockquote>\n<p>Yes</p>",
+        "id": 405383362,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701443624
+    },
+    {
+        "content": "<p>Ok, so <code>mio</code>'s existing WASI support is buggy and I should just ignore it, sounds like.</p>",
+        "id": 405383564,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701443672
+    },
+    {
+        "content": "<p>Trying to think more on this, but yeah if mio expects edge triggered and preview1 \"just\" calls poll then sounds like you'll need to ignore it</p>",
+        "id": 405383723,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701443713
+    },
+    {
+        "content": "<p>I'm not sure how widely used the preview1 integration was to flesh out bugs like this</p>",
+        "id": 405383755,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701443723
+    },
+    {
+        "content": "<p>I'd have to dig more into exactly what mio wants here to help more though, I would not have expected that level-triggered would break things</p>",
+        "id": 405383977,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701443778
+    },
+    {
+        "content": "<p>Alex, Lann, and I did a quick call to dig into this.  It looks like <code>mio</code>'s support for both <code>poll_oneoff</code> and POSIX poll are broken in subtle ways, which is what was causing my confusion.  I'm going to try to fix the POSIX bits and totally replace the WASI bits.</p>",
+        "id": 405387644,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701444911
+    },
+    {
+        "content": "<p>Correction: looks like <code>mio</code>'s POSIX <code>poll</code> support is <em>not</em> broken after all.  I just didn't understand how it worked in the context of how it's used.  Looks like it will be a good pattern to follow for WASI Preview 2 support.</p>",
+        "id": 405394205,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701447122
+    },
+    {
+        "content": "<p>Oh? How was the interest between read/write split given what we were looking at?</p>",
+        "id": 405395039,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701447396
+    },
+    {
+        "content": "<p>initially, the <code>mio</code> code registers both read and write interest.  Then, when one of those triggers (say write readiness, for example), the selector internally deregisters write interest while keeping read interest enabled.  Then it unblocks tokio to do its write, if applicable, which will cause the <code>IoSourceState</code> interceptor to re-register both interests, which will cause the next poll to wake immediately, at which point the selector will deregister write interest again, which gives tokio a chance to write again, but this time it doesn't need to, so we go back and poll again, this time with only read interest, and we stay there blocked until there's something to read.</p>",
+        "id": 405395823,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701447721
+    },
+    {
+        "content": "<p>so technically there's still a very minor inefficiency where we poll one extra time redundantly, but only once per useful I/O operation; there's no unbounded busy waiting</p>",
+        "id": 405396044,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701447804
+    },
+    {
+        "content": "<p>ah ok I can sort of see that</p>",
+        "id": 405397646,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701448400
+    },
+    {
+        "content": "<p>I've updated my <code>mio</code> fork with a rewrite of the WASI selector per the above discussion, and things are working nicely now.  I've also added a somewhat more complicated test using <code>tokio-postgres</code> to the test suite.</p>",
+        "id": 405439771,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701465653
+    }
+]

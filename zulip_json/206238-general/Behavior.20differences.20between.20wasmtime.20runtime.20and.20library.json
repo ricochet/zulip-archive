@@ -1,0 +1,122 @@
+[
+    {
+        "content": "<p>Hi, I have a basic C program compiled with emcc which just prints a hello world. Running it through the wasmtime runtime causes absolutely no problem, but running it in Rust using wasmtime and wasmtime-wasi (0.21.0) causes the execution to return an error \"Error: failed to invoke command default, Caused by: Exited with i32 exit status 0\" (code here: <a href=\"https://hastebin.com/vimenekuzo.rust\">https://hastebin.com/vimenekuzo.rust</a>). Running a similar program but compiled from Rust works in both cases.<br>\nI digged into the runtime code and I see no major difference between the techniques I used and the techniques used in wasmtime. Has anyone any idea why this isn't working as intended?</p>",
+        "id": 216390905,
+        "sender_full_name": "Lucas",
+        "timestamp": 1605124326
+    },
+    {
+        "content": "<p>Hi Lucas.  Currently a program that calls the WASI exit function will trap with a special trap that signifies an exit.  Your <code>func.call</code> is returning an error because of the trap and it's printing the message you're seeing.  For Wasmtime, we check to see if the trap is an exit trap and simply exit the process accordingly (see here: <a href=\"https://github.com/bytecodealliance/wasmtime/blob/c9a3f05afd45961b0b397f97c4ad79cd7a7c807d/src/commands/run.rs#L165-L172\">https://github.com/bytecodealliance/wasmtime/blob/c9a3f05afd45961b0b397f97c4ad79cd7a7c807d/src/commands/run.rs#L165-L172</a>)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/c9a3f05afd45961b0b397f97c4ad79cd7a7c807d/src/commands/run.rs#L165-L172\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/c9a3f05afd45961b0b397f97c4ad79cd7a7c807d/src/commands/run.rs#L165-L172\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 216391288,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605124548
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253989\">@Peter Huene</span> seems like I missed this bit of code while researching, thanks for the help!</p>",
+        "id": 216392403,
+        "sender_full_name": "Lucas",
+        "timestamp": 1605125062
+    },
+    {
+        "content": "<p>Hope that helps!  Let us know if you run into any other issues with the API.</p>",
+        "id": 216392487,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605125106
+    },
+    {
+        "content": "<p>I wonder if it might make sense to handle this more gracefully by default when embedding Wasmtime, too. Are there scenarios where not treating a WASI exit with status 0 as successful completion would be expected to cause issues?</p>",
+        "id": 216397752,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1605128069
+    },
+    {
+        "content": "<p>The problem, currently, is that <code>_start</code> doesn't return anything, so the only way to successfully get the above <code>func.call</code> to return success is to have <code>_start</code> return <em>without</em> calling into WASI to exit (which I believe it won't since it'll always call <code>proc_exit</code>). Given the export signature, we can't translate an exit trap internally into a return value.</p>",
+        "id": 216399007,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605128803
+    },
+    {
+        "content": "<p>so perhaps a new API method for invoking a WASI module specifically?</p>",
+        "id": 216399073,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605128863
+    },
+    {
+        "content": "<p>i.e. one which would handle the check for an exit trap and translate it to the exit status.</p>",
+        "id": 216399642,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605129194
+    },
+    {
+        "content": "<p>Erm misread the <code>_start</code> code; it should return provided the original main returns zero (but obviously it won't if the program calls proc_exit itself).</p>",
+        "id": 216400203,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605129528
+    },
+    {
+        "content": "<p>we could simply translate an exit trap with status 0 to <code>Ok(_)</code> for the invocation of <code>_start</code> (with a known signature) such that it won't return an error otherwise users have to check the trap for the exit code.  that would make it slightly more ergonomic although it feels brittle to me.</p>",
+        "id": 216401012,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605130053
+    },
+    {
+        "content": "<p>At any rate, to answer your question (finally), I don't see a problem with doing such a translation, other than the brittleness (i.e. \"is the function a known WASI entry point? If so, ignore exit traps with status 0 and return Ok\")</p>",
+        "id": 216401671,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605130461
+    },
+    {
+        "content": "<p>This reminds me, I need to update the .NET API to allow for getting the exit status from the trap.</p>",
+        "id": 216402470,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605131013
+    },
+    {
+        "content": "<p>Is there a real risk of misinterpreting something unrelated as a WASI exit trap with status 0 <em>and</em> that other thing being an error that we should surface?</p>",
+        "id": 216409208,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1605136118
+    },
+    {
+        "content": "<p>i don't think we'd mask any errors by handling an exit trap with status 0, since by convention it isn't an error condition.  As <code>Trap::i32_exit</code> is public, any host function, not just <code>proc_exit</code>, may potentially exit trap.  still, the more I think about this, the more I'm inclined to say we would ideally have something in the API that differentiates between invoking a \"default\" function (like what we have here) and \"running a program that exits and treat non-zero as error\"</p>",
+        "id": 216411359,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605138140
+    },
+    {
+        "content": "<p>hmm, yeah, I see the value in that. At the same time I'm also slightly concerned by the potential for confusion. Will all consumers of the API always know which is the right function to use?</p>",
+        "id": 216506899,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1605205038
+    },
+    {
+        "content": "<p>i think we can make the distinction pretty clear; perhaps rather than something on <code>Func</code> for a different way to call the function, something on <code>Linker</code> for \"invoking the default function of a module\" that will both ensure the signature of the default function accepts no arguments (for now) and returns no values and does the exit trap translation for an exit status</p>",
+        "id": 216514110,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605208350
+    },
+    {
+        "content": "<p>said function could even return <code>Result&lt;i32&gt;</code> and never fails with an exit trap, perhaps (caller can then just see if the command succeeded by comparing the successful result to 0?).    sort of like how you would waitpid</p>",
+        "id": 216514414,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1605208509
+    },
+    {
+        "content": "<p>interesting yeah, that seems reasonable, though I don't feel like I actually understand things in this area well enough to say for sure. And it seems like this starts getting into the space of different types of modules, similar to the distinction between Commands and Reactors. Might it make sense to file an issue describing this, and getting feedback?</p>",
+        "id": 216610512,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1605274525
+    },
+    {
+        "content": "<p>I just ran into pretty much the same issue described here (see <a href=\"#narrow/stream/217126-wasmtime\">https://bytecodealliance.zulipchat.com/#narrow/stream/217126-wasmtime</a>) and, even though I had read the code <span class=\"user-mention\" data-user-id=\"253989\">@Peter Huene</span> highlighted above (<a href=\"https://github.com/bytecodealliance/wasmtime/blob/c9a3f05afd45961b0b397f97c4ad79cd7a7c807d/src/commands/run.rs#L165-L172\">https://github.com/bytecodealliance/wasmtime/blob/c9a3f05afd45961b0b397f97c4ad79cd7a7c807d/src/commands/run.rs#L165-L172</a>) I still forgot to check for exit traps. I would vote for adding something, to the linker perhaps, to help out with this and then document this pattern.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/c9a3f05afd45961b0b397f97c4ad79cd7a7c807d/src/commands/run.rs#L165-L172\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/c9a3f05afd45961b0b397f97c4ad79cd7a7c807d/src/commands/run.rs#L165-L172\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 219266237,
+        "sender_full_name": "Andrew Brown",
+        "timestamp": 1607463445
+    },
+    {
+        "content": "<p>I think the Wasmtime book currently tells us to use <code>linker.get_default(\"\")?.get0::&lt;()&gt;()?()?;</code> (<a href=\"https://docs.wasmtime.dev/examples-rust-wasi.html\">https://docs.wasmtime.dev/examples-rust-wasi.html</a>) but I think that will run into the issue we're talking about here.</p>",
+        "id": 219266345,
+        "sender_full_name": "Andrew Brown",
+        "timestamp": 1607463492
+    }
+]

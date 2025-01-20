@@ -1,0 +1,206 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #10043  Provenance preparation for Pulley · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html">wasmtime / PR #10043  Provenance preparation for Pulley</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="494452051"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494452051" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494452051">(Jan 17 2025 at 22:36)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/dicej">dicej</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>.</p>
+
+
+
+<a name="494452052"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494452052" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494452052">(Jan 17 2025 at 22:36)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a> from <code>alexcrichton:vm-safe</code> to <code>bytecodealliance:main</code>:</p>
+<blockquote>
+<p>This commit is an internal refactoring of Wasmtime's runtime to prepare<br>
+to execute Pulley in MIRI. Currently today this is not possible because<br>
+Pulley does not properly respect either strict or permissive provenance<br>
+models. The goal of this refactoring is to enable fixing this in a<br>
+future commit that doesn't touch everything in the codebase. Instead<br>
+everything is touched here in this commit.</p>
+<p>The basic problem with Pulley is that it is incompatible with the strict<br>
+provenance model of Rust which means that we'll be using "exposed<br>
+provenance" APIs to satisfy Rust's soundness requirements. In this model<br>
+we must explicitly call <code>ptr.expose_provenance()</code> on any pointers<br>
+which are exposed to compiled code. Arguably we should also be already<br>
+doing this for natively-compiled code but I am not certain about how<br>
+strictly this is required.</p>
+<p>Currently in Wasmtime today we call <code>ptr.expose_provenance()</code> nowhere.<br>
+It also turns out, though, that we share quite a few pointers in quite a<br>
+few places with compiled code. This creates a bit of a problem! The<br>
+solution settled on in this commit looks like:</p>
+<ul>
+<li>
+<p>A new marker trait, <code>VmSafe</code>, is introduced. This trait is used to<br>
+  represent "safe to share with compiled code" types and enumerates some<br>
+  properties such as defined ABIs, primitives wrappers match primitive<br>
+  ABIs, and notably "does not contain a pointer".</p>
+</li>
+<li>
+<p>A new type, <code>VmPtr&lt;T&gt;</code>, is added to represent pointers shared with<br>
+  compiled code. Internally for now this is just <code>SendSyncPtr&lt;T&gt;</code> but in<br>
+  the future it will be <code>usize</code>. By using <code>SendSyncPtr&lt;T&gt;</code> it shouldn't<br>
+  actually really change anything today other than requiring a lot of<br>
+  refactoring to get the types to line up.</p>
+</li>
+<li>
+<p>The core <code>vmctx_plus_offset*</code> methods are updated to require<br>
+<code>T: VmSafe</code>. Previously they allowed any <code>T</code> which is relatively<br>
+  dangerous to store any possible Rust type in Cranelift-accessible<br>
+  areas.</p>
+</li>
+</ul>
+<p>These three fundamental changes were introduced in this commit. All<br>
+further changes were refactoring necessary to get everything working<br>
+after these changes. For example many types in <code>vmcontext.rs</code>, such as<br>
+<code>VMFuncRef</code>, have changed to using <code>VmPtr&lt;T&gt;</code> instead of <code>NonNull&lt;T&gt;</code> or<br>
+<code>*mut T</code>. This is a pretty expansive change which resulted in touching a<br>
+lot of places.</p>
+<p>One premise of <code>VmPtr&lt;T&gt;</code> is that it's non-null. This was an<br>
+additional refactoring that updated a lot of places where previously<br>
+<code>*mut T</code> was used and now either <code>VmPtr&lt;T&gt;</code> or <code>NonNull&lt;T&gt;</code> is used.</p>
+<p>In the end the intention is that <code>VmPtr&lt;T&gt;</code> is used whenever pointers<br>
+are store in memory that can be accessed from Cranelift. When operating<br>
+inside of the runtime <code>NonNull&lt;T&gt;</code> or <code>SendSyncPtr&lt;T&gt;</code> is preferred<br>
+instead.</p>
+<p>As a final note, no provenance changes have actually happened yet. For<br>
+example this doesn't fix Pulley in MIRI. What it does enable, though, is<br>
+that the future commit to fix Pulley in MIRI will be much smaller with<br>
+this having already landed.</p>
+</blockquote>
+
+
+
+<a name="494452053"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494452053" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494452053">(Jan 17 2025 at 22:36)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers">wasmtime-core-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>.</p>
+
+
+
+<a name="494452104"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494452104" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494452104">(Jan 17 2025 at 22:37)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/10043#issuecomment-2599324232">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>:</p>
+<blockquote>
+<p>Note that this is temporarily based on <a href="https://github.com/bytecodealliance/wasmtime/pull/10040">https://github.com/bytecodealliance/wasmtime/pull/10040</a> which accounts for the first few commits. </p>
+</blockquote>
+
+
+
+<a name="494452127"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494452127" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494452127">(Jan 17 2025 at 22:37)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>.</p>
+
+
+
+<a name="494453605"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494453605" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494453605">(Jan 17 2025 at 22:52)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/10043#issuecomment-2599338054">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>:</p>
+<blockquote>
+<blockquote>
+<p>The basic problem with Pulley is that it is incompatible with the strict<br>
+provenance model of Rust </p>
+</blockquote>
+<p>I'll link here that we have at least one idea (#9060) that would make Pulley compatible with strict provenance, albeit as a major refactor to the way that Wasmtime's data structures work. No argument that with the design today it is basically incompatible with strict provenance.</p>
+</blockquote>
+
+
+
+<a name="494455253"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494455253" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494455253">(Jan 17 2025 at 23:09)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/10043#issuecomment-2599353344">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>:</p>
+<blockquote>
+<p>Oh true good point! I'm a bit skeptical of the feasibility of such an implementation route though...</p>
+<p>One thing I've also been wondering about though, which is a bit related, is let's ignore Pulley and what's our provenance story for Cranelift-compiled x64 code? For example is it possible in Rust's model to still have strict provenance when JIT code is in the mix? Are we required regardless to use "expose provenance" as a primitive to say "modifications to this memory are happening behind you're back". I'm not sure myself.</p>
+</blockquote>
+
+
+
+<a name="494455519"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494455519" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494455519">(Jan 17 2025 at 23:11)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>.</p>
+
+
+
+<a name="494455881"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494455881" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494455881">(Jan 17 2025 at 23:16)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>.</p>
+
+
+
+<a name="494455915"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494455915" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494455915">(Jan 17 2025 at 23:16)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/pull/10043#issuecomment-2599359822">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>:</p>
+<blockquote>
+<p>It seems to me at least (with my compiler optimizer hat on) that separate compilation is the ultimate "provenance black hole" -- calling JIT code is no different from, say, calling a C library, which could legally return any pointer derived from anything reachable that we pass into it. As long as Rust supports linking to code that is not compiled by the same rustc invocation (i.e., does not adopt a fully closed-world assumption), its provenance model has to support the "outside world" escape hatch that calling JIT code would also fall into. And unless strict provenance is going to say "you are no longer allowed to link C libraries, and all indirect calls have to be statically devirtualizable" that's as far as an analysis is going to get.</p>
+</blockquote>
+
+
+
+<a name="494456264"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494456264" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494456264">(Jan 17 2025 at 23:20)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/pull/10043#issuecomment-2599362616">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>:</p>
+<blockquote>
+<blockquote>
+<p>For example is it possible in Rust's model to still have strict provenance when JIT code is in the mix? Are we required regardless to use "expose provenance" as a primitive to say "modifications to this memory are happening behind you're back". I'm not sure myself.</p>
+</blockquote>
+<p>Calling jitted code is no different from FFI. The foreign code may only access pointers for which it could have received provenance (either through exposed provenance or through a pointer that was passed in) Unluke with Pulley the compiler doesn't have visibility into what the foreign code does, so it for exanple doesn't know if you are loading an integer (erasing provenance) or loading a pointer (preserving provenance if it exists) or which of the available provenances was used for the memory operation. As such it has to assume that the foreign code picked the right provenance to avoid UB if the right provenance could have been picked in the first place due to being exposed to the foreign code.</p>
+</blockquote>
+
+
+
+<a name="494456372"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494456372" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494456372">(Jan 17 2025 at 23:21)</a>:</h4>
+<p>bjorn3 edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/10043#issuecomment-2599362616">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>:</p>
+<blockquote>
+<blockquote>
+<p>For example is it possible in Rust's model to still have strict provenance when JIT code is in the mix? Are we required regardless to use "expose provenance" as a primitive to say "modifications to this memory are happening behind you're back". I'm not sure myself.</p>
+</blockquote>
+<p>Calling jitted code is no different from FFI. The foreign code may only access pointers for which it could have received provenance (either through exposed provenance or through a pointer that was passed in) Unluke with Pulley the compiler doesn't have visibility into what the foreign code does, so it for exanple doesn't know if you are loading an integer (erasing provenance) or loading a pointer (preserving provenance if it exists) or which of the available provenances was used for the memory operation. As such it has to assume that the foreign code picked the right provenance to avoid UB if the right provenance could have been picked in the first place due to being exposed to the foreign code.</p>
+<p>Edit: What @cfallin said.</p>
+</blockquote>
+
+
+
+<a name="494457294"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494457294" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494457294">(Jan 17 2025 at 23:31)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/10043#issuecomment-2599370942">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>:</p>
+<blockquote>
+<p>Ok that makes sense to me yeah. If this becomes a problem in the future we can perhaps have a different implementation of <code>VmPtr</code> depending on if pulley is turned on or not. Without pulley we'd require strict provenance but with pulley we'd require only permissive provenance.</p>
+</blockquote>
+
+
+
+<a name="494458548"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494458548" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494458548">(Jan 17 2025 at 23:44)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>.</p>
+
+
+
+<a name="494470006"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%2310043%20%20Provenance%20preparation%20for%20Pulley/near/494470006" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.2310043.20.20Provenance.20preparation.20for.20Pulley.html#494470006">(Jan 18 2025 at 02:05)</a>:</h4>
+<p>github-actions[bot] <a href="https://github.com/bytecodealliance/wasmtime/pull/10043#issuecomment-2599470473">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/10043">PR #10043</a>:</p>
+<blockquote>
+<h4>Subscribe to Label Action</h4>
+<p>cc @fitzgen</p>
+<p>&lt;details&gt;<br>
+This issue or pull request has been labeled: "wasmtime:api", "wasmtime:ref-types"</p>
+<p>Thus the following users have been cc'd because of the following labels:</p>
+<ul>
+<li>fitzgen: wasmtime:ref-types</li>
+</ul>
+<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>
+<p><a href="https://github.com/bytecodealliance/subscribe-to-label-action">Learn more.</a><br>
+&lt;/details&gt;</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

@@ -1,0 +1,222 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #9396 s390x: Crash on accessing backchai... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html">wasmtime / issue #9396 s390x: Crash on accessing backchai...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="475604262"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239396%20s390x%3A%20Crash%20on%20accessing%20backchai.../near/475604262" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html#475604262">(Oct 08 2024 at 16:01)</a>:</h4>
+<p>uweigand opened <a href="https://github.com/bytecodealliance/wasmtime/issues/9396">issue #9396</a>:</p>
+<blockquote>
+<p>When running <code>tests/host_segfault.rs</code> natively on s390x (these tests are skipped in the QEMU based CI), the following sub-tests fail with an unexpected SIGSEGV: </p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">            </span><span class="s">"overrun 8k with misconfigured host"</span>
+<span class="w">            </span><span class="s">"overrun 32k with misconfigured host"</span>
+</code></pre></div>
+<p>These tests verify the correct behavior after a segmentation fault due to accessing the guard page after a stack overrun.  That actually all works correctly on s390x, but then the signal handler itself crashes.   This is because the <code>trap_handler</code> does</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">faulting_addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">signum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">libc</span><span class="p">::</span><span class="n">SIGSEGV</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">libc</span><span class="p">::</span><span class="n">SIGBUS</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="nb">Some</span><span class="p">((</span><span class="o">*</span><span class="n">siginfo</span><span class="p">).</span><span class="n">si_addr</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">),</span>
+<span class="w">            </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="nb">None</span><span class="p">,</span>
+<span class="w">        </span><span class="p">};</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">regs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_trap_registers</span><span class="p">(</span><span class="n">context</span><span class="p">,</span><span class="w"> </span><span class="n">signum</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="p">.</span><span class="n">test_if_trap</span><span class="p">(</span><span class="n">regs</span><span class="p">,</span><span class="w"> </span><span class="n">faulting_addr</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">handler</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">handler</span><span class="p">(</span><span class="n">signum</span><span class="p">,</span><span class="w"> </span><span class="n">siginfo</span><span class="p">,</span><span class="w"> </span><span class="n">context</span><span class="p">)</span>
+<span class="w">        </span><span class="p">});</span>
+
+<span class="w">        </span><span class="c1">// Figure out what to do based on the result of this handling of</span>
+<span class="w">        </span><span class="c1">// the trap. Note that our sentinel value of 1 means that the</span>
+<span class="w">        </span><span class="c1">// exception was handled by a custom exception handler, so we</span>
+<span class="w">        </span><span class="c1">// keep executing.</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">jmp_buf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">TrapTest</span><span class="p">::</span><span class="n">NotWasm</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">faulting_addr</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">faulting_addr</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="p">.</span><span class="n">async_guard_range</span><span class="p">.</span><span class="n">start</span><span class="p">;</span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="p">.</span><span class="n">async_guard_range</span><span class="p">.</span><span class="n">end</span><span class="p">;</span>
+<span class="w">                    </span><span class="k">if</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">faulting_addr</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">faulting_addr</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                        </span><span class="n">abort_stack_overflow</span><span class="p">();</span>
+<span class="w">                    </span><span class="p">}</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="n">TrapTest</span><span class="p">::</span><span class="n">HandledByEmbedder</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">            </span><span class="n">TrapTest</span><span class="p">::</span><span class="n">Trap</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">jmp_buf</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">jmp_buf</span><span class="p">,</span>
+<span class="w">        </span><span class="p">};</span>
+</code></pre></div>
+<p>Note that it calls <code>get_trap_registers</code> <em>before</em> checking for the stack overflow case.  That works on other platforms, but on s390x this routine actually accesses the backchain value (our equivalent to the frame pointer used for stack unwinding) - and this is not stored in a register but in the bottom-most word on the stack:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="cp">#[cfg(all(target_os = </span><span class="s">"linux"</span><span class="cp">, target_arch = </span><span class="s">"s390x"</span><span class="cp">))]</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="c1">// On s390x, SIGILL and SIGFPE are delivered with the PSW address</span>
+<span class="w">            </span><span class="c1">// pointing *after* the faulting instruction, while SIGSEGV and</span>
+<span class="w">            </span><span class="c1">// SIGBUS are delivered with the PSW address pointing *to* the</span>
+<span class="w">            </span><span class="c1">// faulting instruction.  To handle this, the code generator registers</span>
+<span class="w">            </span><span class="c1">// any trap that results in one of "late" signals on the last byte</span>
+<span class="w">            </span><span class="c1">// of the instruction, and any trap that results in one of the "early"</span>
+<span class="w">            </span><span class="c1">// signals on the first byte of the instruction (as usual).  This</span>
+<span class="w">            </span><span class="c1">// means we simply need to decrement the reported PSW address by</span>
+<span class="w">            </span><span class="c1">// one in the case of a "late" signal here to ensure we always</span>
+<span class="w">            </span><span class="c1">// correctly find the associated trap handler.</span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">trap_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">_signum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">libc</span><span class="p">::</span><span class="n">SIGILL</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">libc</span><span class="p">::</span><span class="n">SIGFPE</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">                </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">            </span><span class="p">};</span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">cx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;*</span><span class="p">(</span><span class="n">cx</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="n">libc</span><span class="p">::</span><span class="n">ucontext_t</span><span class="p">);</span>
+<span class="w">            </span><span class="n">TrapRegisters</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">pc</span><span class="p">:</span><span class="w"> </span><span class="p">(</span><span class="n">cx</span><span class="p">.</span><span class="n">uc_mcontext</span><span class="p">.</span><span class="n">psw</span><span class="p">.</span><span class="n">addr</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">trap_offset</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">                </span><span class="n">fp</span><span class="p">:</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">cx</span><span class="p">.</span><span class="n">uc_mcontext</span><span class="p">.</span><span class="n">gregs</span><span class="p">[</span><span class="mi">15</span><span class="p">]</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">usize</span><span class="p">),</span>
+<span class="w">            </span><span class="p">}</span>
+</code></pre></div>
+<p>As the stack pointer at the point of fault points to the guard page, that last pointer dereference will also trigger a SIGSEGV.   That causes the <code>trap_handler</code> to be entered recursively, and it then aborts.</p>
+<p>I guess there would be a number of options to fix this:</p>
+<ul>
+<li>move the guard page check to before calling <code>get_trap_registers</code> - not sure if this causes any semantical difference?</li>
+<li>try to move accessing the backchain until after we've determined this is a <code>NotWasm</code> case (we only need pc to determine this, not fp) - that should be completely equivalent semantically, but would require refactoring of the <code>test_if_trap</code> logic</li>
+<li>handle the special case of the recursive SIGSEGV on accessing the backchain somehow - this would likely require some flag to be set while attempting the access that the recursive call to <code>trap_handler</code> would check</li>
+</ul>
+<p>@alexcrichton you've been working on this part of the code recently - any opinions or suggestions?</p>
+</blockquote>
+
+
+
+<a name="475628739"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239396%20s390x%3A%20Crash%20on%20accessing%20backchai.../near/475628739" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html#475628739">(Oct 08 2024 at 17:46)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/9396#issuecomment-2400469805">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9396">issue #9396</a>:</p>
+<blockquote>
+<p>Hm this one's tricky... The guard page checks won't actually do anything here, that's only for async stack pages and isn't relevant for overflows on host-managed stacks (like the main thread) which these tests are exercising. In that sense they wouldn't actually hit the abort there, so moving that check wouldn't help.</p>
+<p>I'm also not a fan of recursive signal handlers, so I'd prefer to avoid that if possible (hard to reason about).</p>
+<p>I like your idea of refactoring how the backchain is accessed, so I think that's the way to go. Perhaps something like a closure to pass in of "call this to get the frame pointer" and that is only called once we're sure it's a wasm fault.</p>
+</blockquote>
+
+
+
+<a name="475674622"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239396%20s390x%3A%20Crash%20on%20accessing%20backchai.../near/475674622" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html#475674622">(Oct 08 2024 at 21:25)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/9396#issuecomment-2400849368">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9396">issue #9396</a>:</p>
+<blockquote>
+<p>The closure seems to work; I don't get the recursive segfault any more.  However, the test case still fails because - as you say - the guard page check doesn't hit, so the original segfault is still delivered after all.</p>
+<p>I'm now confused how this test is even supposed to work at all.  The JITed stack checks don't hit as the wasm stack limit is deliberately misconfigured, and the guard page check doesn't hit as it's not an async stack.  How is this supposed to be detected as stack overflow vs. random segfault?<br>
+</p>
+</blockquote>
+
+
+
+<a name="475689054"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239396%20s390x%3A%20Crash%20on%20accessing%20backchai.../near/475689054" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html#475689054">(Oct 08 2024 at 22:50)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/9396#issuecomment-2400951436">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9396">issue #9396</a>:</p>
+<blockquote>
+<p>Oh for these tests Wasmtime shouldn't actually do anything. In theory the Wasmtime signal handler should defer to the previous signal handler, in this case the Rust standard library. The Rust standard library should have metadata about the guard page for the current thread and should be able to figure out that the guard page was hit, and then libstd is the one that prints the message and aborts.</p>
+<p>Or at least that's what's supposed to happen (IIRC), maybe Rust's s390x libstd doesn't have the handler installed or doesn't have the support for detecting the current guard page? IIRC that was a pretty gnarly platform-specific part of libstd. You can test it out locally by writing a program that just overflows the stack. If nothing is printed then these tests just aren't destined to pass on s390x, but if a message is printed then they should be passing.</p>
+</blockquote>
+
+
+
+<a name="475693497"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239396%20s390x%3A%20Crash%20on%20accessing%20backchai.../near/475693497" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html#475693497">(Oct 08 2024 at 23:35)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/9396#issuecomment-2400992059">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9396">issue #9396</a>:</p>
+<blockquote>
+<p>Ah, I see.  However, Rust's libstd also seems to be working correctly.  It checks the fault address against the guard page range, but this doesn't hit either as the guard page is just 4k, and the test case allocates 8k per stack frame, so the stack pointer jumps from above the guard to below the guard.  Is the JITed code somehow supposed to be doing per-page probing here?</p>
+</blockquote>
+
+
+
+<a name="475694055"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239396%20s390x%3A%20Crash%20on%20accessing%20backchai.../near/475694055" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html#475694055">(Oct 08 2024 at 23:40)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/9396#issuecomment-2400996352">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9396">issue #9396</a>:</p>
+<blockquote>
+<p>Indeed, this seems to be done on other architectures, but not s390x:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="p">(</span><span class="k">crate</span><span class="p">)</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">probestack_supported</span><span class="p">(</span><span class="n">arch</span><span class="p">:</span><span class="w"> </span><span class="nc">Architecture</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="fm">matches!</span><span class="p">(</span>
+<span class="w">        </span><span class="n">arch</span><span class="p">,</span>
+<span class="w">        </span><span class="n">Architecture</span><span class="p">::</span><span class="n">X86_64</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Architecture</span><span class="p">::</span><span class="n">Aarch64</span><span class="p">(</span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">Architecture</span><span class="p">::</span><span class="n">Riscv64</span><span class="p">(</span><span class="n">_</span><span class="p">)</span>
+<span class="w">    </span><span class="p">)</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>I guess I need to implement probestack then ...</p>
+</blockquote>
+
+
+
+<a name="475694519"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239396%20s390x%3A%20Crash%20on%20accessing%20backchai.../near/475694519" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html#475694519">(Oct 08 2024 at 23:46)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/9396#issuecomment-2401000807">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9396">issue #9396</a>:</p>
+<blockquote>
+<p>Ah yes indeed I forgot about that! That's what we use for guaranteeing the guard page is hit yeah</p>
+</blockquote>
+
+
+
+<a name="475941785"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239396%20s390x%3A%20Crash%20on%20accessing%20backchai.../near/475941785" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239396.20s390x.3A.20Crash.20on.20accessing.20backchai.2E.2E.2E.html#475941785">(Oct 09 2024 at 19:28)</a>:</h4>
+<p>alexcrichton closed <a href="https://github.com/bytecodealliance/wasmtime/issues/9396">issue #9396</a>:</p>
+<blockquote>
+<p>When running <code>tests/host_segfault.rs</code> natively on s390x (these tests are skipped in the QEMU based CI), the following sub-tests fail with an unexpected SIGSEGV: </p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">            </span><span class="s">"overrun 8k with misconfigured host"</span>
+<span class="w">            </span><span class="s">"overrun 32k with misconfigured host"</span>
+</code></pre></div>
+<p>These tests verify the correct behavior after a segmentation fault due to accessing the guard page after a stack overrun.  That actually all works correctly on s390x, but then the signal handler itself crashes.   This is because the <code>trap_handler</code> does</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">faulting_addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">signum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">libc</span><span class="p">::</span><span class="n">SIGSEGV</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">libc</span><span class="p">::</span><span class="n">SIGBUS</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="nb">Some</span><span class="p">((</span><span class="o">*</span><span class="n">siginfo</span><span class="p">).</span><span class="n">si_addr</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">),</span>
+<span class="w">            </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="nb">None</span><span class="p">,</span>
+<span class="w">        </span><span class="p">};</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">regs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_trap_registers</span><span class="p">(</span><span class="n">context</span><span class="p">,</span><span class="w"> </span><span class="n">signum</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="p">.</span><span class="n">test_if_trap</span><span class="p">(</span><span class="n">regs</span><span class="p">,</span><span class="w"> </span><span class="n">faulting_addr</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">handler</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">handler</span><span class="p">(</span><span class="n">signum</span><span class="p">,</span><span class="w"> </span><span class="n">siginfo</span><span class="p">,</span><span class="w"> </span><span class="n">context</span><span class="p">)</span>
+<span class="w">        </span><span class="p">});</span>
+
+<span class="w">        </span><span class="c1">// Figure out what to do based on the result of this handling of</span>
+<span class="w">        </span><span class="c1">// the trap. Note that our sentinel value of 1 means that the</span>
+<span class="w">        </span><span class="c1">// exception was handled by a custom exception handler, so we</span>
+<span class="w">        </span><span class="c1">// keep executing.</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">jmp_buf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">TrapTest</span><span class="p">::</span><span class="n">NotWasm</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">faulting_addr</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">faulting_addr</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="p">.</span><span class="n">async_guard_range</span><span class="p">.</span><span class="n">start</span><span class="p">;</span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">info</span><span class="p">.</span><span class="n">async_guard_range</span><span class="p">.</span><span class="n">end</span><span class="p">;</span>
+<span class="w">                    </span><span class="k">if</span><span class="w"> </span><span class="n">start</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">faulting_addr</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">faulting_addr</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                        </span><span class="n">abort_stack_overflow</span><span class="p">();</span>
+<span class="w">                    </span><span class="p">}</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="n">TrapTest</span><span class="p">::</span><span class="n">HandledByEmbedder</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">            </span><span class="n">TrapTest</span><span class="p">::</span><span class="n">Trap</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">jmp_buf</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">jmp_buf</span><span class="p">,</span>
+<span class="w">        </span><span class="p">};</span>
+</code></pre></div>
+<p>Note that it calls <code>get_trap_registers</code> <em>before</em> checking for the stack overflow case.  That works on other platforms, but on s390x this routine actually accesses the backchain value (our equivalent to the frame pointer used for stack unwinding) - and this is not stored in a register but in the bottom-most word on the stack:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="cp">#[cfg(all(target_os = </span><span class="s">"linux"</span><span class="cp">, target_arch = </span><span class="s">"s390x"</span><span class="cp">))]</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="c1">// On s390x, SIGILL and SIGFPE are delivered with the PSW address</span>
+<span class="w">            </span><span class="c1">// pointing *after* the faulting instruction, while SIGSEGV and</span>
+<span class="w">            </span><span class="c1">// SIGBUS are delivered with the PSW address pointing *to* the</span>
+<span class="w">            </span><span class="c1">// faulting instruction.  To handle this, the code generator registers</span>
+<span class="w">            </span><span class="c1">// any trap that results in one of "late" signals on the last byte</span>
+<span class="w">            </span><span class="c1">// of the instruction, and any trap that results in one of the "early"</span>
+<span class="w">            </span><span class="c1">// signals on the first byte of the instruction (as usual).  This</span>
+<span class="w">            </span><span class="c1">// means we simply need to decrement the reported PSW address by</span>
+<span class="w">            </span><span class="c1">// one in the case of a "late" signal here to ensure we always</span>
+<span class="w">            </span><span class="c1">// correctly find the associated trap handler.</span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">trap_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">_signum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">libc</span><span class="p">::</span><span class="n">SIGILL</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">libc</span><span class="p">::</span><span class="n">SIGFPE</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">                </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">            </span><span class="p">};</span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">cx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;*</span><span class="p">(</span><span class="n">cx</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="n">libc</span><span class="p">::</span><span class="n">ucontext_t</span><span class="p">);</span>
+<span class="w">            </span><span class="n">TrapRegisters</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">pc</span><span class="p">:</span><span class="w"> </span><span class="p">(</span><span class="n">cx</span><span class="p">.</span><span class="n">uc_mcontext</span><span class="p">.</span><span class="n">psw</span><span class="p">.</span><span class="n">addr</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">trap_offset</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span>
+<span class="w">                </span><span class="n">fp</span><span class="p">:</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">cx</span><span class="p">.</span><span class="n">uc_mcontext</span><span class="p">.</span><span class="n">gregs</span><span class="p">[</span><span class="mi">15</span><span class="p">]</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">usize</span><span class="p">),</span>
+<span class="w">            </span><span class="p">}</span>
+</code></pre></div>
+<p>As the stack pointer at the point of fault points to the guard page, that last pointer dereference will also trigger a SIGSEGV.   That causes the <code>trap_handler</code> to be entered recursively, and it then aborts.</p>
+<p>I guess there would be a number of options to fix this:</p>
+<ul>
+<li>move the guard page check to before calling <code>get_trap_registers</code> - not sure if this causes any semantical difference?</li>
+<li>try to move accessing the backchain until after we've determined this is a <code>NotWasm</code> case (we only need pc to determine this, not fp) - that should be completely equivalent semantically, but would require refactoring of the <code>test_if_trap</code> logic</li>
+<li>handle the special case of the recursive SIGSEGV on accessing the backchain somehow - this would likely require some flag to be set while attempting the access that the recursive call to <code>trap_handler</code> would check</li>
+</ul>
+<p>@alexcrichton you've been working on this part of the code recently - any opinions or suggestions?</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

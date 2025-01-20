@@ -1,0 +1,374 @@
+[
+    {
+        "content": "<p>In the process of working on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3180\">https://github.com/bytecodealliance/wasmtime/pull/3180</a> I'm hitting a bizarre bug that I'm hoping folks from ARM or someone else who's knowledgeable can help out with</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/3180\" style=\"background-image: url(https://opengraph.githubassets.com/7dff747efd9a73526383e5c001eaffaa17ef75bc1c0828b679a89498916b60d1/bytecodealliance/wasmtime/pull/3180)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/3180\" title=\"Reimplement how unwind information is stored  by alexcrichton · Pull Request #3180 · bytecodealliance/wasmtime\">Reimplement how unwind information is stored  by alexcrichton · Pull Request #3180 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This commit is a major refactoring of how unwind information is stored\nafter compilation of a function has finished. Previously we would store\nthe raw UnwindInfo as a result of compilation and this...</div></div></div>",
+        "id": 249277896,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628794852
+    },
+    {
+        "content": "<p>As some basic background, we generate <code>.eh_frame</code> tables for JIT code and then register them with libgcc on Linux arm64 machines. This <code>.eh_frame</code> business is meant for unwinding which is how we capture backtraces of both wasm/native together. My PR is updated when/where the <code>.eh_frame</code> is generated. Previously the <code>.eh_frame</code> would be dynamically generated when we load a module into memory, but now I'm updating it such that it's emedded into the module itself, precomputed ahead of time.</p>",
+        "id": 249278092,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628794934
+    },
+    {
+        "content": "<p>The suprising behavior that I'm seeing is that my PR is segfaulting on CI, specifically in the emulated aarch64 builder. This aarch64 builder is running on an x86_64 host and is built with a pinned qemu 6.0.0 version. I cannot reproduce the segfault, however, on a bare-metal aarch64 host (the one that ARM donated to us). Interestingly enough, though, I can reproduce the segfault in qemu running on the arm64 host. That's allowed me to dig in further</p>",
+        "id": 249278214,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795004
+    },
+    {
+        "content": "<p>After what was probably too much gdb, I and others have reached the following conclusions:</p>\n<ul>\n<li>The segfault has to do with pointer authentication</li>\n<li>If I pass <code>-cpu cortex-{a53,a57,a72}</code> to qemu, the test passes. If I pass <code>-cpu max</code> the test fails.  (these were all the cpus my local qemu build supported)</li>\n</ul>",
+        "id": 249278369,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795062
+    },
+    {
+        "content": "<ul>\n<li>Specifically the segfault happens when gcc dereferences the result of <a href=\"https://github.com/gcc-mirror/gcc/blob/4c44b708f11eec6fc02456e8577708d01ca92327/libgcc/config/aarch64/aarch64-unwind.h#L49\">this line</a>, which is the result of the <code>autia1716</code> instruction</li>\n</ul>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/gcc-mirror/gcc/blob/4c44b708f11eec6fc02456e8577708d01ca92327/libgcc/config/aarch64/aarch64-unwind.h#L49\" style=\"background-image: url(https://opengraph.githubassets.com/30cbc3ddc8ca1b592b0699f0041c39874a2828904584ee3e28e5d0c4ae8e5df0/gcc-mirror/gcc)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/gcc-mirror/gcc/blob/4c44b708f11eec6fc02456e8577708d01ca92327/libgcc/config/aarch64/aarch64-unwind.h#L49\" title=\"gcc/aarch64-unwind.h at 4c44b708f11eec6fc02456e8577708d01ca92327 · gcc-mirror/gcc\">gcc/aarch64-unwind.h at 4c44b708f11eec6fc02456e8577708d01ca92327 · gcc-mirror/gcc</a></div><div class=\"message_embed_description\">Contribute to gcc-mirror/gcc development by creating an account on GitHub.</div></div></div>",
+        "id": 249278443,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795101
+    },
+    {
+        "content": "<p>I've confirmed in a debugger that the <code>autia1716</code> instruction is indeed where native execution and emluated execution start to diverge.</p>",
+        "id": 249278492,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795124
+    },
+    {
+        "content": "<p>Now all of this is somewhat confusing to me for a number of reasons. First off though my assumption is that the bare-metal linux server probably has pointer auth turned off entirely which is why things appear to work for me. I'm assuming that QEMU with <code>-cpu max</code> turns on pointer auth for one reason or another, which is why things fail. Consequently for <code>cortex-a72</code> and below I'm assuming it's also turned off which is why things start passing.</p>",
+        "id": 249278660,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795188
+    },
+    {
+        "content": "<p>We ran into pointer auth bits for aarch64 support on macOS. Cranelift added support for specifically disabling pointer auth for jit frames, however. To do this the FDE for jit frames specifies that the pseudo-register for pointer auth is specifically set to 0, <a href=\"https://github.com/bytecodealliance/wasmtime/blob/2da1b9d3759bdaecac41d7bb2bc738c113a563b8/cranelift/codegen/src/isa/unwind/systemv.rs#L115-L129\">using <code>DW_OP_lit0</code></a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/2da1b9d3759bdaecac41d7bb2bc738c113a563b8/cranelift/codegen/src/isa/unwind/systemv.rs#L115-L129\" style=\"background-image: url(https://opengraph.githubassets.com/68c4cafaf3769dc962c39d80b88279cac75a3007ca985cb08529c205202a60e7/bytecodealliance/wasmtime)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/2da1b9d3759bdaecac41d7bb2bc738c113a563b8/cranelift/codegen/src/isa/unwind/systemv.rs#L115-L129\" title=\"wasmtime/systemv.rs at 2da1b9d3759bdaecac41d7bb2bc738c113a563b8 · bytecodealliance/wasmtime\">wasmtime/systemv.rs at 2da1b9d3759bdaecac41d7bb2bc738c113a563b8 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - wasmtime/systemv.rs at 2da1b9d3759bdaecac41d7bb2bc738c113a563b8 · bytecodealliance/wasmtime</div></div></div>",
+        "id": 249278797,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795255
+    },
+    {
+        "content": "<p>I can confirm that libgcc is indeed decoding this FDE opcode correctly and it's registering that. Specifically <a href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.c#L1185\">this code gets hit</a> and register 34, the pseudo-register, indeed has <code>REG_SAVED_VAL_EXP</code> saved into it</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.c#L1185\" style=\"background-image: url(https://opengraph.githubassets.com/30cbc3ddc8ca1b592b0699f0041c39874a2828904584ee3e28e5d0c4ae8e5df0/gcc-mirror/gcc)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.c#L1185\" title=\"gcc/unwind-dw2.c at releases/gcc-8.3.0 · gcc-mirror/gcc\">gcc/unwind-dw2.c at releases/gcc-8.3.0 · gcc-mirror/gcc</a></div><div class=\"message_embed_description\">Contribute to gcc-mirror/gcc development by creating an account on GitHub.</div></div></div>",
+        "id": 249279045,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795353
+    },
+    {
+        "content": "<p>So all of that is fine except that our disabling of pointer auth doesn't seem to be doing anything. It's still trying to run <code>autia1716</code> when unwinding on addresses, and that's why I think it's working in qemu but not on bare metal (assuming <code>autia1716</code> is a noop basically if pointer auth is turned off)</p>",
+        "id": 249279207,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795416
+    },
+    {
+        "content": "<p>One suspicion of mine is that the <a href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/config/aarch64/aarch64-unwind.h#L46\">guard for the <code>autia1716</code> instruction</a> is testing the lower bit of the <code>offset</code> field in libgcc. I think this may be a bug? <a href=\"https://github.com/llvm/llvm-project/blob/5a6d77065185cc3cb3e96affd7c96bc2854abd0d/libunwind/src/DwarfInstructions.hpp#L222\">Corresponding code in LLVM's libunwind</a> seems to disagree with this where LLVM checks the value of the register itself (which is how I think things work on arm64)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/config/aarch64/aarch64-unwind.h#L46\" style=\"background-image: url(https://opengraph.githubassets.com/30cbc3ddc8ca1b592b0699f0041c39874a2828904584ee3e28e5d0c4ae8e5df0/gcc-mirror/gcc)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/config/aarch64/aarch64-unwind.h#L46\" title=\"gcc/aarch64-unwind.h at releases/gcc-8.3.0 · gcc-mirror/gcc\">gcc/aarch64-unwind.h at releases/gcc-8.3.0 · gcc-mirror/gcc</a></div><div class=\"message_embed_description\">Contribute to gcc-mirror/gcc development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/llvm/llvm-project/blob/5a6d77065185cc3cb3e96affd7c96bc2854abd0d/libunwind/src/DwarfInstructions.hpp#L222\" style=\"background-image: url(https://opengraph.githubassets.com/59b6b777359006d9dd9b20351c492417b8d7bdb8444dd570e2e1c5464a9036db/llvm/llvm-project)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/llvm/llvm-project/blob/5a6d77065185cc3cb3e96affd7c96bc2854abd0d/libunwind/src/DwarfInstructions.hpp#L222\" title=\"llvm-project/DwarfInstructions.hpp at 5a6d77065185cc3cb3e96affd7c96bc2854abd0d · llvm/llvm-project\">llvm-project/DwarfInstructions.hpp at 5a6d77065185cc3cb3e96affd7c96bc2854abd0d · llvm/llvm-project</a></div><div class=\"message_embed_description\">The LLVM Project is a collection of modular and reusable compiler and toolchain technologies. Note: the repository does not accept github pull requests at this moment. Please submit your patches at...</div></div></div>",
+        "id": 249279410,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795517
+    },
+    {
+        "content": "<p>This suspicion, however, still doesn't really explain why my PR is actually \"breaking\" things. My PR, AFAIK, doesn't actually change unwinding information at all, it just moves where it's generated and how it's managed. My best guess, though, is that for some reason the way we generated it before it magically always has an even value for libgcc's <code>offset</code> field for the register. I don't know how this could be the case, and is something I wanted to investigate next.</p>",
+        "id": 249279563,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795587
+    },
+    {
+        "content": "<p>I wanted to write all this up though to see if other arm folks can help out or forward this along perhaps, I'm specifically wondering if gcc is indeed buggy in this regard.</p>\n<p>Also FWIW the server we're using has gcc 8.3.0, and looking at gcc's main branch it appears a number of changes have happened since 8.3.0. I don't think, though, that it necesarily fundamentally changes anything, it appears that the main condition for pointer auth is still based on the lowest bit of the <code>offset</code> field, which continues to confuse me in the sense that it seems to disagree with LLVM's libunwind</p>",
+        "id": 249279738,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628795667
+    },
+    {
+        "content": "<p>CC <span class=\"user-mention\" data-user-id=\"300050\">@Anton Kirilov</span> &amp; <span class=\"user-mention\" data-user-id=\"421408\">@Sam Parker</span> for potential insights here</p>",
+        "id": 249279781,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1628795687
+    },
+    {
+        "content": "<p>Ok so on the offset bits, I think this may indeed be a bug in libgcc. I changed <em>slightly</em> how the FDE was encoded such that the <code>DW_OP_lit0</code> happened to always indeed be at least 2-byte aligned before, and after my PR it's only 1-byte aligned. That I think explains why the <code>offset</code> field is different before/after my PR.</p>\n<p>The reason for that is that the <a href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.h#L39\"><code>offset</code> and <code>exp</code></a> fields are stored in a <code>union</code>. The <code>DW_CFA_val_expression</code> opcode that we use <a href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.c#L1191\">only sets the <code>exp</code> field</a>, so the <code>offset</code> test later when executing <code>autia1716</code> is actually testing <code>exp</code>, the address of the expression for the register, not the actual register value itself</p>\n<p>I think that means everything makes sense to me now. In summary:</p>\n<ul>\n<li>In libgcc pointer auth checking when unwinding has a bug where it's not checking the value of a register, instead it's looking at metadata about the register</li>\n<li>The bare metal arm64 server that we have seems to have PAC disabled</li>\n<li>QEMU seems to have PAC enabled by default</li>\n<li>Previously we just-so-happened to generate an FDE such that it feigned disabling pointer auth, my PR tweaked the layout just enough that this no longer hits the happy path and libgcc tries to do pointer auth</li>\n</ul>\n<p>Since PAC is typically turned off for Linux I think I'll probably just pass a <code>-cpu</code> argument to qemu on CI to fix this for now, but it'd probably be good to fix this in libgcc at some point as well</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.h#L39\" style=\"background-image: url(https://opengraph.githubassets.com/30cbc3ddc8ca1b592b0699f0041c39874a2828904584ee3e28e5d0c4ae8e5df0/gcc-mirror/gcc)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.h#L39\" title=\"gcc/unwind-dw2.h at releases/gcc-8.3.0 · gcc-mirror/gcc\">gcc/unwind-dw2.h at releases/gcc-8.3.0 · gcc-mirror/gcc</a></div><div class=\"message_embed_description\">Contribute to gcc-mirror/gcc development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.c#L1191\" style=\"background-image: url(https://opengraph.githubassets.com/30cbc3ddc8ca1b592b0699f0041c39874a2828904584ee3e28e5d0c4ae8e5df0/gcc-mirror/gcc)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/gcc-mirror/gcc/blob/releases/gcc-8.3.0/libgcc/unwind-dw2.c#L1191\" title=\"gcc/unwind-dw2.c at releases/gcc-8.3.0 · gcc-mirror/gcc\">gcc/unwind-dw2.c at releases/gcc-8.3.0 · gcc-mirror/gcc</a></div><div class=\"message_embed_description\">Contribute to gcc-mirror/gcc development by creating an account on GitHub.</div></div></div>",
+        "id": 249281109,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628796344
+    },
+    {
+        "content": "<p>Nice find! FWIW, it seems reasonable to me for now to 2-byte-align the <code>lit0</code> opcode as a workaround; there's plenty of precedent (in the wider world if not in our codebase) for \"this consumer has this weird bug so we generate metadata in this particular way\"</p>",
+        "id": 249281365,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1628796477
+    },
+    {
+        "content": "<p>If we disable PAC in the CI, we should file an issue to re-enable it at some point in the future, as I can imagine a future where it'll be common on Linux too and we want to make sure it's tested</p>",
+        "id": 249281444,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1628796503
+    },
+    {
+        "content": "<p>hm true. This isn't super easy to align though I think b/c it's buried in the rest of the encoding of the FDE which doesn't have lots of room for padding I think. I'll see if I can find \"the leb\" though perhaps</p>",
+        "id": 249281714,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628796665
+    },
+    {
+        "content": "<p>I opted to just use a different CPU in qemu for now, I couldn't actually figure out how to pad things easily such that the expressions always showed up on 2-byte aligned boundaries</p>",
+        "id": 249287383,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1628799438
+    },
+    {
+        "content": "<p>Just to note, I'm not sure what microarchitecture you're running on but, Arm haven't yet released a core with pointer authentication - they will come when the Armv9 cores arrive. I was under the impression that nobody had a Linux CPU supporting it. The reference manual also doesn't state anything about it being a NOP if unsupported (it's not a hint) so I think we'd want to ensure it's not generated if not supported! Have you raised a bug against libgcc? I will let the internal GCC people know here.</p>",
+        "id": 249562911,
+        "sender_full_name": "Sam Parker",
+        "timestamp": 1629103667
+    },
+    {
+        "content": "<p>Oh the failure was only happening in QEMU, which may be doing pointer auth stuff by default or something like that? (it failed with <code>-cpu max</code>, but I don't know what that actually corresponds to). Otherwise though I haven't raised the bug with libgcc, I'm relatively certain this is a bug there but I'm also uncertain enough about all this that I'm not sure I'd personally be so comfortable raising an issue there.</p>",
+        "id": 249600494,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629126236
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> I am a bit late to the party, but I intend to work on adding proper pointer authentication support to Cranelift and Wasmtime soon, so this is of interest to me - indeed, when I did the initial brainstorming of the necessary changes, unwinding seemed to be the main challenge (modifying the function prologues and epilogues should be pretty straightforward). I intend to start with posting a RFC before proceeding with any patches.</p>",
+        "id": 249610556,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629130806
+    },
+    {
+        "content": "<p>oh nice! TBH though I suspect unwinding will \"just work\" if we do pointer authentication stuff in each jit function, the unwinding bits so far have only been complicated insofar that we've had to tell the unwinder to ignore auth bits (and libgcc here isn't really reading our request for ignoring)</p>",
+        "id": 249610662,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629130873
+    },
+    {
+        "content": "<p>To be honest, I am not up to speed on DWARF and the finer details of how unwinding works, but I am working on it, and I am using <a href=\"https://github.com/bytecodealliance/wasmtime/pull/2960\">PR #2960</a> as a stepping stone.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/2960\" style=\"background-image: url(https://opengraph.githubassets.com/d89ef31bb0cd9176749f681d778fc04c90db876199855868d474b1fafc366837/bytecodealliance/wasmtime/pull/2960)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/2960\" title=\"Cranelift AArch64: Simplify leaf functions that do not use the stack by akirilov-arm · Pull Request #2960 · bytecodealliance/wasmtime\">Cranelift AArch64: Simplify leaf functions that do not use the stack by akirilov-arm · Pull Request #2960 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Leaf functions that do not use the stack (e.g. do not clobber any callee-saved registers) do not need a frame record; this has been discussed in issue #1148. I am not familiar with the ABIs of othe...</div></div></div>",
+        "id": 249611144,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629131120
+    },
+    {
+        "content": "<p>I'm happy to help out where I can</p>",
+        "id": 249611654,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629131373
+    },
+    {
+        "content": "<p>I've done enough debugging at this point I can probably know at least the basics or help with further debugging</p>",
+        "id": 249611687,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629131390
+    },
+    {
+        "content": "<p>tbh unwinding issues are 90% of the time \"holy cow this is nigh impossible to debug and it's blind trust between the compiler and the unwinder\"</p>",
+        "id": 249611760,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629131407
+    },
+    {
+        "content": "<p>the actual bits and pieces are all bite-sized but you nothing is tested until the whole system is smooshed together which makes it much harder to see what's happening</p>",
+        "id": 249611815,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629131437
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"300050\">@Anton Kirilov</span> I'm happy to help as well -- some distance now from having written the original aarch64 ABI code and unwinding but I'm sure the right neurons are still up here somewhere</p>",
+        "id": 249611927,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1629131495
+    },
+    {
+        "content": "<p>As for reporting the bug in libgcc - I could check with one of the GCC maintainers that are at Arm if that would be helpful (once I have a good enough understanding of the issue as well).</p>",
+        "id": 249611950,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629131506
+    },
+    {
+        "content": "<p>As for QEMU's <code>-cpu max</code> option - that should enable support for all optional features of the Arm architecture that have been implemented in QEMU.</p>",
+        "id": 249612333,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629131668
+    },
+    {
+        "content": "<p>As <span class=\"user-mention\" data-user-id=\"421408\">@Sam Parker</span> mentioned, right now there is no physical CPU core that provides the same functionality.</p>",
+        "id": 249612442,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629131722
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> I believe that the bare-metal server you are using is based on the Ampere eMAG, right? If that is the case, it supports just the base 64-bit Arm architecture, if I am not mistaken.</p>",
+        "id": 249612697,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629131838
+    },
+    {
+        "content": "<p>uh... do you have a command for how I can check?</p>",
+        "id": 249612758,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629131874
+    },
+    {
+        "content": "<p><code>lscpu</code>, I suppose?</p>",
+        "id": 249612826,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629131895
+    },
+    {
+        "content": "<p>that yields:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">Architecture</span>:        <span class=\"nc\">aarch64</span><span class=\"w\"></span>\n<span class=\"n\">Byte</span><span class=\"w\"> </span><span class=\"n\">Order</span>:          <span class=\"nc\">Little</span><span class=\"w\"> </span><span class=\"n\">Endian</span><span class=\"w\"></span>\n<span class=\"n\">CPU</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span>:              <span class=\"mi\">80</span><span class=\"w\"></span>\n<span class=\"n\">On</span><span class=\"o\">-</span><span class=\"n\">line</span><span class=\"w\"> </span><span class=\"n\">CPU</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">list</span>: <span class=\"mi\">0</span><span class=\"o\">-</span><span class=\"mi\">79</span><span class=\"w\"></span>\n<span class=\"n\">Thread</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">per</span><span class=\"w\"> </span><span class=\"n\">core</span>:  <span class=\"mi\">1</span><span class=\"w\"></span>\n<span class=\"n\">Core</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">per</span><span class=\"w\"> </span><span class=\"n\">socket</span>:  <span class=\"mi\">80</span><span class=\"w\"></span>\n<span class=\"n\">Socket</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span>:           <span class=\"mi\">1</span><span class=\"w\"></span>\n<span class=\"n\">NUMA</span><span class=\"w\"> </span><span class=\"n\">node</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span>:        <span class=\"mi\">1</span><span class=\"w\"></span>\n<span class=\"n\">Vendor</span><span class=\"w\"> </span><span class=\"n\">ID</span>:           <span class=\"nc\">ARM</span><span class=\"w\"></span>\n<span class=\"n\">Model</span>:               <span class=\"mi\">1</span><span class=\"w\"></span>\n<span class=\"n\">Stepping</span>:            <span class=\"nc\">r3p1</span><span class=\"w\"></span>\n<span class=\"n\">CPU</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"w\"> </span><span class=\"n\">MHz</span>:         <span class=\"mf\">3000.0000</span><span class=\"w\"></span>\n<span class=\"n\">CPU</span><span class=\"w\"> </span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"n\">MHz</span>:         <span class=\"mf\">1000.0000</span><span class=\"w\"></span>\n<span class=\"n\">BogoMIPS</span>:            <span class=\"mf\">50.00</span><span class=\"w\"></span>\n<span class=\"n\">L1d</span><span class=\"w\"> </span><span class=\"n\">cache</span>:           <span class=\"mi\">64</span><span class=\"n\">K</span><span class=\"w\"></span>\n<span class=\"n\">L1i</span><span class=\"w\"> </span><span class=\"n\">cache</span>:           <span class=\"mi\">64</span><span class=\"n\">K</span><span class=\"w\"></span>\n<span class=\"n\">L2</span><span class=\"w\"> </span><span class=\"n\">cache</span>:            <span class=\"mi\">1024</span><span class=\"n\">K</span><span class=\"w\"></span>\n<span class=\"n\">NUMA</span><span class=\"w\"> </span><span class=\"n\">node0</span><span class=\"w\"> </span><span class=\"n\">CPU</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span>:   <span class=\"mi\">0</span><span class=\"o\">-</span><span class=\"mi\">79</span><span class=\"w\"></span>\n<span class=\"n\">Flags</span>:               <span class=\"nc\">fp</span><span class=\"w\"> </span><span class=\"n\">asimd</span><span class=\"w\"> </span><span class=\"n\">evtstrm</span><span class=\"w\"> </span><span class=\"n\">aes</span><span class=\"w\"> </span><span class=\"n\">pmull</span><span class=\"w\"> </span><span class=\"n\">sha1</span><span class=\"w\"> </span><span class=\"n\">sha2</span><span class=\"w\"> </span><span class=\"n\">crc32</span><span class=\"w\"> </span><span class=\"n\">atomics</span><span class=\"w\"> </span><span class=\"n\">fphp</span><span class=\"w\"> </span><span class=\"n\">asimdhp</span><span class=\"w\"> </span><span class=\"n\">cpuid</span><span class=\"w\"> </span><span class=\"n\">asimdrdm</span><span class=\"w\"> </span><span class=\"n\">lrcpc</span><span class=\"w\"> </span><span class=\"n\">dcpop</span><span class=\"w\"> </span><span class=\"n\">asimddp</span><span class=\"w\"> </span><span class=\"n\">ssbs</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 249612921,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629131958
+    },
+    {
+        "content": "<p>not that I know what to do with this information</p>",
+        "id": 249612958,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629131976
+    },
+    {
+        "content": "<p>Ah, that's not the Ampere eMAG. Probably an Ampere Altra because I can't think of any other server CPU with 80 cores that uses an Arm core.</p>",
+        "id": 249613172,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629132067
+    },
+    {
+        "content": "<p>Anyway, there is no server CPU on the markert right now that supports pointer authentication.</p>",
+        "id": 249613312,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629132125
+    },
+    {
+        "content": "<p>Indeed, it's an Altra</p>",
+        "id": 249613314,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1629132126
+    },
+    {
+        "content": "<p>(we recently upgraded to this from the eMAG)</p>",
+        "id": 249613363,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1629132150
+    },
+    {
+        "content": "<p>Nice, so this provides a good test environment for the atomic instructions.</p>",
+        "id": 249613448,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629132193
+    },
+    {
+        "content": "<p>So, Arm's approach has been to ensure that there is support for the architectural extensions in the most critical software components way before there is actual hardware on the market with the same support.</p>",
+        "id": 249613792,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629132361
+    },
+    {
+        "content": "<p>Pointer authentication probably has the highest chance of breaking something, but QEMU supports memory tagging and the Scalable Vector Extension as well, for example (and they are enabled with <code>-cpu max</code>).</p>",
+        "id": 249614002,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629132456
+    },
+    {
+        "content": "<p>Actually, memory tagging could potentially lead to breakages as well, so avoiding <code>-cpu max</code> seems to be the right call.</p>",
+        "id": 249614203,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629132536
+    },
+    {
+        "content": "<p>On the flip side, this is the only advantage of using QEMU in CI for AArch64 testing that I can think of - I already have ideas to use SVE instructions for some SIMD functionality (no, I am not talking about the Wasm flexible vectors proposal), and that would be perfectly testable because of QEMU.</p>",
+        "id": 249614656,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629132746
+    },
+    {
+        "content": "<p>FWIW we aren't proactively passing <code>-cpu max</code> to QEMU, it seems like that may just be the default?</p>",
+        "id": 249614745,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629132798
+    },
+    {
+        "content": "<p>Ah, OK, that's possible.</p>",
+        "id": 249614866,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629132846
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> I had the chance to dig a bit deeper into this, and IMHO <a href=\"https://github.com/bytecodealliance/wasmtime/blob/2da1b9d3759bdaecac41d7bb2bc738c113a563b8/cranelift/codegen/src/isa/aarch64/abi.rs#L625\">the line</a> that sets the <code>RA_SIGN_STATE</code> value is unnecessary (and removing it should fix the issue). The DWARF specification <a href=\"https://github.com/ARM-software/abi-aa/blob/2bcab1e3b22d55170c563c3c7940134089176746/aadwarf64/aadwarf64.rst#note-8\">states</a> that the value is initialized to 0 (which is what we want), and then after a signing operation (e.g. <code>PACIASP</code>) the <code>DW_CFA_AARCH64_negate_ra_state</code> operation is <a href=\"https://github.com/ARM-software/abi-aa/blob/2bcab1e3b22d55170c563c3c7940134089176746/aadwarf64/aadwarf64.rst#44call-frame-instructions-beta\">used</a> to change the value. In fact, that is <a href=\"https://godbolt.org/z/Tc6W779jv\">what LLVM does</a> when <code>-mbranch-protection=standard</code> is passed (check with <code>readelf -wf</code>).<br>\nI noticed that actually <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> added that code, so he might have some additional insight.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/2da1b9d3759bdaecac41d7bb2bc738c113a563b8/cranelift/codegen/src/isa/aarch64/abi.rs#L625\" style=\"background-image: url(https://opengraph.githubassets.com/8e0ffb37c03bab0521c3937fe1032e944afa9d0126c341ba013330fb9a722b6f/bytecodealliance/wasmtime)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/2da1b9d3759bdaecac41d7bb2bc738c113a563b8/cranelift/codegen/src/isa/aarch64/abi.rs#L625\" title=\"wasmtime/abi.rs at 2da1b9d3759bdaecac41d7bb2bc738c113a563b8 · bytecodealliance/wasmtime\">wasmtime/abi.rs at 2da1b9d3759bdaecac41d7bb2bc738c113a563b8 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - wasmtime/abi.rs at 2da1b9d3759bdaecac41d7bb2bc738c113a563b8 · bytecodealliance/wasmtime</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ARM-software/abi-aa/blob/2bcab1e3b22d55170c563c3c7940134089176746/aadwarf64/aadwarf64.rst#note-8\" style=\"background-image: url(https://opengraph.githubassets.com/4b261d286416bc3d98382e60430ca8b9cd0707b406189bbd0edccee9787ab52d/ARM-software/abi-aa)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ARM-software/abi-aa/blob/2bcab1e3b22d55170c563c3c7940134089176746/aadwarf64/aadwarf64.rst#note-8\" title=\"abi-aa/aadwarf64.rst at 2bcab1e3b22d55170c563c3c7940134089176746 · ARM-software/abi-aa\">abi-aa/aadwarf64.rst at 2bcab1e3b22d55170c563c3c7940134089176746 · ARM-software/abi-aa</a></div><div class=\"message_embed_description\">Application Binary Interface for the Arm® Architecture - abi-aa/aadwarf64.rst at 2bcab1e3b22d55170c563c3c7940134089176746 · ARM-software/abi-aa</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ARM-software/abi-aa/blob/2bcab1e3b22d55170c563c3c7940134089176746/aadwarf64/aadwarf64.rst#44call-frame-instructions-beta\" style=\"background-image: url(https://opengraph.githubassets.com/4b261d286416bc3d98382e60430ca8b9cd0707b406189bbd0edccee9787ab52d/ARM-software/abi-aa)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ARM-software/abi-aa/blob/2bcab1e3b22d55170c563c3c7940134089176746/aadwarf64/aadwarf64.rst#44call-frame-instructions-beta\" title=\"abi-aa/aadwarf64.rst at 2bcab1e3b22d55170c563c3c7940134089176746 · ARM-software/abi-aa\">abi-aa/aadwarf64.rst at 2bcab1e3b22d55170c563c3c7940134089176746 · ARM-software/abi-aa</a></div><div class=\"message_embed_description\">Application Binary Interface for the Arm® Architecture - abi-aa/aadwarf64.rst at 2bcab1e3b22d55170c563c3c7940134089176746 · ARM-software/abi-aa</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://godbolt.org/z/Tc6W779jv\" style=\"background-image: url(https://github.com/compiler-explorer/infra/blob/main/logo/favicon.png?raw=true)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://godbolt.org/z/Tc6W779jv\" title=\"Compiler Explorer - C (armv8-a clang 11.0.1)\">Compiler Explorer - C (armv8-a clang 11.0.1)</a></div><div class=\"message_embed_description\">int foo(void)\n{\n    void bar(void);\n\n    bar();\n    return 42;\n}</div></div></div>",
+        "id": 250764859,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629981641
+    },
+    {
+        "content": "<p>Now, something fishy might still be going on in <code>libgcc</code>, but at least we could avoid the immediate issue.</p>",
+        "id": 250765568,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629982009
+    },
+    {
+        "content": "<p>IIRC it was added to get compat with libunwind and Apple's implementation of arm64 unwinding, so maybe apple implemented a different default? If that's the case though it should be easy enough to have it apple-specific and avoid setting it on Linux</p>",
+        "id": 250780809,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629988170
+    },
+    {
+        "content": "<p>Thanks for looking into this though!</p>",
+        "id": 250780826,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1629988176
+    },
+    {
+        "content": "<p>Confirming that i specifically did hit some pointer auth failures on the Mac M1, and i had to turn it off to make it work.</p>\n<p>As Alex says, it's a lot of wild-guessing -- i was happy enough to stumble into a talk where Apple engineers talked about the pointer auth instructions, where they demo'd the code sequence that checked them, ... which was what i seeing failing in LLDB.</p>",
+        "id": 250788351,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1629990773
+    },
+    {
+        "content": "<p>OK, so this makes me wonder though - do you know how this works with unwinding right before the signing operation? AFAIK there are no instructions that call a subroutine and then leave a signed address in the return address register, i.e. <code>LR</code>/<code>X30</code>. The signing operation must happen with an explicit instruction such as <code>PACIASP</code>, which means that there is a small time window after a subroutine starts executing, but before the signing instruction completes, where the return address is in a clear form. If the default is that return addresses are signed, then the unwinder will be operating under the wrong assumption during that time frame. Now, I am not familiar with the details of Apple's ABI, but it sounds like a problem.</p>",
+        "id": 250795774,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629993600
+    },
+    {
+        "content": "<p>It's also wasteful in case of leaf functions that don't save <code>LR</code> on the stack.</p>",
+        "id": 250797104,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629994062
+    },
+    {
+        "content": "<p>Otherwise I agree that there is a simple fix - execute the code that sets the <code>RA_SIGN_STATE</code> value only if the current calling convention is <code>CallConv::AppleAarch64</code> or <code>CallConv::WasmtimeAppleAarch64</code>; don't do anything otherwise (until we support pointer authentication properly, which I plan to tackle).</p>",
+        "id": 250797983,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1629994400
+    },
+    {
+        "content": "<blockquote>\n<p>execute the code that sets the RA_SIGN_STATE value only if the current calling convention is CallConv::AppleAarch64 or CallConv::WasmtimeAppleAarch64</p>\n</blockquote>\n<p>Is this not what we're currently doing? or is this predicated or all aarch64? In that case, yeah, that sounds like the right fix.</p>",
+        "id": 251530232,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1630489178
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> Sorry, I was away on vacation, so I just read your message - the <code>RA_SIGN_STATE</code> value is set unconditionally on AArch64.</p>",
+        "id": 252148561,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1630919721
+    },
+    {
+        "content": "<p>Ah right, my bad. Then yes, we could enable it only for aarch64-darwin in the time being if that helps, and disable it entirely when we get pointer authentication.</p>",
+        "id": 252170012,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1630932219
+    },
+    {
+        "content": "<p>A bit of an update - we have <a href=\"https://github.com/bytecodealliance/rfcs/pull/17\">a RFC proposal</a> now that presents a couple of control flow integrity enhancements using pointer authentication. I have also <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3606\">published</a> a prototype implementation of the proposal.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/rfcs/pull/17\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/de54519c99e6580ea23e821a3b8697313e460b50\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f313834623666623536363961373836346430346632316637303764656262303265623239363564386364663963376131366365313530663539306132346233372f62797465636f6465616c6c69616e63652f726663732f70756c6c2f3137)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/rfcs/pull/17\" title=\"RFC: CFI Improvements with PAuth and BTI by akirilov-arm · Pull Request #17 · bytecodealliance/rfcs\">RFC: CFI Improvements with PAuth and BTI by akirilov-arm · Pull Request #17 · bytecodealliance/rfcs</a></div><div class=\"message_embed_description\">This RFC proposes to improve control flow integrity for compiled WebAssembly code by utilizing two technologies from the Arm instruction set architecture - Pointer Authentication and Branch Target ...</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/3606\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/0cccd3a21e483ded7a4cc516130ae6451f334147\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f626430626232353036616538646466663937353233343462383031313034643832613830643634323838333664393362343538306330633038323430633135342f62797465636f6465616c6c69616e63652f7761736d74696d652f70756c6c2f33363036)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/3606\" title=\"[RFC] Initial back-edge CFI implementation by akirilov-arm · Pull Request #3606 · bytecodealliance/wasmtime\">[RFC] Initial back-edge CFI implementation by akirilov-arm · Pull Request #3606 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This pull request is meant to illustrate the RFC proposal to improve control flow integrity for compiled WebAssembly code by using the Pointer Authentication extension to the Arm instruction set ar...</div></div></div>",
+        "id": 265192137,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1639676793
+    },
+    {
+        "content": "<p>Really excited to see this  moving forward; thanks Anton!</p>",
+        "id": 265196073,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1639678301
+    },
+    {
+        "content": "<p>Another update - I have also published a <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3693\">prototype</a> of the forward-edge CFI implementation, and I have added the fiber changes to the original prototype. I also discussed the issue that <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> reported originally with one of Arm's GCC developers. The problem has been acknowledged, but at the moment it is not clear what the proper way forward is; for instance, the DWARF spec might be worded too liberally, and the intention might be that the <code>RA_SIGN_STATE</code> pseudo-register would be manipulated in much more specific ways.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/3693\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/3d075f23f0fabb259016394d729238549be2b507\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f656464326366636462616435316130313534663361636139666363336262323130653863373731626434353831613030346331633664393930613538396164342f62797465636f6465616c6c69616e63652f7761736d74696d652f70756c6c2f33363933)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/3693\" title=\"[RFC] Initial forward-edge CFI implementation by akirilov-arm · Pull Request #3693 · bytecodealliance/wasmtime\">[RFC] Initial forward-edge CFI implementation by akirilov-arm · Pull Request #3693 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This pull request is meant to illustrate the RFC proposal to improve control flow integrity for compiled WebAssembly code by using the Branch Target Identification extension to the Arm instruction ...</div></div></div>",
+        "id": 268524823,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1642591286
+    }
+]

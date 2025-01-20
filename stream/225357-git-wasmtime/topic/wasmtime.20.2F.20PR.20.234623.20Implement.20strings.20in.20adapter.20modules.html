@@ -1,0 +1,237 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #4623 Implement strings in adapter modules · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html">wasmtime / PR #4623 Implement strings in adapter modules</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="292167833"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292167833" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292167833">(Aug 05 2022 at 15:17)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/4623">PR #4623</a> from <code>adapt-string</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit is a hefty addition to Wasmtime's support for the component<br>
+model. This implements the final remaining type (in the current type<br>
+hierarchy) unimplemented in adapter module trampolines: strings. Strings<br>
+are the most complicated type to implement in adapter trampolines<br>
+because they are highly structured chunks of data in memory (according<br>
+to specific encodings). Additionally each lift/lower operation can<br>
+choose its own encoding for strings meaning that Wasmtime, the host, may<br>
+have to convert between any pairwise ordering of string encodings.</p>
+<p>The <code>CanonicalABI.md</code> in the component-model repo in general specifies<br>
+all the fiddly bits of string encoding so there's not a ton of wiggle<br>
+room for Wasmtime to get creative. This PR largely "just" implements<br>
+that. The high-level architecture of this implementation is:</p>
+<ul>
+<li>
+<p>Fused adapters are first identified to determine src/dst string<br>
+  encodings. This statically fixes what transcoding operation is being<br>
+  performed.</p>
+</li>
+<li>
+<p>The generated adapter will be responsible for managing calls to<br>
+<code>realloc</code> and performing bounds checks. The adapter itself does not<br>
+  perform memory copies or validation of string contents, however.<br>
+  Instead each transcoding operation is modeled as an imported function<br>
+  into the adapter module.  This means that the adapter module<br>
+  dynamically, during compile time, determines what string transcoders<br>
+  are needed. Note that an imported transcoder is not only parameterized<br>
+  over the transcoding operation but additionally which memory is the<br>
+  source and which is the destination.</p>
+</li>
+<li>
+<p>The imported core wasm functions are modeled as a new<br>
+<code>CoreDef::Transcoder</code> structure. These transcoders end up being small<br>
+  Cranelift-compiled trampolines. The Cranelift-compiled trampoline will<br>
+  load the actual base pointer of memory and add it to the relative<br>
+  pointers passed as function arguments. This trampoline then calls a<br>
+  transcoder "libcall" which enters Rust-defined functions for actual<br>
+  transcoding operations.</p>
+</li>
+<li>
+<p>Each possible transcoding operation is implemented in Rust with a<br>
+  unique name and a unique signature depending on the needs of the<br>
+  transcoder. I've tried to document inline what each transcoder does.</p>
+</li>
+</ul>
+<p>This means that the <code>Module::translate_string</code> in adapter modules is by<br>
+far the largest translation method. The main reason for this is due to<br>
+the management around calling the imported transcoder functions in the<br>
+face of validating string pointer/lengths and performing the dance of<br>
+<code>realloc</code>-vs-transcode at the right time. I've tried to ensure that each<br>
+individual case in transcoding is documented well enough to understand<br>
+what's going on as well.</p>
+<p>Additionally in this PR is a full implementation in the host for the<br>
+<code>latin1+utf16</code> encoding which means that both lifting and lowering host<br>
+strings now works with this encoding.</p>
+<p>Currently the implementation of each transcoder function is likely far<br>
+from optimal. Where possible I've leaned on the standard library itself<br>
+and for latin1-related things I'm leaning on the <code>encoding_rs</code> crate. I<br>
+initially tried to implement everything with <code>encoding_rs</code> but was<br>
+unable to uniformly do so easily. For now I settled on trying to get a<br>
+known-correct (even in the face of endianness) implementation for all of<br>
+these transcoders. If an when performance becomes an issue it should be<br>
+possible to implement more optimized versions of each of these<br>
+transcoding operations.</p>
+<p>Testing this commit has been somewhat difficult and my general plan,<br>
+like with the <code>(list T)</code> type, is to rely heavily on fuzzing to cover<br>
+the various cases here. In this PR though I've added a simple test that<br>
+pushes some statically known strings through all the pairs of encodings<br>
+between source and destination. I've attempted to pick "interesting"<br>
+strings that one way or another stress the various paths in each<br>
+transcoding operation to ideally get full branch coverage there.<br>
+Additionally a suite of "negative" tests have also been added to ensure<br>
+that validity of encoding is actually checked.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+<p>Closes #4309</p>
+</blockquote>
+
+
+
+<a name="292167834"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292167834" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292167834">(Aug 05 2022 at 15:17)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/4623">PR #4623</a>.</p>
+
+
+
+<a name="292170063"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292170063" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292170063">(Aug 05 2022 at 15:33)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4623">PR #4623</a> from <code>adapt-string</code> to <code>main</code>.</p>
+
+
+
+<a name="292184399"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292184399" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292184399">(Aug 05 2022 at 17:26)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4623">PR #4623</a> from <code>adapt-string</code> to <code>main</code>.</p>
+
+
+
+<a name="292189256"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292189256" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292189256">(Aug 05 2022 at 18:09)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#discussion_r939045458">PR review comment</a>:</p>
+<blockquote>
+<p>This isn't <em>us</em> being optimistic tho, right? This optimism is prescribed by the spec, correct?</p>
+</blockquote>
+
+
+
+<a name="292189257"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292189257" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292189257">(Aug 05 2022 at 18:09)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#pullrequestreview-1063690281">PR review</a>.</p>
+
+
+
+<a name="292189258"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292189258" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292189258">(Aug 05 2022 at 18:09)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#pullrequestreview-1063690281">PR review</a>.</p>
+
+
+
+<a name="292189259"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292189259" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292189259">(Aug 05 2022 at 18:09)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#discussion_r939044514">PR review comment</a>:</p>
+<blockquote>
+<p>I feel like this method is already super large, so adding a bunch of large closures into it is not helping. How much stuff is this really closing over? Can it and the other closures be a separate method?</p>
+</blockquote>
+
+
+
+<a name="292189260"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292189260" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292189260">(Aug 05 2022 at 18:09)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#discussion_r939047482">PR review comment</a>:</p>
+<blockquote>
+<p>I thought that we settled on bounds checks regardless if the string is empty or not?</p>
+</blockquote>
+
+
+
+<a name="292417383"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292417383" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292417383">(Aug 08 2022 at 15:29)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4623">PR #4623</a> from <code>adapt-string</code> to <code>main</code>.</p>
+
+
+
+<a name="292417391"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292417391" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292417391">(Aug 08 2022 at 15:29)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#pullrequestreview-1065379388">PR review</a>.</p>
+
+
+
+<a name="292417393"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292417393" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292417393">(Aug 08 2022 at 15:29)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#discussion_r940377173">PR review comment</a>:</p>
+<blockquote>
+<p>Sure, I've split out everything now.</p>
+</blockquote>
+
+
+
+<a name="292417399"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292417399" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292417399">(Aug 08 2022 at 15:29)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#pullrequestreview-1065379493">PR review</a>.</p>
+
+
+
+<a name="292417400"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292417400" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292417400">(Aug 08 2022 at 15:29)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#discussion_r940377247">PR review comment</a>:</p>
+<blockquote>
+<p>Indeed!</p>
+</blockquote>
+
+
+
+<a name="292417503"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292417503" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292417503">(Aug 08 2022 at 15:30)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#pullrequestreview-1065380290">PR review</a>.</p>
+
+
+
+<a name="292417505"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292417505" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292417505">(Aug 08 2022 at 15:30)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/4623#discussion_r940377765">PR review comment</a>:</p>
+<blockquote>
+<p>This was written before the spec changed, and I was originally going to land this first and then fixup all our handling of zero-length arrays and things but I went ahead and updated this.</p>
+</blockquote>
+
+
+
+<a name="292417517"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292417517" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292417517">(Aug 08 2022 at 15:30)</a>:</h4>
+<p>alexcrichton has enabled auto merge for <a href="https://github.com/bytecodealliance/wasmtime/pull/4623">PR #4623</a>.</p>
+
+
+
+<a name="292421839"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234623%20Implement%20strings%20in%20adapter%20modules/near/292421839" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234623.20Implement.20strings.20in.20adapter.20modules.html#292421839">(Aug 08 2022 at 16:01)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/4623">PR #4623</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

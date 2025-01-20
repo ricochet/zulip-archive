@@ -1,0 +1,1267 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #2366 MachInst lowering logic: allow effect... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html">wasmtime / PR #2366 MachInst lowering logic: allow effect...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="215680792"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/215680792" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#215680792">(Nov 05 2020 at 08:15)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="215680793"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/215680793" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#215680793">(Nov 05 2020 at 08:15)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/julian-seward1">julian-seward1</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a>.</p>
+
+
+
+<a name="215680879"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/215680879" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#215680879">(Nov 05 2020 at 08:16)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2366 </p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="215680905"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/215680905" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#215680905">(Nov 05 2020 at 08:16)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="215919929"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/215919929" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#215919929">(Nov 07 2020 at 00:14)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="215920044"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/215920044" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#215920044">(Nov 07 2020 at 00:17)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="215920557"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/215920557" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#215920557">(Nov 07 2020 at 00:25)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="216125123"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216125123" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216125123">(Nov 09 2020 at 18:30)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="216161835"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216161835" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216161835">(Nov 10 2020 at 00:54)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="216165191"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216165191" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216165191">(Nov 10 2020 at 01:55)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="216296337"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216296337" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216296337">(Nov 11 2020 at 01:06)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="216414027"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216414027" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216414027">(Nov 12 2020 at 00:26)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> and <a href="https://github.com/julian-seward1">julian-seward1</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a>.</p>
+
+
+
+<a name="216915913"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216915913" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216915913">(Nov 16 2020 at 18:59)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#pullrequestreview-531587169">PR Review</a>.</p>
+
+
+
+<a name="216915914"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216915914" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216915914">(Nov 16 2020 at 18:59)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#pullrequestreview-531587169">PR Review</a>.</p>
+
+
+
+<a name="216915915"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216915915" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216915915">(Nov 16 2020 at 18:59)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524480577">PR Review Comment</a>:</p>
+<blockquote>
+<p>I feel like this could use a new name now: <code>NonRegInput</code>?</p>
+</blockquote>
+
+
+
+<a name="216915916"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216915916" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216915916">(Nov 16 2020 at 18:59)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524489798">PR Review Comment</a>:</p>
+<blockquote>
+<p>nitpick: it seems worth pulling this out into an <code>is_inst_sunk</code> helper method to clarify the meaning of this code without being forced to look at the details of the data structures and representation</p>
+</blockquote>
+
+
+
+<a name="216915917"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216915917" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216915917">(Nov 16 2020 at 18:59)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524478661">PR Review Comment</a>:</p>
+<blockquote>
+<p>doc nitpick for clarity:</p>
+<div class="codehilite" data-code-language="suggestion"><pre><span></span><code>    /// Put the `idx`th input into a register and return the assigned register.
+</code></pre></div>
+</blockquote>
+
+
+
+<a name="216915918"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216915918" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216915918">(Nov 16 2020 at 18:59)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524495075">PR Review Comment</a>:</p>
+<blockquote>
+<p>Can <code>inst</code> and <code>constant</code> ever <em>both</em> be <code>Some</code>? If not, then I think it makes more sense to define this as an <code>enum NonRegInput</code> and then methods that create this would return <code>Option&lt;NonRegInput&gt;</code> and use <code>None</code> instead of returning a struct that has empty components.</p>
+</blockquote>
+
+
+
+<a name="216915919"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216915919" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216915919">(Nov 16 2020 at 18:59)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524490281">PR Review Comment</a>:</p>
+<blockquote>
+<p>ditto for this bit. maybe we could have a <code>is_result_needed</code> helper</p>
+</blockquote>
+
+
+
+<a name="216915920"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216915920" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216915920">(Nov 16 2020 at 18:59)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524499043">PR Review Comment</a>:</p>
+<blockquote>
+<p>Returning <code>Option</code> would also make it so the naming could be a little more natural here, since the "maybe" would become redundant, and this could be named <code>fn get_input_as_non_reg(...) -&gt; Option&lt;NonRegInput&gt; {...}</code> which I think reads a lot better.</p>
+</blockquote>
+
+
+
+<a name="216944029"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944029" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944029">(Nov 16 2020 at 22:50)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#pullrequestreview-531852854">PR Review</a>.</p>
+
+
+
+<a name="216944030"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944030" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944030">(Nov 16 2020 at 22:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524703434">PR Review Comment</a>:</p>
+<blockquote>
+<p>The <code>inst</code> and <code>constant</code> fields can actually both be <code>Some</code>, and in fact some of the matching code relies on this -- it matches on the opcode implied by <code>inst</code> where one of the options is <code>Iconst</code>. In other words when we know a constant value for the input it's because we know its source instruction, and that source instruction is iconst/fconst/etc. Otherwise I agree this would have been a good simplification!</p>
+</blockquote>
+
+
+
+<a name="216944079"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944079" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944079">(Nov 16 2020 at 22:51)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#pullrequestreview-531854617">PR Review</a>.</p>
+
+
+
+<a name="216944080"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944080" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944080">(Nov 16 2020 at 22:51)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524704342">PR Review Comment</a>:</p>
+<blockquote>
+<p>I decided to remove <code>maybe_</code> as the returned struct is composed of <code>Option</code>s, so it's semantically pretty clear what's going on in any case.</p>
+</blockquote>
+
+
+
+<a name="216944110"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944110" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944110">(Nov 16 2020 at 22:51)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="216944116"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944116" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944116">(Nov 16 2020 at 22:51)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#pullrequestreview-531855964">PR Review</a>.</p>
+
+
+
+<a name="216944117"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944117" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944117">(Nov 16 2020 at 22:51)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524705050">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done.</p>
+</blockquote>
+
+
+
+<a name="216944129"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944129" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944129">(Nov 16 2020 at 22:51)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524705200">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done, thanks!</p>
+</blockquote>
+
+
+
+<a name="216944130"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944130" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944130">(Nov 16 2020 at 22:51)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#pullrequestreview-531856237">PR Review</a>.</p>
+
+
+
+<a name="216944176"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944176" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944176">(Nov 16 2020 at 22:52)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#pullrequestreview-531856607">PR Review</a>.</p>
+
+
+
+<a name="216944177"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944177" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944177">(Nov 16 2020 at 22:52)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524705379">PR Review Comment</a>:</p>
+<blockquote>
+<p>I like that name better, agreed.</p>
+</blockquote>
+
+
+
+<a name="216944228"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944228" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944228">(Nov 16 2020 at 22:52)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="216944266"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944266" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944266">(Nov 16 2020 at 22:53)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#pullrequestreview-531859227">PR Review</a>.</p>
+
+
+
+<a name="216944267"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944267" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944267">(Nov 16 2020 at 22:53)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/2366#discussion_r524706733">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done.</p>
+</blockquote>
+
+
+
+<a name="216944293"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216944293" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216944293">(Nov 16 2020 at 22:53)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a> from <code>load-isel</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR updates the "coloring" scheme that accounts for side-effects in<br>
+the MachInst lowering logic. As a result, the new backends will now be<br>
+able to merge effectful operations (such as memory loads) <em>into</em> other<br>
+operations; previously, only the other way (pure ops merged into<br>
+effectful ops) was possible. This will allow, for example, a load+ALU-op<br>
+combination, as is common on x86. It should even allow a load + ALU-op +<br>
+store sequence to merge into one lowered instruction.</p>
+<p>The scheme arose from many fruitful discussions with @julian-seward1<br>
+(thanks!); significant credit is due to him for the insights here.</p>
+<p>The first insight is that given the right basic conditions, i.e.  that<br>
+the root instruction is the only use of an effectful instruction's<br>
+result, all we need is that the "color" of the effectful instruction is<br>
+<em>one less</em> than the color of the current instruction. It's easier to<br>
+think about colors on the program points between instructions: if the<br>
+color coming <em>out</em> of the first (effectful def) instruction and <em>in</em> to<br>
+the second (effectful or effect-free use) instruction are the same, then<br>
+they can merge. Basically the color denotes a version of global state;<br>
+if the same, then no other effectful ops happened in the meantime.</p>
+<p>The second insight is that we can keep state as we scan, tracking the<br>
+"current color", and <em>update</em> this when we sink (merge) an op. Hence<br>
+when we sink a load into another op, we effectively <em>re-color</em> every<br>
+instruction it moved over; this may allow further sinks.</p>
+<p>Consider the example (and assume that we consider loads effectful in<br>
+order to conservatively ensure a strong memory model; otherwise, replace<br>
+with other effectful value-producing insts):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">  </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">x</span><span class="w"></span>
+<span class="w">  </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">y</span><span class="w"></span>
+<span class="w">  </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">add</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+</code></pre></div>
+<p>Scanning from bottom to top, we first see the add producing <code>v3</code> and we<br>
+can sink the load producing <code>v1</code> into it, producing a load + ALU-op<br>
+machine instruction. This is legal because <code>v1</code> moves over only <code>v2</code>,<br>
+which is a pure instruction. Consider, though, <code>v2</code>: under a simple<br>
+scheme that has no other context, <code>v0</code> could not sink to <code>v2</code> because it<br>
+would move over <code>v1</code>, another load. But because we already sunk <code>v1</code><br>
+down to <code>v3</code>, we are free to sink <code>v0</code> to <code>v2</code>; the update of the<br>
+"current color" during the scan allows this.</p>
+<p>This PR also cleans up the <code>LowerCtx</code> interface a bit at the same time:<br>
+whereas previously it always gave some subset of (constant, mergeable<br>
+inst, register) directly from <code>LowerCtx::get_input()</code>, it now returns<br>
+zero or more of (constant, mergable inst) from<br>
+<code>LowerCtx::maybe_get_input_as_source_or_const()</code>, and returns the<br>
+register only from <code>LowerCtx::put_input_in_reg()</code>. This removes the need<br>
+to explicitly denote uses of the register, so it's a little safer.</p>
+<p>Note that this PR does not actually make use of the new ability to merge<br>
+loads into other ops; that will come in future PRs, especially to<br>
+optimize the <code>x64</code> backend by using direct-memory operands.</p>
+<p>Testing: existing filetests ensure the DCE-while-lowering and existing<br>
+merging pattern-matches continue to work; merging of effectful ops<br>
+will be verified in a subsequent PR with load+op pattern-matching.</p>
+<p>Fixes #2340.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="216947808"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232366%20MachInst%20lowering%20logic%3A%20allow%20effect.../near/216947808" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232366.20MachInst.20lowering.20logic.3A.20allow.20effect.2E.2E.2E.html#216947808">(Nov 16 2020 at 23:31)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/2366">PR #2366</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

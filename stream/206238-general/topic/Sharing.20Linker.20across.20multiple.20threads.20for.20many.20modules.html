@@ -1,0 +1,117 @@
+<html>
+<head><meta charset="utf-8"><title>Sharing Linker across multiple threads for many modules · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html">Sharing Linker across multiple threads for many modules</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="418277934"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418277934" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Groves <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418277934">(Jan 26 2024 at 13:45)</a>:</h4>
+<p>Hi! Currently I'm compiling a lot of tiny wasm modules across multiple threads. They all use the same <code>Store</code> type, so I was looking at the optimization mentioned in the <code>Linker</code> documentation that mentions sharing one <code>Linker</code> between modules. The problem I'm noticing is that putting a <code>Linker</code> behind a <code>Mutex</code> (or <code>RwLock</code>, etc.) actually seems to regress performance a bit because of the thread contention, so I was thinking of having one <code>Linker</code> per thread or something.</p>
+<p>The reason I need a mutable <code>Linker</code> today is because each module may register some new functions that I haven't encountered before, so it might call e.g., <code>linker.func_wrap</code> to lazily add those host functions. I could try to do all of these upfront to build a list of all possible functions to register, but the lazy <code>func_wrap</code>s are really convenient so I was hoping to avoid a separate pass.</p>
+<p>Has anyone done anything similar and could recommend a strategy here? Maybe there's a way to avoid putting the <code>Linker</code> behind a <code>Mutex</code>?</p>
+
+
+
+<a name="418286109"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418286109" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418286109">(Jan 26 2024 at 14:27)</a>:</h4>
+<p>You can just clone the <code>Linker</code>,  which does copy symbols internally but avoids reprocessing e.g. <code>add_to_linker</code> calls</p>
+
+
+
+<a name="418288124"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418288124" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Groves <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418288124">(Jan 26 2024 at 14:38)</a>:</h4>
+<p>Interesting, that sounds like it could be a good path to try too. I'm currently testing out finer grained locking now too (e.g., right before I use <code>func_wrap</code>) in case I might reduce thread contention in general (the trade-off being more locking/unlocking). A lot of the modules are similar and don't need a lot of <code>func_wrap</code>s so maybe this will help.</p>
+
+
+
+<a name="418293829"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418293829" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418293829">(Jan 26 2024 at 15:08)</a>:</h4>
+<p>Actually, looking at the code it appears that <code>Linker</code> uses <code>Arc&lt;str&gt;</code> internally, so you aren't even copying all that much. I doubt you'll beat copying with lock contention.</p>
+
+
+
+<a name="418294177"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418294177" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Groves <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418294177">(Jan 26 2024 at 15:10)</a>:</h4>
+<p>Yeah definitely possible. I would be concerned about some of the types in there though, e.g. the hashmaps on <code>Linker</code> might add up quickly for thousands of modules</p>
+
+
+
+<a name="418321175"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418321175" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418321175">(Jan 26 2024 at 17:36)</a>:</h4>
+<p>another way you could reduce contention, if it applies to your use case, is to link a module into an InstancePre once, and then clone the InstancePre to instantiate on many threads</p>
+
+
+
+<a name="418321232"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418321232" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418321232">(Jan 26 2024 at 17:36)</a>:</h4>
+<p>InstancePre is basically amortizing out the linker resolution for modules that get instantiated with the same linker many times</p>
+
+
+
+<a name="418321752"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418321752" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418321752">(Jan 26 2024 at 17:39)</a>:</h4>
+<p>I apologize for the name InstancePre, we couldnt come up with a better word for a thing that is halfway between a module and an instance</p>
+
+
+
+<a name="418321849"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418321849" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pat Hickey <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418321849">(Jan 26 2024 at 17:40)</a>:</h4>
+<p>its got all the imports resolved, it just needs a store for the mutable state</p>
+
+
+
+<a name="418323026"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418323026" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418323026">(Jan 26 2024 at 17:46)</a>:</h4>
+<p>Some other possible help I can offer:</p>
+<blockquote>
+<p>They all use the same Store type</p>
+</blockquote>
+<p>One thing to be aware of with this is that if you never destroy a <code>Store</code> it keeps all wasm instances alive so you'd never deallocate anything that's short lived. <code>Store</code>, however, is intended to be pretty cheap to create/destroy, but if that's a problem for you let us know and we can help investigate perf.</p>
+<hr>
+<p>Also one idea we talked about a long time ago was the idea of hierarchical linkers, where you have a global linker with base functionality and then you can cheaply extend that with further linkers in per-module situations. That never materialized though, so it's not implemented today. We generally recommend having one linker for the whole program if you can with a static set of functions, but that doesn't work for use cases which need to perform instantiations with different sets of imported functions</p>
+
+
+
+<a name="418323475"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418323475" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418323475">(Jan 26 2024 at 17:49)</a>:</h4>
+<p>You could pass around an <code>Arc&lt;Linker&gt;</code> and use it to lazily init thread local clones. I wouldn't personally go that route without compelling benchmarks <span aria-label="shrug" class="emoji emoji-1f937" role="img" title="shrug">:shrug:</span></p>
+
+
+
+<a name="418324443"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418324443" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Groves <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418324443">(Jan 26 2024 at 17:54)</a>:</h4>
+<p><span class="user-mention" data-user-id="253992">@Pat Hickey</span> thanks for the suggestion! I do cache <code>InstancePre</code> where possible, but the modules can be different which is where I end up needing to use the <code>Linker</code> again (e.g., I run into a module with a function that I haven't set up yet)</p>
+
+
+
+<a name="418324870"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418324870" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Groves <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418324870">(Jan 26 2024 at 17:57)</a>:</h4>
+<p><span class="user-mention" data-user-id="253994">@Alex Crichton</span> Yeah it's just the <code>Store</code> type that is the same, but every instantiation gets its own <code>Store</code> and destroys it afterwards</p>
+
+
+
+<a name="418325581"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418325581" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Groves <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418325581">(Jan 26 2024 at 18:02)</a>:</h4>
+<p>Yeah the modules may have different sets of imported functions, although I could look through all modules to union all sets together ahead of time, it's just not very convenient to do that vs. lazily defining imported functions as modules request them</p>
+
+
+
+<a name="418328626"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418328626" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418328626">(Jan 26 2024 at 18:20)</a>:</h4>
+<p>Ah ok makes sense, and <code>RwLock&lt;Linker&lt;T&gt;&gt;</code> has too much overhead?</p>
+
+
+
+<a name="418329765"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Sharing%20Linker%20across%20multiple%20threads%20for%20many%20modules/near/418329765" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Groves <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Sharing.20Linker.20across.20multiple.20threads.20for.20many.20modules.html#418329765">(Jan 26 2024 at 18:28)</a>:</h4>
+<p><code>RwLock&lt;Linker&lt;T&gt;&gt;</code> seems to be ok. I ended up using <code>RwLock</code> with finer-grained write locking whenever I need to add import functions. The sharing one linker with <code>RwLock</code> seems to improve performance slightly (vs. creating or cloning new linkers per module) but not by very much. The <code>RwLock</code> changes might be bottlenecked by my thread contention though, so I'll work on improving that separately</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

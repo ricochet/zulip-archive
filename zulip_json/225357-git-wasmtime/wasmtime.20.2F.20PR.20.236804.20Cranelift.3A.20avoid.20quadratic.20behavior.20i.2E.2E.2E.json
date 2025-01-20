@@ -1,0 +1,98 @@
+[
+    {
+        "content": "<p>cfallin edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804\">PR #6804</a>:</p>\n<blockquote>\n<p>Currently, <code>MachBuffer</code> is used to resolve forward and backward references to labels (basic-block entry points and other branch targets) within function bodies as well as calls to functions within a whole module. It implements a single-pass algorithm that tracks \"pending fixups\" -- references to some other place -- and fills in the offsets when known, also handling upgrading ranges by emitting veneers on architectures that need that behavior.</p>\n<p>In #6798 it was reported that on aarch64, module emission is slow for a certain large module. This module ends up forcing many islands of veneers but has branches whose ranges cross those islands and need <em>not</em> be extended with a veneer yet. This case exposes quadratic behavior: the island-emission logic puts the fixup back in a list and replaces the fixup list with that leftover-fixup list after processing all fixups.</p>\n<p>This PR instead does the following:</p>\n<ul>\n<li>When an island is emitted, <em>all</em> unresolved forward references get a veneer, even if their current label kind would still be in range. This prevents fixups from hanging around arbitrarily long when they have longer range kinds (e.g., aarch64's <code>Branch26</code>) while lots of islands for shorter-range references (e.g. <code>Branch19</code>) are emitted.</li>\n<li>When a label fixup reaches its \"longest-range\" kind (<code>PCRel32</code> for branches, for example), we put it in a separate list that we don't process again until the very last \"last-chance island\" after all emission.</li>\n</ul>\n<p>These two rules together will bound the amount of processing to <code>O(|fixups| * |label kinds|)</code> rather than <code>O(|fixups|^2)</code>.</p>\n<p>The first new rule theoretically causes more veneers to be emitted, but in practice is not too likely to make a difference, I think. Unfortunately my aarch64 laptop is unavailable at the moment; if someone on that platform could benchmark the impact that would be quite appreciated!</p>\n<p>Fixes #6798.</p>\n</blockquote>",
+        "id": 381990077,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691189670
+    },
+    {
+        "content": "<p><strong>cfallin</strong> has marked <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804\">PR #6804</a> as ready for review.</p>",
+        "id": 381990082,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691189674
+    },
+    {
+        "content": "<p><strong>cfallin</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers\">wasmtime-compiler-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804\">PR #6804</a>.</p>",
+        "id": 381990086,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691189674
+    },
+    {
+        "content": "<p><strong>cfallin</strong> requested <a href=\"https://github.com/fitzgen\">fitzgen</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804\">PR #6804</a>.</p>",
+        "id": 381990087,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691189674
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804#pullrequestreview-1563954807\">PR review</a>:</p>\n<blockquote>\n<p>I'm a bit on the fence about this, but I think we should probably go with it. The main part that doesn't sit well with me is that I don't think there's a great way to describe this algorithm and its consequences. Any branch can impact any other branch at any time, so what a branch is doing can't be explained or understood with any local reasoning.</p>\n<p>Running this through sightglass shows no perf difference, but that's expected. What I'd be worried about is that a critical branch in a hot loop could go awry and cause performance issues. That's a very precise situation to be in though and additionally in some sense if an island is emitted in the middle of a loop the you've already lost perf-wise anyway.</p>\n<p>This also feels a bit weird in the sense that we do veneer promotion a few times but there's not really a great way to describe the consequences of it. For example there's not really a great reason to force all pending fixups to get a veneer every time an island is emitted other than \"it was the smallest patch at the time to fix quadratic behavior\". The comments indicate only in passing that the purpose of this  is to avoid quadratic behavior, but I think it would be worth expanding on that. The quadratic-ness isn't necessarily inherent because <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6798#issuecomment-1665539868\">as I described</a> by representing <code>fixup_records</code> with a <code>BinaryHeap</code> it's possible to restore local reasoning about branches without quadratic behavior. That solution isn't viable, however, with the branch optimizations happening in the buffer.</p>\n<p>I left a few coments as well for stylistic things, but given how this is expected to have little-to-no impact on runtime and clearly has a large impact on compile time I think it's good to land this. I do think the comments should be updated though to indicate that the purpose for this is purely to avoid larger changes and the performance implications of this are uncertain and likely to cause issues at some point, but that \"point\" is far enough away that we're buying ourselves runway. </p>\n</blockquote>",
+        "id": 382200346,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691257703
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804#pullrequestreview-1563954807\">PR review</a>:</p>\n<blockquote>\n<p>I'm a bit on the fence about this, but I think we should probably go with it. The main part that doesn't sit well with me is that I don't think there's a great way to describe this algorithm and its consequences. Any branch can impact any other branch at any time, so what a branch is doing can't be explained or understood with any local reasoning.</p>\n<p>Running this through sightglass shows no perf difference, but that's expected. What I'd be worried about is that a critical branch in a hot loop could go awry and cause performance issues. That's a very precise situation to be in though and additionally in some sense if an island is emitted in the middle of a loop the you've already lost perf-wise anyway.</p>\n<p>This also feels a bit weird in the sense that we do veneer promotion a few times but there's not really a great way to describe the consequences of it. For example there's not really a great reason to force all pending fixups to get a veneer every time an island is emitted other than \"it was the smallest patch at the time to fix quadratic behavior\". The comments indicate only in passing that the purpose of this  is to avoid quadratic behavior, but I think it would be worth expanding on that. The quadratic-ness isn't necessarily inherent because <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6798#issuecomment-1665539868\">as I described</a> by representing <code>fixup_records</code> with a <code>BinaryHeap</code> it's possible to restore local reasoning about branches without quadratic behavior. That solution isn't viable, however, with the branch optimizations happening in the buffer.</p>\n<p>I left a few coments as well for stylistic things, but given how this is expected to have little-to-no impact on runtime and clearly has a large impact on compile time I think it's good to land this. I do think the comments should be updated though to indicate that the purpose for this is purely to avoid larger changes and the performance implications of this are uncertain and likely to cause issues at some point, but that \"point\" is far enough away that we're buying ourselves runway. </p>\n</blockquote>",
+        "id": 382200347,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691257703
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804#discussion_r1285085440\">PR review comment</a>:</p>\n<blockquote>\n<p>I know I've said this before but if call sites require <code>/* foo = */ false</code> for disambiguation then I think it's better to use <code>Foo::Yes</code> (or w/e as appropriate) instead because then it requires it to be human readable rather than only optionally with this style being readable.</p>\n</blockquote>",
+        "id": 382200348,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691257703
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804#discussion_r1285085589\">PR review comment</a>:</p>\n<blockquote>\n<p>Instead of having <code>supports_veneer</code> both here and above could the logic to test for veneer support be pushed into <code>use_label_at_offset</code>? There it would determine whether to push onto either <code>fixup_records</code> or <code>fixup_records_max_range</code>, and would enable having an invariant where all entries in <code>fixup_records</code> support veneers</p>\n</blockquote>",
+        "id": 382200349,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691257703
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804#pullrequestreview-1566048628\">PR review</a>.</p>",
+        "id": 382743068,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691437310
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804#discussion_r1286320972\">PR review comment</a>:</p>\n<blockquote>\n<p>Unfortunately this one is not quite as simple as it seems: the fixup needs to go into <code>fixup_records</code> even if it doesn't support veneers if it is added as a result of a branch, because of the invariant tying recent-branches to fixups. It would have been nice though!</p>\n</blockquote>",
+        "id": 382743069,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691437310
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804#pullrequestreview-1566050579\">PR review</a>.</p>",
+        "id": 382743369,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691437415
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804#discussion_r1286322159\">PR review comment</a>:</p>\n<blockquote>\n<p>Yep, an old C-ism that dies hard -- thanks, fixed.</p>\n</blockquote>",
+        "id": 382743371,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691437415
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804\">PR #6804</a>.</p>",
+        "id": 382743378,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691437418
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804\">PR #6804</a>.</p>",
+        "id": 382745395,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691438082
+    },
+    {
+        "content": "<p>cfallin has enabled auto merge for <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804\">PR #6804</a>.</p>",
+        "id": 382745496,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691438107
+    },
+    {
+        "content": "<p>cfallin merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6804\">PR #6804</a>.</p>",
+        "id": 382759008,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691442465
+    }
+]

@@ -1,0 +1,125 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #1063 Cranelift: refactor CLIF instructi... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231063.20Cranelift.3A.20refactor.20CLIF.20instructi.2E.2E.2E.html">wasmtime / issue #1063 Cranelift: refactor CLIF instructi...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="281214946"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231063%20Cranelift%3A%20refactor%20CLIF%20instructi.../near/281214946" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231063.20Cranelift.3A.20refactor.20CLIF.20instructi.2E.2E.2E.html#281214946">(May 04 2022 at 20:27)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/issues/1063">issue #1063</a>:</p>
+<blockquote>
+<p>I have a hunch that there is a decent amount of overhead from repetitive matches on <code>dfg[inst]</code>.  We see a lot of</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">match</span><span class="w"> </span><span class="n">pos</span><span class="p">.</span><span class="n">func</span><span class="p">.</span><span class="n">dfg</span><span class="p">[</span><span class="n">inst</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">ir</span>::<span class="n">InstructionData</span>::<span class="n">StackLoad</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="o">..</span><span class="p">.,</span><span class="w"></span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="fm">panic!</span><span class="p">(</span><span class="o">..</span><span class="p">.),</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+</code></pre></div>
+<p>when we already know that <code>inst</code> is a <code>stack_load</code>.</p>
+<p>This is required by the way that <code>InstructionData</code> is defined. We can't just pass a single instruction type into a function, we must pass an instance of the entire enum.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">enum</span> <span class="nc">InstructionData</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">Unary</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">opcode</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">arg</span>: <span class="nc">Value</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="n">UnaryImm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">opcode</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">imm</span>: <span class="nc">ir</span>::<span class="n">immediates</span>::<span class="n">Imm64</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>I propose that we define a struct for each instruction type, as below:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">UnaryImm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">opcode</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">imm</span>: <span class="nc">ir</span>::<span class="n">immediates</span>::<span class="n">Imm64</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">enum</span> <span class="nc">InstructionData</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">Unary</span><span class="p">(</span><span class="n">Unary</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">UnaryImm</span><span class="p">(</span><span class="n">UnaryImm</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>I think we should also go further, like <a href="https://github.com/bytecodealliance/wasmtime/issues/1062">bytecodealliance/wasmtime#1062</a> suggests and do this:</p>
+<p><div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">InstructionData</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">opcode</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">args</span>: <span class="nc">ValueList</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">inst</span>: <span class="nc">Instruction</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">enum</span> <span class="nc">Instruction</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">Unary</span><span class="p">(</span><span class="n">Unary</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">UnaryImm</span><span class="p">(</span><span class="n">UnaryImm</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="281214958"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%231063%20Cranelift%3A%20refactor%20CLIF%20instructi.../near/281214958" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.231063.20Cranelift.3A.20refactor.20CLIF.20instructi.2E.2E.2E.html#281214958">(May 04 2022 at 20:27)</a>:</h4>
+<p>cfallin labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/1063">issue #1063</a>:</p>
+<blockquote>
+<p>I have a hunch that there is a decent amount of overhead from repetitive matches on <code>dfg[inst]</code>.  We see a lot of</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">match</span><span class="w"> </span><span class="n">pos</span><span class="p">.</span><span class="n">func</span><span class="p">.</span><span class="n">dfg</span><span class="p">[</span><span class="n">inst</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">ir</span>::<span class="n">InstructionData</span>::<span class="n">StackLoad</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="o">..</span><span class="p">.,</span><span class="w"></span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="fm">panic!</span><span class="p">(</span><span class="o">..</span><span class="p">.),</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+</code></pre></div>
+<p>when we already know that <code>inst</code> is a <code>stack_load</code>.</p>
+<p>This is required by the way that <code>InstructionData</code> is defined. We can't just pass a single instruction type into a function, we must pass an instance of the entire enum.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">enum</span> <span class="nc">InstructionData</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">Unary</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">opcode</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">arg</span>: <span class="nc">Value</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="n">UnaryImm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">opcode</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">imm</span>: <span class="nc">ir</span>::<span class="n">immediates</span>::<span class="n">Imm64</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>I propose that we define a struct for each instruction type, as below:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">UnaryImm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">opcode</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">imm</span>: <span class="nc">ir</span>::<span class="n">immediates</span>::<span class="n">Imm64</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">enum</span> <span class="nc">InstructionData</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">Unary</span><span class="p">(</span><span class="n">Unary</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">UnaryImm</span><span class="p">(</span><span class="n">UnaryImm</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>I think we should also go further, like <a href="https://github.com/bytecodealliance/wasmtime/issues/1062">bytecodealliance/wasmtime#1062</a> suggests and do this:</p>
+<p><div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">InstructionData</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">opcode</span>: <span class="nc">Opcode</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">args</span>: <span class="nc">ValueList</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">inst</span>: <span class="nc">Instruction</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">enum</span> <span class="nc">Instruction</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">Unary</span><span class="p">(</span><span class="n">Unary</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">UnaryImm</span><span class="p">(</span><span class="n">UnaryImm</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

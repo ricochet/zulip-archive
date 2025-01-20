@@ -1,0 +1,59 @@
+<html>
+<head><meta charset="utf-8"><title>Reusing memory · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Reusing.20memory.html">Reusing memory</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="287519769"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Reusing%20memory/near/287519769" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> JMS <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Reusing.20memory.html#287519769">(Jun 26 2022 at 23:32)</a>:</h4>
+<p>I have quite a complex use-case. I'm using wasmtime for a video game that's like screeps. Each player uploads a wasm script (written in Rust), and I create an Instance for each of their units each tick. </p>
+<p>I want to somehow provide a way to persist memory between instances. I have a basic implementation working like this:</p>
+<ol>
+<li>Create a 1mb chunk of memory on the host</li>
+<li>Create an Instance</li>
+<li>Call a function exported from the instance to allocate 1mb of memory</li>
+<li>Copy the 1mb chunk into the instance-provided chunk (1)</li>
+<li>Deserialize the  1mb chunk with bincode into a T within the VM (2).</li>
+<li>Use that data</li>
+<li>Serialize the data back into the 1mb chunk using bincode (3)</li>
+<li>Host then copies the 1mb chunk in the instance back to the 1mb chunk stored on the host (4)</li>
+</ol>
+<p>This involves 4 different copies and/or serializations. That's pretty sucky, and adds a lot of overhead. I've considered various schemes to avoid 2-3 by using mem::transmute() and building an allocator that allocates entirely within the byte slice. That would avoid needing to use bincode to convert to and from bytes within the instance. However, I still would need to copy the data in and out of the instance each time.</p>
+<p>I think a better way would be to limit the memory to 1mb for the instance, and reuse it between instances. The questions are then:</p>
+<ol>
+<li>How do I reuse the memory?</li>
+<li>How can I provide a new instance the same memory, and have it pick up from where it left off on the rust side? Like, if I declare a static mut T or whatever, how can I have the script get that in another instance later on?</li>
+</ol>
+<p>Ideally, if the wasm script panics, then all changes to the persistent memory would be rolled back. So I kinda want copies 1+4, but I want to avoid the overhead of bincode is the bigger issue.</p>
+
+
+
+<a name="287601273"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Reusing%20memory/near/287601273" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Reusing.20memory.html#287601273">(Jun 27 2022 at 16:16)</a>:</h4>
+<p>Currently linear memories cannot be reused across stores, and you probably want to retain one-instance-per-store since otherwise instances never get deallocated (they're owned by the store). Linear memories can technically be shared between instances within the same store but it would mean you have to persist the store for a long time which may not be what you want.</p>
+<p>Otherwise what you can do is if the modules import the memory you can manage the memory yourself. For example you could create the linear memory on the host and then when the wasm module is done with it you do what's necessary to serialize that to disk and such. Using the <code>MemoryCreator</code> trait you may be able to create custom schemes for memory allocation perhaps as well?</p>
+
+
+
+<a name="287666111"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Reusing%20memory/near/287666111" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> JMS <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Reusing.20memory.html#287666111">(Jun 28 2022 at 03:20)</a>:</h4>
+<p>How exactly do I provide memory to the guest? Right now I'm calling a function to allocate memory from within the guest, and give the pointer back to the host to write to. Is there a way to just provide memory directly to the guest?</p>
+
+
+
+<a name="287709447"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Reusing%20memory/near/287709447" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Reusing.20memory.html#287709447">(Jun 28 2022 at 12:39)</a>:</h4>
+<blockquote>
+<p>Is there a way to just provide memory directly to the guest?</p>
+</blockquote>
+<p>You can use the <code>grow</code> method on the <code>Memory</code> and then write to the newly grown pages. It will depend on whichever memory allocator the wasm module uses if it will handle this fine, or corrupts it internal state. In any case you probably won't be able to deallocate the memory again without corrupting the allocator state. You also can't map existing pages with data into the wasm linear memory. You must copy it one way or another.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

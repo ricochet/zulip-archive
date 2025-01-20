@@ -1,0 +1,113 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #5608 Fix libcall relocations for precom... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html">wasmtime / issue #5608 Fix libcall relocations for precom...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="322557052"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235608%20Fix%20libcall%20relocations%20for%20precom.../near/322557052" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html#322557052">(Jan 20 2023 at 16:37)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/5608#issuecomment-1398641105">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/5608">issue #5608</a>:</p>
+<blockquote>
+<p>I'll note that I've confirmed at least on x86_64 and arm64 that this does not slow down the <code>Module::deserialize_file</code> operation. Specifying the write permission, and not actually writing to anything, means everything is still fast on Linux.</p>
+</blockquote>
+
+
+
+<a name="322586984"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235608%20Fix%20libcall%20relocations%20for%20precom.../near/322586984" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html#322586984">(Jan 20 2023 at 18:25)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/pull/5608#issuecomment-1398773995">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/5608">issue #5608</a>:</p>
+<blockquote>
+<p>Would it be possible to use GOT relative relocations for libcalls and then only make the GOT writable while applying the relocations and make it read-only again afterwards? Or maybe even store libcall addresses in the VMContext to keep the whole module read-only?</p>
+</blockquote>
+
+
+
+<a name="322606046"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235608%20Fix%20libcall%20relocations%20for%20precom.../near/322606046" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html#322606046">(Jan 20 2023 at 20:11)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/5608#issuecomment-1398878503">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/5608">issue #5608</a>:</p>
+<blockquote>
+<blockquote>
+<p>If an attacker did manage to write to the non-executable pages, what would the impact be? </p>
+</blockquote>
+<p>My current understanding is that if an attacker could pave over the image then that means they have an arbitrary write primitive so while making the image readonly wouldn't hurt it's not like that would protect the actual malloc heap or any other state in a process. In that sense I don't think the impact would be any worse or better with a readonly image.</p>
+<p>My main motivation for switching things to read/write though was the aspect that in-memory compiled modules are already read/write. I don't think it's out of the cards by any means to make the entire image readonly but if we were to implement that I think we'd want to implement it for all compiled images and not just those deserialized from files.</p>
+<blockquote>
+<p>Would it be possible to use GOT relative relocations for libcalls ... ?</p>
+</blockquote>
+<p>While I'm not 100% sure how the GOT works my impression is that it's a table of function pointers that's filled in at runtime but nothing else needs to be filled in at runtime. If that's true then while it would improve the performance of resolving these relocations (today it's O(relocations) and with a GOT it'd be O(symbols-to-relocate-against)) I don't think it would change the calculus here much. Today file-mapped images are completely readonly so we still couldn't apply relocations.</p>
+<p>Now you're right, though, that ideally we wouldn't have any relocations here at all. The problem with these though is that the libcall is introduced very late in the codegen pipeline (at lowering) which means there's no guaranteed access to a vmctx so loading from the vmctx isn't necessarily possible. We'd have to patch out the clif instructions during the wasm -&gt; clif lowering stage to do libcalls via the vmctx but that means we'd be baking in target-specific lowering information to that lowering pass which would be a bit of a bummer.</p>
+<hr>
+<p>I should clarify, I don't think that a readonly image would really cause issues at all. There's a part of the publication process for an image to make it executable where we make the text section read/execute (e.g. removing the write bit), and we could pretty easily make the whole image readonly just before that (this would happen just after relocations are applied)</p>
+</blockquote>
+
+
+
+<a name="322617819"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235608%20Fix%20libcall%20relocations%20for%20precom.../near/322617819" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html#322617819">(Jan 20 2023 at 21:19)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/pull/5608#issuecomment-1398958545">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/5608">issue #5608</a>:</p>
+<blockquote>
+<blockquote>
+<p>While I'm not 100% sure how the GOT works my impression is that it's a table of function pointers that's filled in at runtime but nothing else needs to be filled in at runtime.</p>
+</blockquote>
+<p>Indeed. This only applies to code relocations. Data relocations are unchanged as it is impossible to handle the indirection. For Wasmtime that isn't relevant though as it only has code relocations.</p>
+<blockquote>
+<p>The problem with these though is that the libcall is introduced very late in the codegen pipeline (at lowering) which means there's no guaranteed access to a vmctx so loading from the vmctx isn't necessarily possible.</p>
+</blockquote>
+<p>AFAIK the backend does know about vmctx, albeit as an opaque value. I guess it would be possible to add a flag to define the offset to load libcall addresses. Even so I do agree this is probably not the way to go.</p>
+</blockquote>
+
+
+
+<a name="323045621"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235608%20Fix%20libcall%20relocations%20for%20precom.../near/323045621" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html#323045621">(Jan 23 2023 at 15:15)</a>:</h4>
+<p>github-actions[bot] <a href="https://github.com/bytecodealliance/wasmtime/pull/5608#issuecomment-1400518048">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/5608">issue #5608</a>:</p>
+<blockquote>
+<h4>Subscribe to Label Action</h4>
+<p>cc @fitzgen</p>
+<p>&lt;details&gt;<br>
+This issue or pull request has been labeled: "fuzzing"</p>
+<p>Thus the following users have been cc'd because of the following labels:</p>
+<ul>
+<li>fitzgen: fuzzing</li>
+</ul>
+<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>
+<p><a href="https://github.com/bytecodealliance/subscribe-to-label-action">Learn more.</a><br>
+&lt;/details&gt;</p>
+</blockquote>
+
+
+
+<a name="323520992"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235608%20Fix%20libcall%20relocations%20for%20precom.../near/323520992" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html#323520992">(Jan 25 2023 at 15:52)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/5608#issuecomment-1403833528">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/5608">issue #5608</a>:</p>
+<blockquote>
+<p>@jameysharp would you be up for reviewing this? If not no worries, I can pass it along.</p>
+</blockquote>
+
+
+
+<a name="323535575"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235608%20Fix%20libcall%20relocations%20for%20precom.../near/323535575" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html#323535575">(Jan 25 2023 at 16:54)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/pull/5608#issuecomment-1403923650">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/5608">issue #5608</a>:</p>
+<blockquote>
+<p>I think this PR would be a clear improvement over the _status quo_ if it left non-executable pages read-only (for both disk-backed and memory-only maps). You may very well be correct that if someone can write to these pages then we have bigger problems, but I'm not personally comfortable giving it an r+ as-is. If other stakeholders who rely on Wasmtime for multi-instance isolation decide that's safe, I'd be happy to see this merged.</p>
+</blockquote>
+
+
+
+<a name="323540332"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235608%20Fix%20libcall%20relocations%20for%20precom.../near/323540332" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235608.20Fix.20libcall.20relocations.20for.20precom.2E.2E.2E.html#323540332">(Jan 25 2023 at 17:15)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/5608#issuecomment-1403959060">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/5608">issue #5608</a>:</p>
+<blockquote>
+<p>Ok I've pushed a commit to do that. To be clear though I'm still wary of this. Changing memory permissions can often lead to scaling issue w.r.t. IPIs and such. I continue to believe it's not necessary here since if you can overwrite random memory in the image there's basically no reason you can't overwrite anything else. I won't disagree it's a defense-in-depth thing, though.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

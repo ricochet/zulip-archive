@@ -1,0 +1,205 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #2473 Fix lowering instruction-sinking (loa... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232473.20Fix.20lowering.20instruction-sinking.20.28loa.2E.2E.2E.html">wasmtime / PR #2473 Fix lowering instruction-sinking (loa...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="218766175"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232473%20Fix%20lowering%20instruction-sinking%20%28loa.../near/218766175" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232473.20Fix.20lowering.20instruction-sinking.20.28loa.2E.2E.2E.html#218766175">(Dec 03 2020 at 22:51)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/2473">PR #2473</a> from <code>fix-lowering</code> to <code>main</code>:</p>
+<blockquote>
+<p>This fixes a subtle corner case exposed during fuzzing. If we have a bit<br>
+of CLIF like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="w">    </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="w">    </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">do_other_thing</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">    </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+</code></pre></div>
+<p>and if this is lowered using a machine backend that can merge loads into<br>
+ALU ops, <em>and</em> that has an addressing mode that can look through add<br>
+ops, then the following can happen:</p>
+<ol>
+<li>
+<p>We lower the load at <code>v3</code>. This looks backward at the address<br>
+   operand tree and finds that <code>v1</code> is <code>v0</code> plus other things; it has an<br>
+   addressing mode that can add <code>v0</code>'s register and the other things<br>
+   directly; so it calls <code>put_value_in_reg(v0)</code> and uses its register in<br>
+   the amode. At this point, the add producing <code>v1</code> has no references,<br>
+   so it will not (yet) be codegen'd.</p>
+</li>
+<li>
+<p>We lower <code>do_other_thing</code>, which puts <code>v1</code> in a register and uses it.<br>
+   the <code>iadd</code> now has a reference.</p>
+</li>
+<li>
+<p>We reach the <code>iadd</code> and, because it has a reference, lower it. Our<br>
+   machine has the ability to merge a load into an ALU operation.<br>
+   Crucially, <em>we think the load at <code>v0</code> is mergeable</em> because it has<br>
+   only one user, the add at <code>v1</code> (!). So we merge it.</p>
+</li>
+<li>
+<p>We reach the <code>load</code> at <code>v0</code> and because it has been merged into the<br>
+<code>iadd</code>, we do not separately codegen it. The register that holds <code>v0</code><br>
+   is thus never written, and the use of this register by the final load<br>
+   (Step 1) will see an undefined value.</p>
+</li>
+</ol>
+<p>The logic error here is that in the presence of pattern matching that<br>
+looks through pure ops, we can end up with multiple uses of a value that<br>
+originally had a single use (because we allow lookthrough of pure ops in<br>
+all cases). In other words, the multiple-use-ness of <code>v1</code> "passes<br>
+through" in some sense to <code>v0</code>. However, the load sinking logic is not<br>
+aware of this.</p>
+<p>The fix, I think, is pretty simple: we disallow an effectful instruction<br>
+from sinking/merging if it already has some other use when we look back<br>
+at it.</p>
+<p>If we disallowed lookthrough of <em>any</em> op that had multiple uses, even<br>
+pure ones, then we would avoid this scenario; but earlier experiments<br>
+showed that to have a non-negligible performance impact, so (given that<br>
+we've worked out the logic above) I think this complexity is worth it.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="218766176"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232473%20Fix%20lowering%20instruction-sinking%20%28loa.../near/218766176" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232473.20Fix.20lowering.20instruction-sinking.20.28loa.2E.2E.2E.html#218766176">(Dec 03 2020 at 22:51)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a>, <a href="https://github.com/bnjbvr">bnjbvr</a> and <a href="https://github.com/julian-seward1">julian-seward1</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2473">PR #2473</a>.</p>
+
+
+
+<a name="218766177"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232473%20Fix%20lowering%20instruction-sinking%20%28loa.../near/218766177" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232473.20Fix.20lowering.20instruction-sinking.20.28loa.2E.2E.2E.html#218766177">(Dec 03 2020 at 22:51)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a>, <a href="https://github.com/bnjbvr">bnjbvr</a> and <a href="https://github.com/julian-seward1">julian-seward1</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2473">PR #2473</a>.</p>
+
+
+
+<a name="218766178"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232473%20Fix%20lowering%20instruction-sinking%20%28loa.../near/218766178" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232473.20Fix.20lowering.20instruction-sinking.20.28loa.2E.2E.2E.html#218766178">(Dec 03 2020 at 22:51)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a>, <a href="https://github.com/bnjbvr">bnjbvr</a> and <a href="https://github.com/julian-seward1">julian-seward1</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/2473">PR #2473</a>.</p>
+
+
+
+<a name="218766874"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232473%20Fix%20lowering%20instruction-sinking%20%28loa.../near/218766874" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232473.20Fix.20lowering.20instruction-sinking.20.28loa.2E.2E.2E.html#218766874">(Dec 03 2020 at 22:59)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/2473">PR #2473</a> from <code>fix-lowering</code> to <code>main</code>:</p>
+<blockquote>
+<p>This fixes a subtle corner case exposed during fuzzing. If we have a bit<br>
+of CLIF like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="n">v0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="w">    </span><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="w">    </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">do_other_thing</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+<span class="w">    </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">v1</span><span class="w"></span>
+</code></pre></div>
+<p>and if this is lowered using a machine backend that can merge loads into<br>
+ALU ops, <em>and</em> that has an addressing mode that can look through add<br>
+ops, then the following can happen:</p>
+<ol>
+<li>
+<p>We lower the load at <code>v3</code>. This looks backward at the address<br>
+   operand tree and finds that <code>v1</code> is <code>v0</code> plus other things; it has an<br>
+   addressing mode that can add <code>v0</code>'s register and the other things<br>
+   directly; so it calls <code>put_value_in_reg(v0)</code> and uses its register in<br>
+   the amode. At this point, the add producing <code>v1</code> has no references,<br>
+   so it will not (yet) be codegen'd.</p>
+</li>
+<li>
+<p>We lower <code>do_other_thing</code>, which puts <code>v1</code> in a register and uses it.<br>
+   the <code>iadd</code> now has a reference.</p>
+</li>
+<li>
+<p>We reach the <code>iadd</code> and, because it has a reference, lower it. Our<br>
+   machine has the ability to merge a load into an ALU operation.<br>
+   Crucially, <em>we think the load at <code>v0</code> is mergeable</em> because it has<br>
+   only one user, the add at <code>v1</code> (!). So we merge it.</p>
+</li>
+<li>
+<p>We reach the <code>load</code> at <code>v0</code> and because it has been merged into the<br>
+<code>iadd</code>, we do not separately codegen it. The register that holds <code>v0</code><br>
+   is thus never written, and the use of this register by the final load<br>
+   (Step 1) will see an undefined value.</p>
+</li>
+</ol>
+<p>The logic error here is that in the presence of pattern matching that<br>
+looks through pure ops, we can end up with multiple uses of a value that<br>
+originally had a single use (because we allow lookthrough of pure ops in<br>
+all cases). In other words, the multiple-use-ness of <code>v1</code> "passes<br>
+through" in some sense to <code>v0</code>. However, the load sinking logic is not<br>
+aware of this.</p>
+<p>The fix, I think, is pretty simple: we disallow an effectful instruction<br>
+from sinking/merging if it already has some other use when we look back<br>
+at it.</p>
+<p>If we disallowed lookthrough of <em>any</em> op that had multiple uses, even<br>
+pure ones, then we would avoid this scenario; but earlier experiments<br>
+showed that to have a non-negligible performance impact, so (given that<br>
+we've worked out the logic above) I think this complexity is worth it.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="218767480"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232473%20Fix%20lowering%20instruction-sinking%20%28loa.../near/218767480" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232473.20Fix.20lowering.20instruction-sinking.20.28loa.2E.2E.2E.html#218767480">(Dec 03 2020 at 23:05)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/2473#pullrequestreview-544535449">PR Review</a>.</p>
+
+
+
+<a name="218771954"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%232473%20Fix%20lowering%20instruction-sinking%20%28loa.../near/218771954" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.232473.20Fix.20lowering.20instruction-sinking.20.28loa.2E.2E.2E.html#218771954">(Dec 03 2020 at 23:56)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/2473">PR #2473</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

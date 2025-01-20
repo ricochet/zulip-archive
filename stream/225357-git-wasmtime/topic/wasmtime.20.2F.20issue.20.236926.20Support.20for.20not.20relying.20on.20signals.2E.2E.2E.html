@@ -1,0 +1,75 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #6926 Support for not relying on signals... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236926.20Support.20for.20not.20relying.20on.20signals.2E.2E.2E.html">wasmtime / issue #6926 Support for not relying on signals...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="387936875"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236926%20Support%20for%20not%20relying%20on%20signals.../near/387936875" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236926.20Support.20for.20not.20relying.20on.20signals.2E.2E.2E.html#387936875">(Aug 29 2023 at 18:07)</a>:</h4>
+<p>rockwotj opened <a href="https://github.com/bytecodealliance/wasmtime/issues/6926">issue #6926</a>:</p>
+<blockquote>
+<p>Currently, on unix platforms, Wasmtime relies on a few signals to operate, here's a list of the ones I'm aware of:</p>
+<p>SIGSEGV: Used for bounds checking when static memory is used. AFAIK using dynamic memory disables the need to handle this signal<br>
+SIGFPE: Only used on x86_64 for division by zero.<br>
+SIGILL: The implementation of <code>unreachable</code> wasm instructions or other explicit traps are implemented by using <a href="https://mudongliang.github.io/x86/html/file_module_x86_id_318.html"><code>ud2</code></a> on x86_64 and <a href="https://developer.arm.com/documentation/dui0801/h/A32-and-T32-Instructions/UDF"><code>udf</code></a> on aarch64, this triggers a SIGILL.</p>
+<p><a href="#narrow/stream/217126-wasmtime/topic/Option.20to.20disable.20signal.20handling/near/386672498">Link to Zulip Conversation about this topic.</a></p>
+<h4>Benefit</h4>
+<p>Some environments/frameworks also rely on signals (or block them) which can cause issues with Wasmtime. Wasmtime currently registers signals lazily for the whole process when the first engine is created and other library code etc, could also be registering/unregistering signal handlers and these don't always cleanup properly or yield signal control to wasmtime correctly. This happens for me with the <a href="http://seastar.io">seastar.io</a> framework on Linux, but I'm told Macos has also had it's own set of woes with signal handling.</p>
+<p>Being able to disable signal handling would allow wasmtime to be used in these sorts of environments.</p>
+<p>An additional positive of this note would be that it allows more testing of Cranelift, as it's my understanding some of the <a href="#narrow/stream/217126-wasmtime/topic/Option.20to.20disable.20signal.20handling/near/386688540">trap handling code is not run in tests/fuzzing</a>.</p>
+<h4>Implementation</h4>
+<p>I believe nothing would need to change for removing the need to handle SIGSEGV, as for SIGFPE, we'd need to generate code for division by zero checks and explicitly trap.</p>
+<p>That leaves SIGILL/<code>ud2</code>/<code>udf</code>, which seems to be the lion's share of the work here.</p>
+<p>This is mostly just copying the notes from @cfallin <span aria-label="big smile" class="emoji emoji-1f604" role="img" title="big smile">:big_smile:</span> </p>
+<p>Three things to consider with the code to replace ud2: </p>
+<p>Essentially we will replace our current usages of <code>ud2</code> with a <code>jmp</code> to an offset of <code>vmctx</code> which holds the address of a small assembly function that would read the return address then call into the runtime with the return address as an argument. This return address would then be used to lookup the underlying trap code for that location.  Using a pointer in <code>vmctx</code> allows for portability when code is loaded directly from disk.</p>
+<p>One thing to look out for when doing this work is to determine if the size blowup from <code>ud2</code> (2 bytes) to <code>jmp offset+reg</code> (8 bytes) is acceptable or not. Some small analysis of generated assembly should be able to easily determine that however before embarking on this task.</p>
+</blockquote>
+
+
+
+<a name="387937581"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236926%20Support%20for%20not%20relying%20on%20signals.../near/387937581" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236926.20Support.20for.20not.20relying.20on.20signals.2E.2E.2E.html#387937581">(Aug 29 2023 at 18:12)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/6926#issuecomment-1697904315">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6926">issue #6926</a>:</p>
+<blockquote>
+<p>I think even with dynamic memories, if we have spectre guards enabled, then we rely on loading a null pointer to raise a signal that is caught by the runtime. This is because we "dedupe" the spectre guard bounds check and the dynamic memory's bounds check. We could stop doing that when in this no-signals mode, but do note that that would make the slowdown of dynamic bounds checks go from ~1.5x to closer to ~2x compared to using virtual memory guard pages.</p>
+<blockquote>
+<p>An additional positive of this note would be that it allows more testing of Cranelift, as it's my understanding some of the <a href="#narrow/stream/217126-wasmtime/topic/Option.20to.20disable.20signal.20handling/near/386688540">trap handling code is not run in tests/fuzzing</a>.</p>
+</blockquote>
+<p>Note that this is just for the cranelift-specific fuzzing and tests.</p>
+<p>Wasmtime fuzzing does exercise trapping.</p>
+</blockquote>
+
+
+
+<a name="470016222"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236926%20Support%20for%20not%20relying%20on%20signals.../near/470016222" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236926.20Support.20for.20not.20relying.20on.20signals.2E.2E.2E.html#470016222">(Sep 13 2024 at 17:09)</a>:</h4>
+<p>alexcrichton closed <a href="https://github.com/bytecodealliance/wasmtime/issues/6926">issue #6926</a>:</p>
+<blockquote>
+<p>Currently, on unix platforms, Wasmtime relies on a few signals to operate, here's a list of the ones I'm aware of:</p>
+<p>SIGSEGV: Used for bounds checking when static memory is used. AFAIK using dynamic memory disables the need to handle this signal<br>
+SIGFPE: Only used on x86_64 for division by zero.<br>
+SIGILL: The implementation of <code>unreachable</code> wasm instructions or other explicit traps are implemented by using <a href="https://mudongliang.github.io/x86/html/file_module_x86_id_318.html"><code>ud2</code></a> on x86_64 and <a href="https://developer.arm.com/documentation/dui0801/h/A32-and-T32-Instructions/UDF"><code>udf</code></a> on aarch64, this triggers a SIGILL.</p>
+<p><a href="#narrow/stream/217126-wasmtime/topic/Option.20to.20disable.20signal.20handling/near/386672498">Link to Zulip Conversation about this topic.</a></p>
+<h4>Benefit</h4>
+<p>Some environments/frameworks also rely on signals (or block them) which can cause issues with Wasmtime. Wasmtime currently registers signals lazily for the whole process when the first engine is created and other library code etc, could also be registering/unregistering signal handlers and these don't always cleanup properly or yield signal control to wasmtime correctly. This happens for me with the <a href="http://seastar.io">seastar.io</a> framework on Linux, but I'm told Macos has also had it's own set of woes with signal handling.</p>
+<p>Being able to disable signal handling would allow wasmtime to be used in these sorts of environments.</p>
+<p>An additional positive of this note would be that it allows more testing of Cranelift, as it's my understanding some of the <a href="#narrow/stream/217126-wasmtime/topic/Option.20to.20disable.20signal.20handling/near/386688540">trap handling code is not run in tests/fuzzing</a>.</p>
+<h4>Implementation</h4>
+<p>I believe nothing would need to change for removing the need to handle SIGSEGV, as for SIGFPE, we'd need to generate code for division by zero checks and explicitly trap.</p>
+<p>That leaves SIGILL/<code>ud2</code>/<code>udf</code>, which seems to be the lion's share of the work here.</p>
+<p>This is mostly just copying the notes from @cfallin <span aria-label="big smile" class="emoji emoji-1f604" role="img" title="big smile">:big_smile:</span> </p>
+<p>Three things to consider with the code to replace ud2: </p>
+<p>Essentially we will replace our current usages of <code>ud2</code> with a <code>jmp</code> to an offset of <code>vmctx</code> which holds the address of a small assembly function that would read the return address then call into the runtime with the return address as an argument. This return address would then be used to lookup the underlying trap code for that location.  Using a pointer in <code>vmctx</code> allows for portability when code is loaded directly from disk.</p>
+<p>One thing to look out for when doing this work is to determine if the size blowup from <code>ud2</code> (2 bytes) to <code>jmp offset+reg</code> (8 bytes) is acceptable or not. Some small analysis of generated assembly should be able to easily determine that however before embarking on this task.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

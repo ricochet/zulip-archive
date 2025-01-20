@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>(Probably <span class=\"user-mention\" data-user-id=\"253992\">@Pat Hickey</span>): While discussing <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7749\">#7749</a> I stumbled on a tricky situation; What should happen when a background write is still in progress and the socket is either shutdown or dropped entirely?<br>\nRegular POSIX/BSD sockets ensure that any previous <code>send</code> that was accepted by the kernel will get sent out, even after the socket has been closed. Or at least: the kernel will try its best. I.e. the following is valid code:</p>\n<div class=\"codehilite\" data-code-language=\"C\"><pre><span></span><code><span class=\"kt\">int</span><span class=\"w\"> </span><span class=\"n\">client_fd</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">accept</span><span class=\"p\">(</span><span class=\"n\">listener_fd</span><span class=\"p\">);</span>\n<span class=\"n\">send</span><span class=\"p\">(</span><span class=\"n\">client_fd</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"s\">\"A big message\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">MSG_DONTWAIT</span><span class=\"p\">);</span>\n<span class=\"c1\">// Not waiting here</span>\n<span class=\"n\">close</span><span class=\"p\">(</span><span class=\"n\">client_fd</span><span class=\"p\">);</span>\n</code></pre></div>\n<p>The <a href=\"https://github.com/dicej/wasi-libc/blob/f3adffed1182a39bcee649d27de01ba76446d844/libc-bottom-half/cloudlibc/src/libc/sys/socket/send.c#L48\">current libc implementation</a> only calls <code>check-write</code> and <code>write</code>.</p>\n<p>On blocking sockets we can add a <code>blocking-flush</code> at the end of every <code>send</code> in libc to make sure the send made it all the way to the kernel. I don't see a problem here.<br>\nOn non-blocking sockets we could call <code>flush</code> but that wouldn't solve anything; if the final <code>write</code> was moved to a background task,  it would still get lost without warning.</p>\n<p>Thoughts?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/7749\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/cb10da7929b545093fdd94d0a6615e81f7a5b761\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f306532653736653236323762393531346332383965633361663865336138623233373736396431353562343235356566633630303538666666343537373465662f62797465636f6465616c6c69616e63652f7761736d74696d652f70756c6c2f37373439)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/7749\" title=\"Make `shutdown` close the input/output-streams. by badeend · Pull Request #7749 · bytecodealliance/wasmtime\">Make `shutdown` close the input/output-streams. by badeend · Pull Request #7749 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Make tcp-socket::shutdown close the input/output-streams.\nThis was already specified in the WITs, but not implemented nor enforced by any tests.</div></div></div>",
+        "id": 411819385,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1704749528
+    },
+    {
+        "content": "<p>ah, yeah, i see what the problem is there</p>",
+        "id": 411821865,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1704750618
+    },
+    {
+        "content": "<p>unfortunately there is just no such thing as a non-blocking \"flush and close\"</p>",
+        "id": 411821887,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1704750628
+    },
+    {
+        "content": "<p>so im not sure what we can do there to make libc have a correct implementation of <code>close()</code> for non-blocking sockets that truly does flush</p>",
+        "id": 411821975,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1704750677
+    },
+    {
+        "content": "<p>so yes, in conclusion, you are correct: when a libc socket is blocking, you'll need to do a blocking-flush after every output-stream.write to that socket in order to be correct. when a libc socket is nonblocking, we have a design problem which we cant resolve right now.</p>",
+        "id": 411823078,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1704751177
+    },
+    {
+        "content": "<p>The options as far as I can see:</p>\n<ol>\n<li>Do nothing :)</li>\n<li>Modify libc's <code>close</code> to call <code>blocking-flush</code> on the associated output-stream. Upside: no data is lost. Downside: close now becomes a potentially blocking operation.</li>\n<li>Modify the host implementation to keep the background write running even after the stream has been dropped. This is the only way to truly keep the POSIX semantics, but I doubt this is what was in mind while designing the streams interface.</li>\n<li>(others?)</li>\n</ol>",
+        "id": 411824284,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1704751672
+    },
+    {
+        "content": "<p>yeah, i guess a big question is how many applications will have problems if we pick <code>2</code></p>",
+        "id": 411827893,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1704753201
+    },
+    {
+        "content": "<p>we tried pretty hard to avoid <code>3</code>, but maybe we have to do that</p>",
+        "id": 411827919,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1704753217
+    },
+    {
+        "content": "<p>i assume we would break a significant amount of applications by doing nothing, because theyd mysteriously lose writes</p>",
+        "id": 411828860,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1704753646
+    },
+    {
+        "content": "<p>i guess putting myself in the shoes of an application writer id be much more displeased about 1 than 2</p>",
+        "id": 411828920,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1704753678
+    }
+]

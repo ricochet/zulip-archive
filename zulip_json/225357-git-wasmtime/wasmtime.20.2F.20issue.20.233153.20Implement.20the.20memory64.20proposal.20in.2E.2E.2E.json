@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>bjorn3 <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-893853667\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<blockquote>\n<p>Heaps are always precisely sized. This means that every call to<br>\nmemory.grow will incur a memcpy of memory from the old heap to the<br>\nnew. We probably want to at least look into mremap on Linux and<br>\notherwise try to implement schemes where dynamic heaps have some<br>\nreserved pages to grow into to help amortize the cost of<br>\nmemory.grow.</p>\n</blockquote>\n<p>I believe mmap has a flag that prevents overwriting already mapped memory. Combining this with MAP_FIXED would allow growing the heap without moving part of the time.</p>\n</blockquote>",
+        "id": 248544531,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628201813
+    },
+    {
+        "content": "<p>github-actions[bot] <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-893862204\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<h4>Subscribe to Label Action</h4>\n<p>cc @fitzgen, @peterhuene</p>\n<p>&lt;details&gt;<br>\nThis issue or pull request has been labeled: \"cranelift\", \"cranelift:meta\", \"cranelift:wasm\", \"fuzzing\", \"wasmtime:c-api\"</p>\n<p>Thus the following users have been cc'd because of the following labels:</p>\n<ul>\n<li>fitzgen: fuzzing</li>\n<li>peterhuene: wasmtime:c-api</li>\n</ul>\n<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>\n<p><a href=\"https://github.com/bytecodealliance/subscribe-to-label-action\">Learn more.</a><br>\n&lt;/details&gt;</p>\n</blockquote>",
+        "id": 248545515,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628202517
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894337794\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>Hm ok so I may need some assistance with that error. Currently we have:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">InstructionData</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">HeapData</span><span class=\"p\">(</span><span class=\"n\">Opcode</span><span class=\"w\"> </span><span class=\"cm\">/* u16 */</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">Value</span><span class=\"w\"> </span><span class=\"cm\">/* u32 */</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ir</span>::<span class=\"n\">Heap</span><span class=\"w\"> </span><span class=\"cm\">/* u32 */</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">imm</span>: <span class=\"nc\">ir</span>::<span class=\"n\">immediates</span>::<span class=\"n\">Uimm32</span><span class=\"w\"> </span><span class=\"cm\">/* u32 */</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// ...</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>This results in a 16-byte enum size in total because the discriminant can be packed into the space preceding <code>Opcode</code>. This PR changes the <code>Uimm32</code> there to <code>Uimm64</code>, which inflates the size of the enum to 24 bytes:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">Before</span><span class=\"p\">(</span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"c1\">// .. vs ..</span>\n<span class=\"k\">struct</span> <span class=\"nc\">After</span><span class=\"p\">(</span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u64</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n<p>and there's a test asserting that this enum is 16-bytes in size.</p>\n<p>I'm having trouble figuring out how best to shrink this back to 16-bytes. Some things I've tried:</p>\n<ul>\n<li>Technically <code>Opcode</code> can be removed here since there's only one ever used with <code>HeapAddr</code>. That doesn't free up enough space alone. </li>\n<li>I'm not sure if there's much use case for having lots of heap indices, so the <code>struct Heap(u32)</code> may be overkill. Chanaging that to <code>u8</code> I think would reduce the size of this enum back to 16 bytes. Changing to <code>u16</code> and removing <code>Opcode</code> would also reduce the enum back to 16 bytes.</li>\n<li>I was also looking at using <code>ir::Constant</code> instead of <code>Uimm64</code> but that felt somewhat heavyweight for this use case because it seems like it would frequently allocate in the constant pool. There also didn't appear to be many helper functions going from a <code>Constant</code> to a <code>u64</code> (or some other integral type) so this felt like I was too far off the beaten path.</li>\n</ul>\n<p>Do others have alternative ideas that could be implemented, or guidance on which of the above paths is the way to go here?</p>\n</blockquote>",
+        "id": 248625233,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628263681
+    },
+    {
+        "content": "<p>bjorn3 <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894384905\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>load, store, etc also use 32bit offsets even though they can already be used with 64bit pointers. In cg_clif if the offset overflows the <code>Offset32</code>, I emit a <code>iadd_imm ptr, offset</code> before loading or storing. The same could be done for <code>heap_addr</code> to keep a 32bit offset.</p>\n</blockquote>",
+        "id": 248636535,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628268496
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894398460\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>I may be misunderstanding the use of that immediate, but it looks to me like the field is actually used to denote the size of the <em>access</em>, not of the underlying heap (<a href=\"https://github.com/bytecodealliance/wasmtime/blob/ee3ff526617f3acdba500673a45675772b34d916/cranelift/codegen/meta/src/shared/instructions.rs#L1535-L1557\">link</a>), on the <code>heap_addr</code> instruction (which appears to be the only one that uses that instruction format). GIven that individual memory accesses definitely don't access more than 4GiB-sized values, I think 32 bits is still OK here?</p>\n</blockquote>",
+        "id": 248640018,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628269967
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894405078\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>Heh unfortunately I think you've fallen into the same trap I've fallen into a number of times. The <code>heap_addr</code> instruction does indeed document its immediate as an access size, but that's not technically how the wasm backend is using it. <a href=\"https://github.com/bytecodealliance/wasmtime/blob/ee3ff526617f3acdba500673a45675772b34d916/cranelift/wasm/src/code_translator.rs#L2224-L2234\">When translating</a>, assuming there's a guard page, we feign the access size as the fixed offset in the memory instruction. We don't technically actually access all those bytes, but for the purposes of validation it's sufficient.</p>\n<p>Put another way, because wasm memory offsets can be 64-bits (with memory64), and because we use this offset as the \"access size\", that's the motivation for increasing the bit-width of the access size. </p>\n</blockquote>",
+        "id": 248641394,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628270620
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894415603\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>Hmm, I see; unexpected but I guess that usage makes sense.</p>\n<p>IMHO the best option here is probably a hybrid approach during translation: if the offset fits in 32 bits (which will be the case the overwhelming majority of the time, hopefully), do as we presently do; if larger, then emit an explicit add instruction to compute the <code>addr+offset</code>, as @bjorn3 suggests above. The reason I'm hesitant to just accept the 64-bit immediate and corresponding <code>InstructionData</code> growth is that I think the latter will have a surprisingly large impact on compile-time performance; allocating the space only when needed (via another instruction) should be more efficient, even though it's less theoretically clean.</p>\n</blockquote>",
+        "id": 248643965,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628271762
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894417977\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>I considered doing the <code>iadd_imm</code> trick but the issue is that overflow needs to be detected (otherwise the 65-bit effective offset isn't correctly calculated). That would involve doing some sort of trap-if-overflow check, but that means that every memory access would have 2 branches instead of one as with this PR. I was hoping to avoid that because I'm assuming the perf hit is already quite large and making it even larger could be worse.</p>\n<p>I think it would work for the time being, but I wanted to explore possibilities to update the cranelift instruction. I think it makes sense to not inflate 16 bytes to 24 bytes, but I wasn't having much luck brainstorming possibilities of how to keep it under 16 bytes (unless we want to change heap indexes to u8 and disallow 256+ heaps (which I'm not sure why we'd want anyway)</p>\n</blockquote>",
+        "id": 248644463,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628272039
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894425345\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>It would only be two checks for offsets &gt;4GiB, no? I'd expect that most Wasm producers use offsets for things like structs and it would be very strange to have an offset that large, so in my thinking at least, it makes sense to treat this as a \"needed for correctness but can be slow\" corner. I may be misunderstanding the issue though?</p>\n<p>Re: heap count, I'd be hesitant about limiting to 256 heaps; we might bump our heads on that in the future multi-module / component world (e.g. heap per Wasm component, with 300 components in a very large dependency graph -- at least, that's not totally implausible).</p>\n</blockquote>",
+        "id": 248646234,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628272845
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894427031\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>Hm nah that's a good point. We already incur a real bounds check on wasm32 for 2gb+ offsets so having an extra bounds check on wasm64 for 4gb+ bounds makes sense. I'll go ahead and implement that doing an addition with a overflow check if the offset doesn't fit in a u32</p>\n</blockquote>",
+        "id": 248646579,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628273005
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-894450701\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>For reviewers, extra care when reviewing <code>cranelift/wasm/src/code_translator.rs</code> is likely in order. That's some tricky code that's pretty meticulously set up. It has large effects on performance and is the lynchpin of wasm heap correctness, so just want to triple-check I'm right there.</p>\n</blockquote>",
+        "id": 248651997,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628275501
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-897180303\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>@peterhuene oh I realize now I tagged you here without much context. Would you be ok reviewing the Wasmtime-specific pieces of this? If not no worries, I'm sure I can find another unwilling <del>victim</del> candidate.</p>\n</blockquote>",
+        "id": 249174356,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628718880
+    },
+    {
+        "content": "<p>alexcrichton edited a <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-897180303\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>@peterhuene oh I realize now I tagged you here without much context. Would you be ok reviewing the Wasmtime-specific pieces of this? If not no worries, I'm sure I can find another <del>unwilling victim</del> candidate.</p>\n</blockquote>",
+        "id": 249174379,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628718892
+    },
+    {
+        "content": "<p>peterhuene <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-897183750\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p><span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span> I'll review it now.</p>\n</blockquote>",
+        "id": 249174513,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628718977
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153#issuecomment-897696962\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3153\">issue #3153</a>:</p>\n<blockquote>\n<p>Thanks @peterhuene!</p>\n</blockquote>",
+        "id": 249243400,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1628779216
+    }
+]

@@ -1,0 +1,465 @@
+<html>
+<head><meta charset="utf-8"><title>tokio always reports readiness · wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/index.html">wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html">tokio always reports readiness</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="419730090"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419730090" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419730090">(Feb 04 2024 at 20:53)</a>:</h4>
+<p>I'm investigating a bug in the wasi implementation, but can't figure it out.</p>
+<p>If <code>input-stream::blocking-read</code> succeeds, the returned buffer must contain at least one byte. I noticed that this is not the case for TCP sockets.</p>
+<p>I tracked it down to <code>tokio::net::TcpStream::readable().await</code>. That immediately reports readiness. And yet after that, the call to <code>read</code> call returns WouldBlock.<br>
+My initial instinct was that this would be a one-off spurious wakeup kind of deal. So I wrapped it in a loop, expecting the second await for readiness to correctly suspend.<br>
+Unfortunately, it ends up in a spin loop. Interestingly, it only happens in the <code>async_</code> testsuite, not the <code>sync</code> tests.</p>
+<p>A small repro here: <a href="https://github.com/badeend/wasmtime/commit/e788501c3ba8283670cfa5071d99a7565e711d32">https://github.com/badeend/wasmtime/commit/e788501c3ba8283670cfa5071d99a7565e711d32</a></p>
+<h3><code>sync::preview2_tcp_sample_application</code> (Correct)</h3>
+<p>Outputs just once:</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>ready?
+ready!
+</code></pre></div>
+<h3><code>async_::preview2_tcp_sample_application</code> (Incorrect)</h3>
+<p>Output (truncated):</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>ready?
+ready!
+WouldBlock
+ready?
+ready!
+WouldBlock
+ready?
+ready!
+WouldBlock
+ready?
+ready!
+WouldBlock
+ready?
+ready!
+WouldBlock
+(repeated many more times...)
+</code></pre></div>
+<hr>
+<p>I see that tokio's readiness states have been <a href="https://github.com/badeend/wasmtime/blob/always-readable/crates/wasi/src/preview2/mod.rs#L288">a problem before</a> in wasmtime. But I don't know if this is related, especially as in this case it's the async variant that's not working instead of the sync variant.</p>
+<p>Any pointers?</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/badeend/wasmtime/commit/e788501c3ba8283670cfa5071d99a7565e711d32" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/dd3515ca05d23e90ab539b7543b70f5efa9fedc0\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f353136393066343865326163323831653866306165646130613366656361353732333638636436653864623263626139303764663264633761653463653335362f62616465656e642f7761736d74696d652f636f6d6d69742f65373838353031633362613832383336373063666135303731643939613735363565373131643332)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/badeend/wasmtime/commit/e788501c3ba8283670cfa5071d99a7565e711d32" title="weirdness · badeend/wasmtime@e788501">weirdness · badeend/wasmtime@e788501</a></div><div class="message_embed_description">A fast and secure runtime for WebAssembly. Contribute to badeend/wasmtime development by creating an account on GitHub.</div></div></div>
+
+
+
+<a name="419858265"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419858265" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419858265">(Feb 05 2024 at 14:58)</a>:</h4>
+<p>Weird! You already found the problem line that I would have otherwise pointed out. The general shape of that problem was that we more-or-less weren't pumping the event loop or yielding properly, and once we returned to the event loop the I/O object got to realize it wasn't ready (or was, I forget which)</p>
+<p>You also applied what I would have already suggested which is to throw a loop around the object. The documentation for <a href="https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html#method.try_read_buf"><code>try_read_buf</code></a> has basically what should be happening at the wasm level as well.</p>
+<p>Are you on Windows perhaps? If not, what system are you on?</p>
+
+
+
+<a name="419859627"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419859627" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419859627">(Feb 05 2024 at 15:02)</a>:</h4>
+<p>Linux</p>
+
+
+
+<a name="419859714"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419859714" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419859714">(Feb 05 2024 at 15:02)</a>:</h4>
+<p>(or WSL technically)</p>
+
+
+
+<a name="419864094"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419864094" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419864094">(Feb 05 2024 at 15:21)</a>:</h4>
+<p>I already tried sprinkling yield_now around in various places, but without effect</p>
+
+
+
+<a name="419868864"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419868864" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419868864">(Feb 05 2024 at 15:42)</a>:</h4>
+<p>Can you run strace and find a loop of syscalls?</p>
+
+
+
+<a name="419868930"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419868930" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419868930">(Feb 05 2024 at 15:42)</a>:</h4>
+<p>I can also test out when I land later too</p>
+
+
+
+<a name="419894353"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419894353" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419894353">(Feb 05 2024 at 17:40)</a>:</h4>
+<p>I checked out the commit you referenced above (e788501c3ba8283670cfa5071d99a7565e711d32) and ran <code>cargo test -p wasmtime-wasi sample_application</code> and was unfortunately unable to reproduce:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">test</span><span class="w"> </span><span class="n">async_</span>::<span class="n">preview2_udp_sample_application</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="n">ok</span>
+<span class="n">test</span><span class="w"> </span><span class="n">sync</span>::<span class="n">preview2_udp_sample_application</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="n">ok</span>
+<span class="n">test</span><span class="w"> </span><span class="n">sync</span>::<span class="n">preview2_tcp_sample_application</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="n">ok</span>
+<span class="n">test</span><span class="w"> </span><span class="n">async_</span>::<span class="n">preview2_tcp_sample_application</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="n">ok</span>
+</code></pre></div>
+<p>I tested a second linux system and also didn't get a failure there. Should I be doing something else to reproduce though?</p>
+
+
+
+<a name="419898353"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419898353" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419898353">(Feb 05 2024 at 18:02)</a>:</h4>
+<p>Correct, the test doesn;t fail, because of the busy loop</p>
+
+
+
+<a name="419898457"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419898457" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419898457">(Feb 05 2024 at 18:03)</a>:</h4>
+<p>If you run with nocapture you see all the log outputs:</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>RUST_BACKTRACE=full WASMTIME_BACKTRACE_DETAILS=1 cargo test async_::preview2_tcp_sample_application --features wasmtime-wasi/preview2 --package wasmtime-wasi -- --nocapture
+</code></pre></div>
+
+
+
+<a name="419898751"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419898751" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419898751">(Feb 05 2024 at 18:05)</a>:</h4>
+<p>Or revert the change in <a href="http://io.rs">io.rs</a>, then you'll see it fail.</p>
+
+
+
+<a name="419899085"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419899085" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419899085">(Feb 05 2024 at 18:07)</a>:</h4>
+<p>Hm using that command I see one instance of <code>ready?</code> <code>ready!</code> but no more</p>
+
+
+
+<a name="419899734"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419899734" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419899734">(Feb 05 2024 at 18:10)</a>:</h4>
+<p><span aria-label="thinking" class="emoji emoji-1f914" role="img" title="thinking">:thinking:</span></p>
+
+
+
+<a name="419899855"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419899855" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419899855">(Feb 05 2024 at 18:11)</a>:</h4>
+<p>I'm also on a plane connected over ssh to the timings are probably much different than if it were local</p>
+
+
+
+<a name="419903727"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419903727" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419903727">(Feb 05 2024 at 18:35)</a>:</h4>
+<p>Hmm, when I run it on Windows natively, it works fine as well..</p>
+
+
+
+<a name="419907062"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/419907062" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#419907062">(Feb 05 2024 at 18:54)</a>:</h4>
+<p>May I ask what version of the Linux kernel you're running?</p>
+
+
+
+<a name="420075613"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420075613" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420075613">(Feb 06 2024 at 15:42)</a>:</h4>
+<p>I tested <code>Linux arm2-ci.infra.bytecodealliance.org 5.15.0-89-generic #99-Ubuntu SMP Mon Oct 30 23:43:36 UTC 2023 aarch64 aarch64 aarch64 GNU/Linux</code> and <code>Linux fhaweignbi 6.7.1-060701-generic #202401201133 SMP PREEMPT_DYNAMIC Sat Jan 20 11:43:06 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux</code></p>
+
+
+
+<a name="420075635"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420075635" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420075635">(Feb 06 2024 at 15:43)</a>:</h4>
+<p>so 5.15 and 6.7.1</p>
+
+
+
+<a name="420243676"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420243676" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420243676">(Feb 07 2024 at 12:45)</a>:</h4>
+<p>Alright thanks. I saw <a href="https://stackoverflow.com/questions/75094513/how-to-correctly-poll-after-wouldblock">this stackoverflow post</a> that describes almost the exact same issue, but that was closed without a satisfying answer.</p>
+<p>Anyway, I ran the repro on a fresh ubuntu 22.04 install and the problem still persists there. Next, I ran a <code>strace</code> like you suggested:</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>[pid 35964] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 8
+[pid 35964] epoll_ctl(5, EPOLL_CTL_ADD, 8, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data={u32=0, u64=0}} &lt;unfinished ...&gt;
+[pid 35965] &lt;... epoll_wait resumed&gt;[{events=EPOLLOUT|EPOLLHUP, data={u32=0, u64=0}}], 1024, 948) = 1
+[pid 35964] &lt;... epoll_ctl resumed&gt;)    = 0
+[pid 35965] epoll_wait(3,  &lt;unfinished ...&gt;
+[pid 35964] connect(8, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("93.184.216.34")}, 16) = -1 EINPROGRESS (Operation now in progress)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+
+(many more times...)
+
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)
+[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 1 ([{fd=8, revents=POLLOUT}])
+[pid 35965] &lt;... epoll_wait resumed&gt;[{events=EPOLLOUT, data={u32=0, u64=0}}], 1024, 989) = 1
+[pid 35964] getsockopt(8, SOL_SOCKET, SO_ERROR, [0], [4]) = 0
+[pid 35965] epoll_wait(3,  &lt;unfinished ...&gt;
+[pid 35964] sendto(8, "GET / HTTP/1.1\r\nHost: example.co"..., 37, MSG_NOSIGNAL, NULL, 0) = 37
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+
+(many more times...)
+
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7)     = 7
+[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)
+[pid 35964] write(1, "WouldBlock\n", 11) = 11
+[pid 35964] write(1, "ready?\n", 7)     = 7
+[pid 35964] write(1, "ready!\n", 7 &lt;unfinished ...&gt;
+[pid 35965] &lt;... epoll_wait resumed&gt;[{events=EPOLLIN|EPOLLOUT, data={u32=0, u64=0}}], 1024, -1) = 1
+[pid 35964] &lt;... write resumed&gt;)        = 7
+[pid 35965] epoll_wait(3,  &lt;unfinished ...&gt;
+[pid 35964] recvfrom(8,  &lt;unfinished ...&gt;
+[pid 35965] &lt;... epoll_wait resumed&gt;[{events=EPOLLIN|EPOLLOUT, data={u32=0, u64=0}}], 1024, -1) = 1
+[pid 35964] &lt;... recvfrom resumed&gt;"HTTP/1.1 200 OK\r\nAge: 33142\r\nCac"..., 10000, 0, NULL, NULL) = 1590
+[pid 35965] epoll_wait(3,  &lt;unfinished ...&gt;
+[pid 35964] mprotect(0x7f7244120000, 65536, PROT_READ|PROT_WRITE) = 0
+[pid 35964] epoll_ctl(5, EPOLL_CTL_DEL, 8, NULL) = 0
+[pid 35964] close(8)                    = 0
+</code></pre></div>
+<p>First of all, the same problem apparently also happens while the socket is connecting.<br>
+Secondly, I'm not familar with the inner workings of tokio, but I would expect there to be a <code>poll</code>/<code>epoll_wait</code> call after the initial <code>recvfrom</code> returns <code>EAGAIN</code>.</p>
+<div class="message_embed"><a class="message_embed_image" href="https://stackoverflow.com/questions/75094513/how-to-correctly-poll-after-wouldblock" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/925df65c212e80f19e81fcac1fb25e660797c3ce\/68747470733a2f2f63646e2e737374617469632e6e65742f53697465732f737461636b6f766572666c6f772f496d672f6170706c652d746f7563682d69636f6e40322e706e673f763d373364373961383962646564)"></a><div class="data-container"><div class="message_embed_title"><a href="https://stackoverflow.com/questions/75094513/how-to-correctly-poll-after-wouldblock" title="How to correctly poll after WouldBlock?">How to correctly poll after WouldBlock?</a></div><div class="message_embed_description">I am developing Rust Tokio library for ISO-TP. CAN protocol, which lets you send larger messages. The program is aimed towards linux only.
+For this, I am using Tokio structure AsyncFd. When the wri...</div></div></div>
+
+
+
+<a name="420258988"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420258988" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420258988">(Feb 07 2024 at 14:04)</a>:</h4>
+<p>Looking into this so the looping behavior on <code>connect</code> makes sense since we're not properly hooking into tokio, we need to do something along the lines of <code>io.do_io(|| ...)</code> or similar. Either that or we need to avoid using <code>rustix</code> here and need to use the tokio primitives, but I haven't looked too much into this.</p>
+
+
+
+<a name="420259182"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420259182" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420259182">(Feb 07 2024 at 14:06)</a>:</h4>
+<p>I'm still not sure why after a read we don't hit epoll</p>
+
+
+
+<a name="420268143"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420268143" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420268143">(Feb 07 2024 at 14:47)</a>:</h4>
+<p>Even with <a href="https://github.com/badeend/wasmtime/commit/d4675fad4db2c016327a73c0de5d03c107182cfe">these changes</a>, connecting still performs a busy loop</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/badeend/wasmtime/commit/d4675fad4db2c016327a73c0de5d03c107182cfe" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/3f499c349e6a1bd70f71cd0eb7dbc956805fdbf8\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f646139333031363236373265326264663538376266636165643330353662326665613161316262323030313639383461303563316535306634333833613237322f62616465656e642f7761736d74696d652f636f6d6d69742f64343637356661643464623263303136333237613733633064653564303363313037313832636665)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/badeend/wasmtime/commit/d4675fad4db2c016327a73c0de5d03c107182cfe" title="Let tokio know the socket is not ready yet. Also, just to be sure; re… · badeend/wasmtime@d4675fa">Let tokio know the socket is not ready yet. Also, just to be sure; re… · badeend/wasmtime@d4675fa</a></div><div class="message_embed_description">…wrote TcpSocket::subscribe to only poll the event we're interested in</div></div></div>
+
+
+
+<a name="420275356"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420275356" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420275356">(Feb 07 2024 at 15:17)</a>:</h4>
+<p>I attached the debugger and logged tokio's internal ready state of the socket over the program's lifetime</p>
+
+
+
+<a name="420275730"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420275730" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420275730">(Feb 07 2024 at 15:19)</a>:</h4>
+<p>prettier names for the states:</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>0:  Ready::EMPTY
+1:  Ready::READABLE
+2:  Ready::WRITABLE
+3:  Ready::READABLE | Ready::WRITABLE
+4:  Ready::READ_CLOSED
+10: Ready::WRITABLE | Ready::WRITE_CLOSED
+14: Ready::WRITABLE | Ready::READ_CLOSED | Ready::WRITE_CLOSED
+31: Ready::ALL
+</code></pre></div>
+<p>Results for the <code>sync</code> version:</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>wasi tcp-socket::create_tcp_socket
+wasi tcp-socket::start_connect
+tokio::io::Registration::try_io: ev.ready == 0
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+tokio::io::ScheduledIo::wake was called with: ready == 2
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+wasi output-stream::write
+tokio::io::Registration::try_io: ev.ready == 2
+crate::preview2::tcp::TcpReadStream: ready?
+tokio::io::ScheduledIo::wake was called with: ready == 3
+crate::preview2::tcp::TcpReadStream: ready!
+wasi input-stream::read
+tokio::io::Registration::try_io: ev.ready == 1
+tokio::io::ScheduledIo::wake was called with: ready == 2
+wasi tcp-socket::drop
+</code></pre></div>
+<p>Seems all ok to me.</p>
+
+
+
+<a name="420275980"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420275980" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420275980">(Feb 07 2024 at 15:20)</a>:</h4>
+<p>But the <code>async_</code> version:</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>wasi tcp-socket::create_tcp_socket
+tokio::io::ScheduledIo::wake was called with: ready == 14
+wasi tcp-socket::start_connect
+tokio::io::Registration::try_io: ev.ready == 10
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+wasi tcp-socket::finish_connect
+crate::preview2::tcp::TcpSocket: ready?
+crate::preview2::tcp::TcpSocket: ready!
+tokio::io::ScheduledIo::wake was called with: ready == 2
+wasi tcp-socket::finish_connect
+wasi output-stream::write
+tokio::io::Registration::try_io: ev.ready == 10
+crate::preview2::tcp::TcpReadStream: ready?
+crate::preview2::tcp::TcpReadStream: ready!
+wasi input-stream::read
+tokio::io::Registration::try_io: ev.ready == 4
+tokio's TcpStream::try_read_buf returned WouldBlock
+crate::preview2::tcp::TcpReadStream: ready?
+crate::preview2::tcp::TcpReadStream: ready!
+wasi input-stream::read
+tokio::io::Registration::try_io: ev.ready == 4
+tokio's TcpStream::try_read_buf returned WouldBlock
+crate::preview2::tcp::TcpReadStream: ready?
+crate::preview2::tcp::TcpReadStream: ready!
+wasi input-stream::read
+tokio::io::Registration::try_io: ev.ready == 4
+tokio's TcpStream::try_read_buf returned WouldBlock
+crate::preview2::tcp::TcpReadStream: ready?
+crate::preview2::tcp::TcpReadStream: ready!
+wasi input-stream::read
+tokio::io::Registration::try_io: ev.ready == 4
+tokio's TcpStream::try_read_buf returned WouldBlock
+crate::preview2::tcp::TcpReadStream: ready?
+crate::preview2::tcp::TcpReadStream: ready!
+wasi input-stream::read
+tokio::io::Registration::try_io: ev.ready == 4
+tokio's TcpStream::try_read_buf returned WouldBlock
+crate::preview2::tcp::TcpReadStream: ready?
+crate::preview2::tcp::TcpReadStream: ready!
+wasi input-stream::read
+tokio::io::Registration::try_io: ev.ready == 4
+tokio::io::ScheduledIo::wake was called with: ready == 3
+tokio::io::ScheduledIo::wake was called with: ready == 2
+wasi tcp-socket::drop
+tokio::io::ScheduledIo::wake was called with: ready == 31
+</code></pre></div>
+<p>The socket immediately jumps to <code>Ready::WRITABLE | Ready::READ_CLOSED | Ready::WRITE_CLOSED</code> after creation.<br>
+<span aria-label="face with raised eyebrow" class="emoji emoji-1f928" role="img" title="face with raised eyebrow">:face_with_raised_eyebrow:</span></p>
+
+
+
+<a name="420281852"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420281852" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420281852">(Feb 07 2024 at 15:46)</a>:</h4>
+<p>weird! From the syscalls above that's probably:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">[</span><span class="n">pid</span><span class="w"> </span><span class="mi">35964</span><span class="p">]</span><span class="w"> </span><span class="n">epoll_ctl</span><span class="p">(</span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="n">EPOLL_CTL_ADD</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">events</span><span class="o">=</span><span class="n">EPOLLIN</span><span class="o">|</span><span class="n">EPOLLOUT</span><span class="o">|</span><span class="n">EPOLLRDHUP</span><span class="o">|</span><span class="n">EPOLLET</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="kt">u32</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="kt">u64</span><span class="o">=</span><span class="mi">0</span><span class="p">}}</span><span class="w"> </span><span class="o">&lt;</span><span class="n">unfinished</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="o">&gt;</span>
+<span class="p">[</span><span class="n">pid</span><span class="w"> </span><span class="mi">35965</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;..</span><span class="p">.</span><span class="w"> </span><span class="n">epoll_wait</span><span class="w"> </span><span class="n">resumed</span><span class="o">&gt;</span><span class="p">[{</span><span class="n">events</span><span class="o">=</span><span class="n">EPOLLOUT</span><span class="o">|</span><span class="n">EPOLLHUP</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="kt">u32</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="kt">u64</span><span class="o">=</span><span class="mi">0</span><span class="p">}}],</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span><span class="w"> </span><span class="mi">948</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+</code></pre></div>
+<p>at the very beginning</p>
+
+
+
+<a name="420281978"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420281978" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420281978">(Feb 07 2024 at 15:46)</a>:</h4>
+<p>if it thinks it's hung up that makes sense why it keeps returning immediately</p>
+
+
+
+<a name="420281999"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420281999" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420281999">(Feb 07 2024 at 15:46)</a>:</h4>
+<p>why it things it's hung up though is a mystery</p>
+
+
+
+<a name="420282483"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420282483" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420282483">(Feb 07 2024 at 15:48)</a>:</h4>
+<p>I wonder if this is like WSL-specific behavior where we have to avoid adding the socket to the epoll set until after the connect is issued? Or something like that?</p>
+
+
+
+<a name="420288366"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420288366" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dave Bakker (badeend) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420288366">(Feb 07 2024 at 16:12)</a>:</h4>
+<p>I don't think this is WSL specific.</p>
+<ol>
+<li><a href="https://stackoverflow.com/questions/14765203/why-am-i-getting-the-epollhup-event-on-a-brand-new-socket">https://stackoverflow.com/questions/14765203/why-am-i-getting-the-epollhup-event-on-a-brand-new-socket</a>.</li>
+<li><a href="https://issues.apache.org/jira/browse/MESOS-9877">https://issues.apache.org/jira/browse/MESOS-9877</a> "In Linux, calling <code>epoll()</code> on a TCP socket before calling connect() will return an EPOLLHUP event on that socket."</li>
+<li><a href="https://groups.google.com/g/comp.os.linux.development.apps/c/ifXtb2dsF3g">https://groups.google.com/g/comp.os.linux.development.apps/c/ifXtb2dsF3g</a> "EPOLLHUP means the<br>
+other end of a communication was closed. In this particular case, it<br>
+is returned for an unconnected stream socket."</li>
+</ol>
+<p>I suspect this has to do with the fact that we <a href="https://github.com/badeend/wasmtime/blob/always-readable/crates/wasi/src/preview2/tcp.rs#L310">forcefully construct</a> a <code>tokio::net::TcpStream</code> <em>before</em> socket has been connected and that tokio was just never designed to handle this.</p>
+<div class="message_embed"><a class="message_embed_image" href="https://stackoverflow.com/questions/14765203/why-am-i-getting-the-epollhup-event-on-a-brand-new-socket" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/925df65c212e80f19e81fcac1fb25e660797c3ce\/68747470733a2f2f63646e2e737374617469632e6e65742f53697465732f737461636b6f766572666c6f772f496d672f6170706c652d746f7563682d69636f6e40322e706e673f763d373364373961383962646564)"></a><div class="data-container"><div class="message_embed_title"><a href="https://stackoverflow.com/questions/14765203/why-am-i-getting-the-epollhup-event-on-a-brand-new-socket" title="Why am I getting the EPOLLHUP event on a brand new socket">Why am I getting the EPOLLHUP event on a brand new socket</a></div><div class="message_embed_description">I have some code that when run on a virtual machine is misbehaving for some reason.
+
+The order of initialization is:
+
+s_listen = socket(...)
+bind(s_listen, ...)
+epoll_ctl(epfd, EPOLL_CTL_ADD, s_lis...</div></div></div>
+
+
+
+<a name="420379153"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/tokio%20always%20reports%20readiness/near/420379153" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/tokio.20always.20reports.20readiness.html#420379153">(Feb 08 2024 at 02:51)</a>:</h4>
+<p>This might be possible to fix by sticking to tokio types rather than using rustix perhaps? We might be able to leverage rustix for anything tokio doesn't implement but basic things like connection and such seems like it should be doable with tokio</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

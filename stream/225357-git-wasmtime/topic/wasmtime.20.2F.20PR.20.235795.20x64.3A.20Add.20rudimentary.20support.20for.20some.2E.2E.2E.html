@@ -1,0 +1,367 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #5795 x64: Add rudimentary support for some... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html">wasmtime / PR #5795 x64: Add rudimentary support for some...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="328132666"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328132666" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328132666">(Feb 16 2023 at 00:12)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/5795">PR #5795</a> from <code>better-avx-supoprt</code> to <code>main</code>:</p>
+<blockquote>
+<p>I was poking around Spidermonkey's wasm backend and saw that the various assembler functions used are all <code>v*</code>-prefixed which look like they're intended for use with AVX instructions. I looked at Cranelift and it currently doesn't have support for many AVX-based instructions, so I figured I'd take a crack at it!</p>
+<p>The support added here is a bit of a mishmash when viewed alone, but my general goal was to take a single instruction from the SIMD proposal for WebAssembly and migrate all of its component instructions to AVX. I, by random chance, picked a pretty complicated instruction of <code>f32x4.min</code>. This wasm instruction is implemented on x64 with 4 unique SSE instructions and ended up being a pretty good candidate.</p>
+<p>Further digging about AVX-vs-SSE shows that there should be two major benefits to using AVX over SSE:</p>
+<ul>
+<li>
+<p>Primarily AVX instructions largely use a three-operand form where two input registers are operated with and an output register is also specified. This is in contrast to SSE's predominant one-register-is-input-but-also-output pattern. This should help free up the register allocator a bit and additionally remove the need for movement between registers.</p>
+</li>
+<li>
+<p>As #4767 notes the memory-based operations of VEX-encoded instructions (aka AVX instructions) do not have strict alignment requirements which means we would be able to sink loads and stores into individual instructions instead of having separate instructions.</p>
+</li>
+</ul>
+<p>So I set out on my journey to implement the instructions used by <code>f32x4.min</code>. The first few were fairly easy. The machinst backends are already of the shape "take these inputs and compute the output" where the x86 requirement of a register being both input and output is postprocessed in. This means that the <code>inst.isle</code> creation helpers for SSE instructions were already of the correct form to use AVX. I chose to add new <code>rule</code> branches for the instruction creation helpers, for example <code>x64_andnps</code>. The new <code>rule</code> conditionally only runs if AVX is enabled and emits an AVX instruction instead of an SSE instruction for achieving the same goal. This means that no lowerings of clif instructions were modified, instead just new instructions are being generated.</p>
+<p>The VEX encoding was previously not heavily used in Cranelift. The only current user are the FMA-style instructions that Cranelift has at this time. These FMA instructions have one extra operand than <code>vandnps</code>, for example, so I split the existing <code>XmmRmRVex</code> into a few more variants to fit the shape of the instructions that needed generating for <code>f32x4.min</code>. This was accompanied then with more AVX opcode definitions, more emission support, etc.</p>
+<p>Upon implementing all of this it turned out that the test suite was failing on my machine due to the memory-operand encodings of VEX instructions not being supported. I didn't explicitly add those in myself but some preexisting RIP-relative addressing was leaking into the new instructions with existing tests. I opted to go ahead and fill out the memory addressing modes of VEX encoding to get the tests passing again.</p>
+<p>All-in-all this PR adds new instructions to the x64 backend for a number of AVX instructions, updates 5 existing instruction producers to use AVX instructions conditionally, implements VEX memory operands, and adds some simple tests for the new output of <code>f32x4.min</code>. The existing runtest for <code>f32x.min</code> caught a few intermediate bugs along the way and I additionally added a plain <code>target x86_64</code> to that runtest to ensure that it executes with and without AVX to test the various lowerings. I'll also note that this, and future support, should be well-fuzzed through Wasmtime's fuzzing which may explicitly disable AVX support despite the machine having access to AVX, so non-AVX lowerings should be well-tested into the future.</p>
+<p>It's also worth mentioning that I am not an AVX or VEX or x64 expert. Implementing the memory operand part for VEX was the hardest part of this PR and while I think it should be good someone else should definitely double-check me. Additionally I haven't added many instructions to the x64 backend yet so I may have missed obvious places to tests or such, so am happy to follow-up with anything to be more thorough if necessary.</p>
+<p>Finally I should note that this is just the tip of the iceberg when it comes to AVX. My hope is to get some of the idioms sorted out to make it easier for future PRs to add one-off instruction lowerings or such.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="328166243"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328166243" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328166243">(Feb 16 2023 at 07:09)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1300861574">PR review</a>.</p>
+
+
+
+<a name="328166244"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328166244" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328166244">(Feb 16 2023 at 07:09)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1300861574">PR review</a>.</p>
+
+
+
+<a name="328166245"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328166245" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328166245">(Feb 16 2023 at 07:09)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108083970">PR review comment</a>:</p>
+<blockquote>
+<p>This (and the other <code>fma</code>) decl's can be updated now that we support XmmMem right?</p>
+</blockquote>
+
+
+
+<a name="328168168"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328168168" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328168168">(Feb 16 2023 at 07:24)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1300883958">PR review</a>.</p>
+
+
+
+<a name="328168169"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328168169" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328168169">(Feb 16 2023 at 07:24)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1300883958">PR review</a>.</p>
+
+
+
+<a name="328168170"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328168170" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328168170">(Feb 16 2023 at 07:24)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108098425">PR review comment</a>:</p>
+<blockquote>
+<p>I would have expected that in this case the load could have been merged into <code>vorps</code>, any idea why that didn't happen?</p>
+</blockquote>
+
+
+
+<a name="328212916"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328212916" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328212916">(Feb 16 2023 at 11:30)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301213043">PR review</a>.</p>
+
+
+
+<a name="328212917"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328212917" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328212917">(Feb 16 2023 at 11:30)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301213043">PR review</a>.</p>
+
+
+
+<a name="328212918"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328212918" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328212918">(Feb 16 2023 at 11:30)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108333353">PR review comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>;; Helper for creating `MInst.XmmRmiRVex` instructions.
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="328212919"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328212919" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328212919">(Feb 16 2023 at 11:30)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108322160">PR review comment</a>:</p>
+<blockquote>
+<p>I don't think we can update this to <code>XmmMem</code> since <code>minps</code> requires alignment, but its unfortunate since it also prevents loads sinking into the AVX version.</p>
+<p>Is there another way around it? I suspect we are going to run into more cases like this in the future.</p>
+<p>My thoughts would be to do something like:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">load_me_maybe</span><span class="w"> </span><span class="p">(</span><span class="nv">XmmMem</span><span class="p">)</span><span class="w"> </span><span class="nv">Xmm</span><span class="p">)</span>
+
+<span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">x64_minps</span><span class="w"> </span><span class="p">(</span><span class="nv">Xmm</span><span class="w"> </span><span class="nv">XmmMem</span><span class="p">)</span><span class="w"> </span><span class="nv">Xmm</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">(</span><span class="nv">x64_minps</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span>
+<span class="w">      </span><span class="p">(</span><span class="nv">xmm_rm_r</span><span class="w"> </span><span class="p">(</span><span class="nv">SseOpcode.Minps</span><span class="p">)</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="p">(</span><span class="nv">load_me_maybe</span><span class="w"> </span><span class="nv">y</span><span class="p">)))</span>
+</code></pre></div>
+<p>But I'm not sure how good an idea that is, and we definitely don't need to do it in this PR.</p>
+</blockquote>
+
+
+
+<a name="328261292"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328261292" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328261292">(Feb 16 2023 at 15:06)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108605746">PR review comment</a>:</p>
+<blockquote>
+<p>It looks like for loads to be sunk we need a bunch of additional stuff. Which for some reason I had the idea wasn't necessary before.</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/d30ce3192b416010fe3d6fe3a573cad743b7a2b7/cranelift/codegen/src/isa/x64/lower.isle#L3607-L3610">https://github.com/bytecodealliance/wasmtime/blob/d30ce3192b416010fe3d6fe3a573cad743b7a2b7/cranelift/codegen/src/isa/x64/lower.isle#L3607-L3610</a></p>
+<p>So that probably explains why this particular case didn't get sunk. <code>bor</code> doesen't have a special case for sinking loads for floats (but does have it for integers).</p>
+</blockquote>
+
+
+
+<a name="328261303"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328261303" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328261303">(Feb 16 2023 at 15:06)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301641921">PR review</a>.</p>
+
+
+
+<a name="328265948"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328265948" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328265948">(Feb 16 2023 at 15:23)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5795">PR #5795</a> from <code>better-avx-supoprt</code> to <code>main</code>.</p>
+
+
+
+<a name="328267003"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267003" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267003">(Feb 16 2023 at 15:27)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301691780">PR review</a>.</p>
+
+
+
+<a name="328267004"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267004" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267004">(Feb 16 2023 at 15:27)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108638329">PR review comment</a>:</p>
+<blockquote>
+<p>It should yeah! As you've seen though I think more intrusive handling is going to be required to get fused memory loads/stores into these operations as well. For now I think it might be best to defer switching everything over to <code>XmmMem</code> for a future PR to holistically try to handle everything in one go. The main reason I added memory encodings for VEX instructions was just because a test case ended up requiring it in Wasmtime which I wasn't expecting!</p>
+</blockquote>
+
+
+
+<a name="328267251"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267251" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267251">(Feb 16 2023 at 15:28)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301696869">PR review</a>.</p>
+
+
+
+<a name="328267256"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267256" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267256">(Feb 16 2023 at 15:28)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108640649">PR review comment</a>:</p>
+<blockquote>
+<p>Ah yeah I think we'll have to add all the <code>sinkable_load</code> business to the rules for all the lowerings here. That shouldn't be too too bad as it's basically the same as all the other arithmetic instructions.<br>
+</p>
+</blockquote>
+
+
+
+<a name="328267495"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267495" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267495">(Feb 16 2023 at 15:29)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301702081">PR review</a>.</p>
+
+
+
+<a name="328267496"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267496" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267496">(Feb 16 2023 at 15:29)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108643052">PR review comment</a>:</p>
+<blockquote>
+<p>Yeah I agree, It's probably better to do it all in a future PR! <span aria-label="+1" class="emoji emoji-1f44d" role="img" title="+1">:+1:</span> </p>
+</blockquote>
+
+
+
+<a name="328267654"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267654" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267654">(Feb 16 2023 at 15:29)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301705998">PR review</a>.</p>
+
+
+
+<a name="328267655"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267655" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267655">(Feb 16 2023 at 15:29)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108644693">PR review comment</a>:</p>
+<blockquote>
+<p>One idea I had was that in the <code>sinkable_load</code> extractor a helper function <code>is_mergeable_load</code> is called which currently says <code>false</code> for all SIMD-based loads if they aren't flagged as aligned. I was thinking that if we have complete AVX support we might be able to make that function conditional where if AVX is enabled then it allows unaligned loads but if not it disallows unaligned loads. That's still somewhat brittle, though, so I don't honestly know the best way to handle this at this time.</p>
+</blockquote>
+
+
+
+<a name="328267977"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267977" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267977">(Feb 16 2023 at 15:31)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301713128">PR review</a>.</p>
+
+
+
+<a name="328267979"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328267979" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328267979">(Feb 16 2023 at 15:31)</a>:</h4>
+<p>afonso360 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108647492">PR review comment</a>:</p>
+<blockquote>
+<p>Similar to the above comments, we should probably do load sinking in a separate PR since it is a bit more advanced.</p>
+</blockquote>
+
+
+
+<a name="328268090"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328268090" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328268090">(Feb 16 2023 at 15:31)</a>:</h4>
+<p>afonso360 edited <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108647492">PR review comment</a>.</p>
+
+
+
+<a name="328269423"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328269423" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328269423">(Feb 16 2023 at 15:37)</a>:</h4>
+<p>afonso360 edited <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108647492">PR review comment</a>.</p>
+
+
+
+<a name="328284927"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328284927" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328284927">(Feb 16 2023 at 16:45)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301844810">PR review</a>.</p>
+
+
+
+<a name="328284928"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328284928" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328284928">(Feb 16 2023 at 16:45)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301844810">PR review</a>.</p>
+
+
+
+<a name="328284932"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328284932" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328284932">(Feb 16 2023 at 16:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108746982">PR review comment</a>:</p>
+<blockquote>
+<p>Is this an actual TODO or is that arm just unreachable given the set of AVX instructions we support right now?</p>
+</blockquote>
+
+
+
+<a name="328284933"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328284933" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328284933">(Feb 16 2023 at 16:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108731005">PR review comment</a>:</p>
+<blockquote>
+<p>Nitpick: doc comment is slightly outdated now.</p>
+</blockquote>
+
+
+
+<a name="328284934"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328284934" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328284934">(Feb 16 2023 at 16:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108739511">PR review comment</a>:</p>
+<blockquote>
+<blockquote>
+<p>That's still somewhat brittle, though, so I don't honestly know the best way to handle this at this time.</p>
+</blockquote>
+<p>We could pass the opcode to <code>is_mergeable_load</code> as well and have an allow list for AVX instructions that don't barf on unaligned loads.</p>
+</blockquote>
+
+
+
+<a name="328291299"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328291299" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328291299">(Feb 16 2023 at 17:14)</a>:</h4>
+<p>elliottt submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1301935297">PR review</a>.</p>
+
+
+
+<a name="328291300"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328291300" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328291300">(Feb 16 2023 at 17:14)</a>:</h4>
+<p>elliottt created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1108790643">PR review comment</a>:</p>
+<blockquote>
+<p>I like that idea! We've already got a separate path for sinking loads for sse operations (<code>put_in_xmm_mem</code>) which would be a great place to add this information. The only downside I can see with changing the signature of that function is that we'd no longer be able to use it as an implicit conversion. I think that might actually be a great change though, as it would force us to be a bit more thoughtful about where we're allowing loads to be sunk for sse instructions.</p>
+</blockquote>
+
+
+
+<a name="328325285"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328325285" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328325285">(Feb 16 2023 at 20:01)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5795">PR #5795</a> from <code>better-avx-supoprt</code> to <code>main</code>.</p>
+
+
+
+<a name="328353341"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328353341" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328353341">(Feb 16 2023 at 23:03)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5795">PR #5795</a> from <code>better-avx-supoprt</code> to <code>main</code>.</p>
+
+
+
+<a name="328353370"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328353370" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328353370">(Feb 16 2023 at 23:03)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1302412896">PR review</a>.</p>
+
+
+
+<a name="328353372"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328353372" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328353372">(Feb 16 2023 at 23:03)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1109110537">PR review comment</a>:</p>
+<blockquote>
+<p>Ah just an unreachable arm, I've updated the panic invocation to indicate that</p>
+</blockquote>
+
+
+
+<a name="328355919"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328355919" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328355919">(Feb 16 2023 at 23:24)</a>:</h4>
+<p>afonso360 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1302430719">PR review</a>.</p>
+
+
+
+<a name="328357387"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328357387" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328357387">(Feb 16 2023 at 23:37)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#pullrequestreview-1302440303">PR review</a>.</p>
+
+
+
+<a name="328357388"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328357388" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328357388">(Feb 16 2023 at 23:37)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5795#discussion_r1109130860">PR review comment</a>:</p>
+<blockquote>
+<p>Alternate idea, for future consideration: an instruction that takes a R/M arg but requires alignment could encode that in the type, via e.g. an <code>XmmMemAligned</code> arg. (If we currently have a case where we use the same <code>MInst</code> enum variant for an alignment-required opcode and not, we should split into separate variants.) Then if we made a pass over all instructions to ensure we got the types right, we can be much more permissive with the automatic conversions everywhere, without having to worry about continued vigilance with explicit <code>put_in_xmm_mem</code>, etc.</p>
+</blockquote>
+
+
+
+<a name="328372894"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235795%20x64%3A%20Add%20rudimentary%20support%20for%20some.../near/328372894" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235795.20x64.3A.20Add.20rudimentary.20support.20for.20some.2E.2E.2E.html#328372894">(Feb 17 2023 at 02:12)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/5795">PR #5795</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

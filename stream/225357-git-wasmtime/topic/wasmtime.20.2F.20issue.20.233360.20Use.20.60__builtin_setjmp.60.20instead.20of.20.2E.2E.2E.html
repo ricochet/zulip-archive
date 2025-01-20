@@ -1,0 +1,152 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #3360 Use `__builtin_setjmp` instead of ... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html">wasmtime / issue #3360 Use `__builtin_setjmp` instead of ...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="253622460"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233360%20Use%20%60__builtin_setjmp%60%20instead%20of%20.../near/253622460" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html#253622460">(Sep 16 2021 at 17:54)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/pull/3360#issuecomment-921110484">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3360">issue #3360</a>:</p>
+<blockquote>
+<blockquote>
+<p>An important caveat is that GCC arranges to save and restore only those registers known to the specific architecture variant being compiled for. This can make __builtin_setjmp and __builtin_longjmp more efficient than their library counterparts in some cases, but it can also cause incorrect and mysterious behavior when mixing with code that uses the full register set.</p>
+</blockquote>
+<p>This has me worried. What are the exact conditions in which this causes incorrect behavior?</p>
+</blockquote>
+
+
+
+<a name="253631447"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233360%20Use%20%60__builtin_setjmp%60%20instead%20of%20.../near/253631447" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html#253631447">(Sep 16 2021 at 18:51)</a>:</h4>
+<p>sunfishcode <a href="https://github.com/bytecodealliance/wasmtime/pull/3360#issuecomment-921157941">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3360">issue #3360</a>:</p>
+<blockquote>
+<blockquote>
+<p>This has me worried. What are the exact conditions in which this causes incorrect behavior?</p>
+</blockquote>
+<p>Suppose one of the hardware architectures we support added a new register, and decides to have a convention that it's compiler-managed, and callee-saved. The host compiler doesn't use the new register, because it's targeting the generic architecture family, but Cranelift does use the new register, because cranelift-native.</p>
+<p>Then we could get into a situation like this:</p>
+<div class="codehilite" data-code-language="C"><pre><span></span><code><span class="c1">// compiled by cranelift</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">outer</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">write_the_new_register</span><span class="p">(</span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">catcher</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">read_the_new_register</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="c1">// compiled by the host compiler</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">catcher</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">__builtin_setjmp</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">inner</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="c1">// compiled by cranelift</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">inner</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">save</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">read_the_new_register</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">clobber_the_new_register</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">some</span><span class="w"> </span><span class="n">condition</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">jumper</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">write_the_new_register</span><span class="p">(</span><span class="n">save</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="c1">// compiled by the host compiler</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">jumper</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">__builtin_longjmp</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>In practice, this should be rare, because the major architectures don't add new registers very often, and when they do, it's usually not compiler-managed, and when it is, it's usually call-clobbered. New compiler-managed callee-saved state also breaks many existing <code>libc</code>-implemented <code>setjmp</code> functions in the same way, so it's not often done.<br>
+</p>
+</blockquote>
+
+
+
+<a name="253631608"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233360%20Use%20%60__builtin_setjmp%60%20instead%20of%20.../near/253631608" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html#253631608">(Sep 16 2021 at 18:52)</a>:</h4>
+<p>froydnj <a href="https://github.com/bytecodealliance/wasmtime/pull/3360#issuecomment-921158575">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3360">issue #3360</a>:</p>
+<blockquote>
+<blockquote>
+<blockquote>
+<p>An important caveat is that GCC arranges to save and restore only those registers known to the specific architecture variant being compiled for. This can make __builtin_setjmp and __builtin_longjmp more efficient than their library counterparts in some cases, but it can also cause incorrect and mysterious behavior when mixing with code that uses the full register set.</p>
+</blockquote>
+<p>This has me worried. What are the exact conditions in which this causes incorrect behavior?</p>
+</blockquote>
+<p>It doesn't require mixing and matching with the full register set.  You run into problems like <a href="https://gcc.gnu.org/bugzilla/show_bug.cgi?id=98997">https://gcc.gnu.org/bugzilla/show_bug.cgi?id=98997</a> for instance (clang has the same problem).</p>
+<p>This particular case is not a problem for wasmtime, because all access to <code>__builtin_{set,long}jmp</code> should be within wasmtime itself (and you shouldn't be able to mix-and-match wasmtime runtimes...)</p>
+</blockquote>
+
+
+
+<a name="253633510"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233360%20Use%20%60__builtin_setjmp%60%20instead%20of%20.../near/253633510" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html#253633510">(Sep 16 2021 at 19:03)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/pull/3360#issuecomment-921165880">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3360">issue #3360</a>:</p>
+<blockquote>
+<blockquote>
+<p>In practice, this should be rare, because the major architectures don't add new registers very often</p>
+</blockquote>
+<p>ymm/zmm for avx/avx512 are by default unknown to the compiled wasmtime as only SSE2 is enabled by default for most x86_64 targets.</p>
+<blockquote>
+<p>and when it is, it's usually call-clobbered.</p>
+</blockquote>
+<p>I see. The x86_64 SystemV does indeed list xmm, ymm and zmm as being clobbered.</p>
+</blockquote>
+
+
+
+<a name="253633625"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233360%20Use%20%60__builtin_setjmp%60%20instead%20of%20.../near/253633625" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html#253633625">(Sep 16 2021 at 19:04)</a>:</h4>
+<p>sunfishcode <a href="https://github.com/bytecodealliance/wasmtime/pull/3360#issuecomment-921166204">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3360">issue #3360</a>:</p>
+<blockquote>
+<p>Thanks for that link! Yes, in our case, we know that <code>__builtin_setjmp</code> and <code>__builtin_longjmp</code> are compiled by the same compiler with the same flags&mdash;they're in the same source file, so we're safe from that particular hazard at least.</p>
+<p>We do have a hazard though, in the case of a mismatch between Cranelift's and the host compiler's callee-saved registers. I've added a comment about this to the PR; I'm open to ideas for what else we can do here.</p>
+</blockquote>
+
+
+
+<a name="253634196"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233360%20Use%20%60__builtin_setjmp%60%20instead%20of%20.../near/253634196" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html#253634196">(Sep 16 2021 at 19:08)</a>:</h4>
+<p>sunfishcode <a href="https://github.com/bytecodealliance/wasmtime/pull/3360#issuecomment-921168530">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3360">issue #3360</a>:</p>
+<blockquote>
+<p>For completeness, a form of this hazard is already present in Wasmtime; if someone statically links Wasmtime, the statically-linked-in <code>sigsetjmp</code> will hard-code the registers to save, and if Cranelift at runtime detects and uses more registers and relies on them being callee-saved, it'll also trigger UB.</p>
+</blockquote>
+
+
+
+<a name="253647732"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233360%20Use%20%60__builtin_setjmp%60%20instead%20of%20.../near/253647732" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html#253647732">(Sep 16 2021 at 20:43)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/pull/3360#issuecomment-921231309">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3360">issue #3360</a>:</p>
+<blockquote>
+<p>We may need to disable this for AArch64 with <code>clang</code>, locally when I try to compile it spits out:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">foo</span><span class="p">.</span><span class="n">c</span>:<span class="mi">34</span>:<span class="mi">7</span>: <span class="nc">error</span>: <span class="nc">__builtin_setjmp</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="n">supported</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">target</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">platform_setjmp</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="o">^~~~~~~~~~~~~~~~~~~~</span><span class="w"></span>
+<span class="n">foo</span><span class="p">.</span><span class="n">c</span>:<span class="mi">23</span>:<span class="mi">30</span>: <span class="nc">note</span>: <span class="nc">expanded</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="o">'</span><span class="na">platform_setjmp</span><span class="o">'</span><span class="w"></span>
+#<span class="n">define</span><span class="w"> </span><span class="n">platform_setjmp</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span><span class="w"> </span><span class="n">__builtin_setjmp</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span><span class="w"></span>
+<span class="w">                             </span><span class="o">^~~~~~~~~~~~~~~~~~~~~</span><span class="w"></span>
+<span class="n">foo</span><span class="p">.</span><span class="n">c</span>:<span class="mi">44</span>:<span class="mi">3</span>: <span class="nc">error</span>: <span class="nc">__builtin_longjmp</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="n">supported</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">target</span><span class="w"></span>
+<span class="w">  </span><span class="n">platform_longjmp</span><span class="p">(</span><span class="o">*</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="o">^~~~~~~~~~~~~~~~~~~~~~~~~</span><span class="w"></span>
+<span class="n">foo</span><span class="p">.</span><span class="n">c</span>:<span class="mi">24</span>:<span class="mi">36</span>: <span class="nc">note</span>: <span class="nc">expanded</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="o">'</span><span class="na">platform_longjmp</span><span class="o">'</span><span class="w"></span>
+#<span class="n">define</span><span class="w"> </span><span class="n">platform_longjmp</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span><span class="w"> </span><span class="n">__builtin_longjmp</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span><span class="w"></span>
+<span class="w">                                   </span><span class="o">^~~~~~~~~~~~~~~~~~~~~~~~~~~</span><span class="w"></span>
+<span class="mi">2</span><span class="w"> </span><span class="n">errors</span><span class="w"> </span><span class="n">generated</span><span class="p">.</span><span class="w"></span>
+</code></pre></div>
+<p>Poking around in clang it looks like this is gated on <code>hasSjLjLowering</code> which is true for x86 and arm but not for AArch64</p>
+</blockquote>
+
+
+
+<a name="253814171"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233360%20Use%20%60__builtin_setjmp%60%20instead%20of%20.../near/253814171" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233360.20Use.20.60__builtin_setjmp.60.20instead.20of.20.2E.2E.2E.html#253814171">(Sep 17 2021 at 22:08)</a>:</h4>
+<p>sunfishcode <a href="https://github.com/bytecodealliance/wasmtime/pull/3360#issuecomment-922107817">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/3360">issue #3360</a>:</p>
+<blockquote>
+<p>I fixed the code to compile on clang on aarch64, where <code>__builtin_setmp</code> isn't supported. If there are other architectures/compilers that don't support it, we can add them as needed.</p>
+<p>Talking about this with @cfallin offline, adding new callee-saved registers to cranelift amounts to adding a new ABI, and there are lots of considerations, including calls to and from host code, the register save/restore code in wasmtime-fiber, the <code>__builtin_setjmp</code> issue here, trampolines, and possibly other things, so we'll need to carefully think through the design at that time. I've added a comment to the code added in this PR, which seems to be the main useful thing we can do for now.<br>
+</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

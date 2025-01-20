@@ -1,0 +1,134 @@
+[
+    {
+        "content": "<p>alexcrichton opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275\">PR #3275</a> from <code>call-relative</code> to <code>main</code>:</p>\n<blockquote>\n<p>This commit is a relatively major change to the way that Wasmtime<br>\ngenerates code for Wasm modules and how functions call each other.<br>\nPrior to this commit all function calls between functions, even if they<br>\nwere defined in the same module, were done indirectly through a<br>\nregister. To implement this the backend would emit an absolute 8-byte<br>\nrelocation near all function calls, load that address into a register,<br>\nand then call it. While this technique is simple to implement and easy<br>\nto get right, it has two primary downsides associated with it:</p>\n<ul>\n<li>\n<p>Function calls are always indirect which means they are more difficult<br>\n  to predict, resulting in worse performance.</p>\n</li>\n<li>\n<p>Generating a relocation-per-function call requires expensive<br>\n  relocation resolution at module-load time, which can be a large<br>\n  contributing factor to how long it takes to load a precompiled module.</p>\n</li>\n</ul>\n<p>To fix these issues, while also somewhat compromising on the previously<br>\nsimple implementation technique, this commit switches wasm calls within<br>\na module to using the <code>colocated</code> flag enabled in Cranelift-speak, which<br>\nbasically means that a relative call instruction is used with a<br>\nrelocation that's resolved relative to the pc of the call instruction<br>\nitself.</p>\n<p>When switching the <code>colocated</code> flag to <code>true</code> this commit is also then<br>\nable to move much of the relocation resolution from <code>wasmtime_jit::link</code><br>\ninto <code>wasmtime_cranelift::obj</code> during object-construction time. This<br>\nfrontloads all relocation work which means that there's actually no<br>\nrelocations related to function calls in the final image, solving both<br>\nof our points above.</p>\n<p>The main gotcha in implementing this technique is that there are<br>\nhardware limitations to relative function calls which mean we can't<br>\nsimply blindly use them. AArch64, for example, can only go +/- 64 MB<br>\nfrom the <code>bl</code> instruction to the target, which means that if the<br>\nfunction we're calling is a greater distance away then we would fail to<br>\nresolve that relocation. On x86_64 the limits are +/- 2GB which are much<br>\nlarger, but theoretically still feasible to hit. Consequently the main<br>\nincrease in implementation complexity is fixing this issue.</p>\n<p>This issue is actually already present in Cranelift itself, and is<br>\ninternally one of the invariants handled by the <code>MachBuffer</code> type. When<br>\ngenerating a function relative jumps between basic blocks have similar<br>\nrestrictions. This commit adds new methods for the <code>MachBackend</code> trait<br>\nand updates the implementation of <code>MachBuffer</code> to account for all these<br>\nnew branches. Specifically the changes to <code>MachBuffer</code> are:</p>\n<ul>\n<li>\n<p>For AAarch64 the <code>LabelUse::Branch26</code> value now supports veneers, and<br>\n  AArch64 calls use this to resolve relocations.</p>\n</li>\n<li>\n<p>The <code>emit_island</code> function has been rewritten internally to handle<br>\n  some cases which previously didn't come up before, such as:</p>\n<ul>\n<li>\n<p>When emitting an island the deadline is now recalculated, where<br>\n  previously it was always set to infinitely in the future. This was ok<br>\n  prior since only a <code>Branch19</code> supported veneers and once it was<br>\n  promoted no veneers were supported, so without multiple layers of<br>\n  promotion the lack of a new deadline was ok.</p>\n</li>\n<li>\n<p>When emitting an island all pending fixups had veneers forced if<br>\n  their branch target wasn't known yet. This was generally ok for<br>\n  19-bit fixups since the only kind getting a veneer was a 19-bit<br>\n  fixup, but with mixed kinds it's a bit odd to force veneers for a<br>\n  26-bit fixup just because a nearby 19-bit fixup needed a veneer.<br>\n  Instead fixups are now re-enqueued unless they're known to be<br>\n  out-of-bounds. This may run the risk of generating more islands for<br>\n  19-bit branches but it should also reduce the number of islands for<br>\n  between-function calls.</p>\n</li>\n<li>\n<p>Otherwise the internal logic was tweaked to ideally be a bit more<br>\n  simple, but that's a pretty subjective criteria in compilers...</p>\n</li>\n</ul>\n</li>\n</ul>\n<p>I've added some simple testing of this for now. A synthetic compiler<br>\noption was create to simply add padded 0s between functions and test<br>\ncases implement various forms of calls that at least need veneers. A<br>\ntest is also included for x86_64, but it is unfortunately pretty slow<br>\nbecause it requires generating 2GB of output. I'm hoping for now it's<br>\nnot too bad, but we can disable the test if it's prohibitive and<br>\notherwise just comment the necessary portions to be sure to run the<br>\nignored test if these parts of the code have changed.</p>\n<p>The final end-result of this commit is that for a large module I'm<br>\nworking with the number of relocations dropped to zero, meaning that<br>\nnothing actually needs to be done to the text section when it's loaded<br>\ninto memory (yay!). I haven't run final benchmarks yet but this is the<br>\nlast remaining source of significant slowdown when loading modules,<br>\nafter I land a number of other PRs both active and ones that I only have<br>\nlocally for now.</p>\n<p>&lt;!--</p>\n<p>Please ensure that the following steps are all taken care of before submitting<br>\nthe PR.</p>\n<ul>\n<li>\n<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>\n  here.</p>\n</li>\n<li>\n<p>[ ] A short description of what this does, why it is needed; if the<br>\n  description becomes long, the matter should probably be discussed in an issue<br>\n  first.</p>\n</li>\n<li>\n<p>[ ] This PR contains test cases, if meaningful.</p>\n</li>\n<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>\n  If you don't know who could review this, please indicate so. The list of<br>\n  suggested reviewers on the right can help you.</li>\n</ul>\n<p>Please ensure all communication adheres to the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md\">code of\nconduct</a>.<br>\n--&gt;<br>\n</p>\n</blockquote>",
+        "id": 251584831,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630512364
+    },
+    {
+        "content": "<p>alexcrichton edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275\">PR #3275</a> from <code>call-relative</code> to <code>main</code>:</p>\n<blockquote>\n<p>This commit is a relatively major change to the way that Wasmtime<br>\ngenerates code for Wasm modules and how functions call each other.<br>\nPrior to this commit all function calls between functions, even if they<br>\nwere defined in the same module, were done indirectly through a<br>\nregister. To implement this the backend would emit an absolute 8-byte<br>\nrelocation near all function calls, load that address into a register,<br>\nand then call it. While this technique is simple to implement and easy<br>\nto get right, it has two primary downsides associated with it:</p>\n<ul>\n<li>\n<p>Function calls are always indirect which means they are more difficult<br>\n  to predict, resulting in worse performance.</p>\n</li>\n<li>\n<p>Generating a relocation-per-function call requires expensive<br>\n  relocation resolution at module-load time, which can be a large<br>\n  contributing factor to how long it takes to load a precompiled module.</p>\n</li>\n</ul>\n<p>To fix these issues, while also somewhat compromising on the previously<br>\nsimple implementation technique, this commit switches wasm calls within<br>\na module to using the <code>colocated</code> flag enabled in Cranelift-speak, which<br>\nbasically means that a relative call instruction is used with a<br>\nrelocation that's resolved relative to the pc of the call instruction<br>\nitself.</p>\n<p>When switching the <code>colocated</code> flag to <code>true</code> this commit is also then<br>\nable to move much of the relocation resolution from <code>wasmtime_jit::link</code><br>\ninto <code>wasmtime_cranelift::obj</code> during object-construction time. This<br>\nfrontloads all relocation work which means that there's actually no<br>\nrelocations related to function calls in the final image, solving both<br>\nof our points above.</p>\n<p>The main gotcha in implementing this technique is that there are<br>\nhardware limitations to relative function calls which mean we can't<br>\nsimply blindly use them. AArch64, for example, can only go +/- 64 MB<br>\nfrom the <code>bl</code> instruction to the target, which means that if the<br>\nfunction we're calling is a greater distance away then we would fail to<br>\nresolve that relocation. On x86_64 the limits are +/- 2GB which are much<br>\nlarger, but theoretically still feasible to hit. Consequently the main<br>\nincrease in implementation complexity is fixing this issue.</p>\n<p>This issue is actually already present in Cranelift itself, and is<br>\ninternally one of the invariants handled by the <code>MachBuffer</code> type. When<br>\ngenerating a function relative jumps between basic blocks have similar<br>\nrestrictions. This commit adds new methods for the <code>MachBackend</code> trait<br>\nand updates the implementation of <code>MachBuffer</code> to account for all these<br>\nnew branches. Specifically the changes to <code>MachBuffer</code> are:</p>\n<ul>\n<li>\n<p>For AAarch64 the <code>LabelUse::Branch26</code> value now supports veneers, and<br>\n  AArch64 calls use this to resolve relocations.</p>\n</li>\n<li>\n<p>The <code>emit_island</code> function has been rewritten internally to handle<br>\n  some cases which previously didn't come up before, such as:</p>\n<ul>\n<li>\n<p>When emitting an island the deadline is now recalculated, where<br>\n  previously it was always set to infinitely in the future. This was ok<br>\n  prior since only a <code>Branch19</code> supported veneers and once it was<br>\n  promoted no veneers were supported, so without multiple layers of<br>\n  promotion the lack of a new deadline was ok.</p>\n</li>\n<li>\n<p>When emitting an island all pending fixups had veneers forced if<br>\n  their branch target wasn't known yet. This was generally ok for<br>\n  19-bit fixups since the only kind getting a veneer was a 19-bit<br>\n  fixup, but with mixed kinds it's a bit odd to force veneers for a<br>\n  26-bit fixup just because a nearby 19-bit fixup needed a veneer.<br>\n  Instead fixups are now re-enqueued unless they're known to be<br>\n  out-of-bounds. This may run the risk of generating more islands for<br>\n  19-bit branches but it should also reduce the number of islands for<br>\n  between-function calls.</p>\n</li>\n<li>\n<p>Otherwise the internal logic was tweaked to ideally be a bit more<br>\n  simple, but that's a pretty subjective criteria in compilers...</p>\n</li>\n</ul>\n</li>\n</ul>\n<p>I've added some simple testing of this for now. A synthetic compiler<br>\noption was create to simply add padded 0s between functions and test<br>\ncases implement various forms of calls that at least need veneers. A<br>\ntest is also included for x86_64, but it is unfortunately pretty slow<br>\nbecause it requires generating 2GB of output. I'm hoping for now it's<br>\nnot too bad, but we can disable the test if it's prohibitive and<br>\notherwise just comment the necessary portions to be sure to run the<br>\nignored test if these parts of the code have changed.</p>\n<p>The final end-result of this commit is that for a large module I'm<br>\nworking with the number of relocations dropped to zero, meaning that<br>\nnothing actually needs to be done to the text section when it's loaded<br>\ninto memory (yay!). I haven't run final benchmarks yet but this is the<br>\nlast remaining source of significant slowdown when loading modules,<br>\nafter I land a number of other PRs both active and ones that I only have<br>\nlocally for now.</p>\n<p>cc <a href=\"https://github.com/bytecodealliance/wasmtime/issues/3230\">https://github.com/bytecodealliance/wasmtime/issues/3230</a></p>\n<p>&lt;!--</p>\n<p>Please ensure that the following steps are all taken care of before submitting<br>\nthe PR.</p>\n<ul>\n<li>\n<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>\n  here.</p>\n</li>\n<li>\n<p>[ ] A short description of what this does, why it is needed; if the<br>\n  description becomes long, the matter should probably be discussed in an issue<br>\n  first.</p>\n</li>\n<li>\n<p>[ ] This PR contains test cases, if meaningful.</p>\n</li>\n<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>\n  If you don't know who could review this, please indicate so. The list of<br>\n  suggested reviewers on the right can help you.</li>\n</ul>\n<p>Please ensure all communication adheres to the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md\">code of\nconduct</a>.<br>\n--&gt;<br>\n</p>\n</blockquote>",
+        "id": 251584909,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630512392
+    },
+    {
+        "content": "<p><strong>alexcrichton</strong> requested <a href=\"https://github.com/cfallin\">cfallin</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275\">PR #3275</a>.</p>",
+        "id": 251584911,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630512393
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744165745\">PR review</a>.</p>",
+        "id": 251590874,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630514616
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700388765\">PR review comment</a>:</p>\n<blockquote>\n<p>Crazy idea, but would it be possible for a single <code>MachBuffer</code> to somehow be used across all functions in a module? This would reduce the ability to compile functions in parallel though.</p>\n</blockquote>",
+        "id": 251590875,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630514616
+    },
+    {
+        "content": "<p>pchickey submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744181520\">PR review</a>.</p>",
+        "id": 251593327,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630515567
+    },
+    {
+        "content": "<p>pchickey created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700400679\">PR review comment</a>:</p>\n<blockquote>\n<p>Compiling functions in parallel is an important optimization we rely on in production</p>\n</blockquote>",
+        "id": 251593328,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630515567
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275\">PR #3275</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 251596687,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630516869
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744235289\">PR review</a>.</p>",
+        "id": 251604799,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520141
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744235289\">PR review</a>.</p>",
+        "id": 251604800,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520141
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700442424\">PR review comment</a>:</p>\n<blockquote>\n<p>extreme grammar-nit mode (sorry!) but end the sentence with a period here (thanks!).</p>\n</blockquote>",
+        "id": 251604801,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520141
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700441215\">PR review comment</a>:</p>\n<blockquote>\n<p>s/can be reach/can reach/</p>\n</blockquote>",
+        "id": 251604802,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520141
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700444044\">PR review comment</a>:</p>\n<blockquote>\n<p>s/it's in in-bounds/it's an in-bounds/</p>\n</blockquote>",
+        "id": 251604803,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520141
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700449171\">PR review comment</a>:</p>\n<blockquote>\n<p>Once this PR merges, would you mind creating an issue to track this?</p>\n</blockquote>",
+        "id": 251604804,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520141
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700448779\">PR review comment</a>:</p>\n<blockquote>\n<p>Yeah, fundamentally it makes sense to have a serialized process only at the very end, which is what this separate \"text builder\" use of <code>MachBuffer</code> is. Conceptually it's like a linker; I think the stage separation is reasonable.</p>\n</blockquote>",
+        "id": 251604805,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520141
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700453234\">PR review comment</a>:</p>\n<blockquote>\n<p>Would it make sense to have some notion of page alignment per platform, or maybe just take the least-common-multiple of those for platforms we support? I'm thinking specifically of macOS/aarch64, where mmap'ing part of a file with only 4K alignment might be problematic with the 16K (?) pages by default.</p>\n</blockquote>",
+        "id": 251604806,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520142
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744260630\">PR review</a>.</p>",
+        "id": 251606167,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520655
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700460121\">PR review comment</a>:</p>\n<blockquote>\n<p>#3277, and indeed!</p>\n</blockquote>",
+        "id": 251606168,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520655
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#pullrequestreview-744262110\">PR review</a>.</p>",
+        "id": 251606402,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520756
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275#discussion_r700461239\">PR review comment</a>:</p>\n<blockquote>\n<p>Indeed! This PR is just moving this logic around as opposed to adding it (it's actually been around for quite some time, although it's more important to get right now that we're directly mmap'ing cache artifacts), so I'll leave this as-is for now, but I'll open an issue. The issue with M1 macs was actually <em>just</em> fixed in <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3274\">https://github.com/bytecodealliance/wasmtime/pull/3274</a> as well, so it definitely needs fixing soon!</p>\n</blockquote>",
+        "id": 251606403,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520756
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275\">PR #3275</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 251606489,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520779
+    },
+    {
+        "content": "<p>alexcrichton merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3275\">PR #3275</a>.</p>",
+        "id": 251606673,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630520859
+    }
+]

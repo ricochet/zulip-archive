@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749538063\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>I'm opening this after some discussion with @elliottt today about this. We weren't really sure how best to proceed, if at all, with getting this to work with regalloc2. It seems that some sort of new constraint or new logic is required in regalloc2 no matter what, but we weren't quite sure how to modify it. I think @elliottt had a better idea about a possible shape, but he can probably describe it better than I.</p>\n<p>@cfallin if you've got time (this isn't urgent by any means) we're curious to get your take on this shape of an approach with a pseudo-instruction that defines a value which we can place a special operand constraint on if necessary. Also cc @afonso360 as you're likely interested in this.</p>\n<p>One way I thought of thinking about this problem is that for each platform there are sort of read-only physical registers in addition to the allocatable registers. The zero register on riscv64 is one example but the stack pointer and frame pointer are another on most platforms (since we typically don't want regalloc2 to allocate any virtual registers to those destinations). Something about being able to specify this seems like what we'd want with regalloc2 to (a) allow this in the first place (despite there not actually being a panic today) and (b) prevent merging bundles because bundles shouldn't in general be merged with the pseudo-instruction defining the zero register for example. (@elliottt had more thoughts on this too)</p>\n</blockquote>",
+        "id": 395108309,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696535000
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749541345\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<blockquote>\n<p>The \"fix\", which is incomplete, that this PR implements is to introduce a pseudo-instruction which has a fixed register definition of the physical register zero. This instruction emits no code and is intended to provide a location for regalloc2 to split bundles by automatically inserting a move in the above situation. To get this working however it required removing an assertion in the OperandCollector and ends up violating an invariant of regalloc2 where a virtual register is assigned to a non-allocatable register. This ends up generating instructions which move general purpose registers into the zero register on riscv64, which is unlikely to be what regalloc intended.</p>\n</blockquote>\n<p>Eek, yeah, this approach is going to break RA2 completely: there is a strong divide between registers that are allocatable and those that aren't, and using a fixed constraint on a normal vreg will try to put the whole bundle in the fixed register. The zero register can't be used that way, so as you've seen, breakage results.</p>\n<p>We actually had a bunch of discussion over in RA2 issues about this a year or so ago; it resulted in a new kind of operand, the \"fixed nonallocatable\" constraint: you want <a href=\"https://docs.rs/regalloc2/latest/regalloc2/struct.Operand.html#method.fixed_nonallocatable\"><code>Operand::fixed_nonallocatable()</code></a>. That should solve the issue without changing anything about the broader lowering algorithm (and please don't, it could have a bunch of other implications we'd have to think carefully about!).</p>\n</blockquote>",
+        "id": 395108577,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696535141
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749543711\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>See e.g. <a href=\"https://github.com/bytecodealliance/regalloc2/pull/77#issuecomment-1247633348\">this thread</a> where Amanieu ran into these same problems with the zero register, and reported some nice speedups in his application when using the new constraint he added.</p>\n</blockquote>",
+        "id": 395108771,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696535237
+    },
+    {
+        "content": "<p>afonso360 <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749545263\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>Just wanted to say that this is an amazing coincidence since I was just about to write an issue on this very topic!</p>\n</blockquote>",
+        "id": 395108931,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696535306
+    },
+    {
+        "content": "<p>afonso360 edited a <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749545263\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>Just wanted to say that this is an amazing coincidence since I was just about to write an issue on this very topic! I don't have any ideas on how to go about this, it was mostly a request for help.</p>\n</blockquote>",
+        "id": 395109100,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696535400
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749566960\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>Yes sorry to be clear I'm not proposing changing any foundations or anything like that, I'm trying to understand the foundations myself and figure out how best to fit a solution into them.</p>\n<p>I'm not sure how to use <code>Operand::fixed_nonallocatable</code> though? I thought that was sort of the first thing I tried which was to use the <code>(zero_reg)</code> directly in lowering <code>(imm _ty 0)</code>. That ended up causing issues though where effectively at the end of the function <code>Inst::Rets</code> would create a constarint that a vreg, which was aliased to the zero register, was requierd to be in the first physical return register. This didn't seem resolvable by regalloc2 in talking with @elliottt which is when we came up with the idea of a pseudo-instruction, but with the pseudo-instruction I'm not sure how to use <code>Operand::fixed_nonallocatable</code>. Do you have an idea in mind though of what the register allocation operands would look like for this pseudo-instruction?</p>\n</blockquote>",
+        "id": 395110896,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696536187
+    },
+    {
+        "content": "<p>elliottt <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749576025\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>The problem was that we wanted to return a value of the zero register for the lowering of a constant, but the fixed nonallocatable constraint only works for uses not defs. The solution we've used in the past is to make special instructions for interacting with nonallocatable registers (MoveToPReg/MoveFromPReg in the x64 backend for example), but those end up turning into the moves that Alex is trying to avoid in the first place.</p>\n<p>For argument <code>0</code> immediates the use of fixed nonallocatable constraint is great, but when it would be desirable to have that value propagate further is where we just don't have a good story with RA2.</p>\n</blockquote>",
+        "id": 395111861,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696536657
+    },
+    {
+        "content": "<p>elliottt edited a <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749576025\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>The problem was that we wanted to return a value of the zero register for the lowering of a constant, but the fixed nonallocatable constraint only works for uses not defs. The solution we've used in the past is to make special instructions for interacting with nonallocatable registers (MovToPReg/MovFromPReg in the x64 backend for example), but those end up turning into the moves that Alex is trying to avoid in the first place.</p>\n<p>For argument <code>0</code> immediates the use of fixed nonallocatable constraint is great, but when it would be desirable to have that value propagate further is where we just don't have a good story with RA2.</p>\n</blockquote>",
+        "id": 395111950,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696536710
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749650849\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>Indeed, it works for uses and not defs -- which implies that we can't in isolation lower an <code>(iconst 0)</code> to a zero reg, but that makes sense because an use of the zero reg isn't actually <em>storing</em> the zero anywhere first. In other words, this decomposition -- \"(i) lower an immediate 0, (ii) use it somewhere\" is what implies the need for a normal reg.</p>\n<p>Now of course it's a standard idiom on ISAs with a zero reg to use it as an arg; so what we need to do is to reflect that structure in the lowering as well, and handle this as part of the arg, when we lower the instruction that uses it.</p>\n<p>In other words, we would want to match (e.g.) <code>(iadd x (iconst 0))</code> and then directly emit an instruction that uses a fixed-nonallocatable Operand in its use-slot. That would imply a new Inst format, because it has different regalloc metadata.</p>\n</blockquote>",
+        "id": 395119578,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696540306
+    },
+    {
+        "content": "<p>cfallin edited a <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749650849\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>Indeed, it works for uses and not defs -- which implies that we can't in isolation lower an <code>(iconst 0)</code> to a zero reg, but that makes sense because an use of the zero reg isn't actually <em>storing</em> the zero anywhere first. In other words, this decomposition -- \"(i) lower an immediate 0, (ii) use it somewhere\" is what implies the need for a normal reg.</p>\n<p>Now of course it's a standard idiom on ISAs with a zero reg to use it as an arg; so what we need to do is to reflect that structure in the lowering as well, and handle this as part of the arg, when we lower the instruction that uses it.</p>\n<p>In other words, we would want to match (e.g.) <code>(iadd x (iconst 0))</code> and then directly emit an instruction that uses a fixed-nonallocatable Operand in its use-slot. That would imply a new Inst format, because it has different regalloc metadata. (EDIT: or the same format if you do the thing you mention in the regalloc metadata collector; but here the value is given directly and not via an alias, so it should work out.)</p>\n</blockquote>",
+        "id": 395121070,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696541112
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1749669569\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>One further thought: I think the clearest argument to me for why the above (do it as part of matching, not as a separate step) is <em>necessary</em> is exactly the case you're running into: returning <code>0</code> as a return value needs an instruction to produce the zero value, while using it as an argument does not. In that sense it's more like an immediate (<code>add r1, r2, #2</code>); the zero register is a like a weird encoding for a constant <code>#0</code>. We fundamentally need to \"sink\" it into consumers to have this distinction and generate an inst in the first case but not the second.</p>\n</blockquote>",
+        "id": 395121282,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696541226
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162#issuecomment-1750760607\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7162\">issue #7162</a>:</p>\n<blockquote>\n<p>Yeah that works, and it's already what riscv64 and aarch64 are doing I believe. They don't even have special instruction variants, the <code>(zero_reg)</code> is just used in the normal <code>Reg</code> slot as other normal temporaries are used. My hope was that given the commonality of an architecture-specific zero register between these two we wouldn't have to go through all relevant rules and add lowering variants for them. Given how non-special it is in the ISA (e.g. for <code>add</code> it's not a new encoding, it's \"just\" that the register is set to 0) I would ideally hope that it wouldn't need to be that special in the lowering rules.</p>\n<p>That all being said my hope is that there'd be an idea that would be relatively easy/non-invasive to integrate into regalloc2. If there isn't though then alas, but not much can be done about that.</p>\n</blockquote>",
+        "id": 395269812,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1696601935
+    }
+]

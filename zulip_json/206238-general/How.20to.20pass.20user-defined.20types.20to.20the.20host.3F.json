@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>I want to be able to construct some data <code>MyType</code> in a WASM module and then pass that data to the host. I can imagine a few ways to do this:</p>\n<p>One is defining <code>WasmTy</code> for <code>MyType</code>. However  it looks like this trait cannot be defined outside of the core <code>wasmtime</code> crate because that trait's method signatures use <code>StoreOpaque</code> which is not an exported type.</p>\n<p>Another way would be to convert <code>MyType</code> to a <code>Vec&lt;u8&gt;</code> or  less conveniently a<code>[u8; MYTYPE_SIZE]</code>. However again neither <code>Vec&lt;u8&gt;</code> nor <code>[u8]</code> implement <code>WasmTy</code>.</p>\n<p>The last way is using <code>ExternRef</code>, which seems like the way things are \"meant\" to be done for passing opaque data that the runtime would then validate and cast into the appropriate type. However the docs aren't clear about the best practices for producing <code>ExternRef</code> in the WASM module and consuming it from the host, so I'm not sure if I'm misunderstanding how this should be used.</p>",
+        "id": 365666817,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686599054
+    },
+    {
+        "content": "<p>Depends on your needs:</p>\n<ul>\n<li>In the future the unequivocal answer will be <a href=\"https://github.com/WebAssembly/component-model\">the component model</a>, which is usable today but still has sharp edges. One starting place for that would be the docs here: <a href=\"https://docs.rs/wasmtime/9.0.3/wasmtime/component/macro.bindgen.html\">https://docs.rs/wasmtime/9.0.3/wasmtime/component/macro.bindgen.html</a></li>\n<li>The \"old\"/most-stable approach is to serialize your data into the module's memory and then pass a pointer to the host to deserialize it. This is essentially what <code>bindgen</code> above does.</li>\n</ul>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/component-model\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/35f86c9b42241b24edb90e07f1af8669dd6fcfa6\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f396331356462653538343332386461316338633630333066373436663465333936623130636562316337343830646665336634316332663464653765616563352f576562417373656d626c792f636f6d706f6e656e742d6d6f64656c)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/component-model\" title=\"GitHub - WebAssembly/component-model: Repository for design and specification of the Component Model\">GitHub - WebAssembly/component-model: Repository for design and specification of the Component Model</a></div><div class=\"message_embed_description\">Repository for design and specification of the Component Model - GitHub - WebAssembly/component-model: Repository for design and specification of the Component Model</div></div></div>",
+        "id": 365678555,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1686602724
+    },
+    {
+        "content": "<p><code>externref</code>s are more \"handles\" to some resource. They don't really help you pass composite data around.</p>",
+        "id": 365678866,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1686602841
+    },
+    {
+        "content": "<p>Okay thank you, that makes some sense. I actually just noticed that in the docs for <code>Caller</code>, it suggests passing a pointer and then accessing the module's memory. However I don't see any way to access the module's memory using the <code>Caller</code> interface. I can access the underlying state and exports, but I don't think either of those will let me resolve the pointer, presumably passed as an <code>i32</code>.</p>",
+        "id": 365691352,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686607966
+    },
+    {
+        "content": "<p><code>Memory::read</code> looks promising <span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span></p>",
+        "id": 365694498,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686609366
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"624223\">Ben Little</span> <a href=\"#narrow/stream/206238-general/topic/How.20to.20pass.20user-defined.20types.20to.20the.20host.3F/near/365691352\">said</a>:</p>\n<blockquote>\n<p>However I don't see any way to access the module's memory using the <code>Caller</code> interface. I can access the underlying state and exports, but I don't think either of those will let me resolve the pointer, presumably passed as an <code>i32</code>.</p>\n</blockquote>\n<p>The module needs to export its memory, and then you'll be able to access it via <code>Caller::get_export</code>.</p>",
+        "id": 365925869,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1686673523
+    },
+    {
+        "content": "<p>Hmm, I don't think I understand. Is memory not a property of the module that is visible from the runtime? It seems strange to need to export it.</p>\n<p>My current mental model is that the runtime controls the memory of the module. To access a value in the module's memory segment, I would allocate that value in the module and pass a pointer to runtime via an <code>extern fn</code> called by the module. The runtime would then access the value by adding the pointer to the offset of the module's memory in the runtime's memory.</p>\n<p>For passing a value to the module, the runtime doesn't know about the module's allocator. Therefore the module needs to allocate memory for the value, pass a pointer to the runtime as above, and have the runtime put that value in the module's memory, again using the start of the module's memory + pointer.</p>\n<p>Am I thinking about this at too low of a level? Or am I misunderstanding the memory management, perhaps?</p>",
+        "id": 366283509,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686770268
+    },
+    {
+        "content": "<p>It's important to understand that within a wasm guest, a \"pointer\" is just a 32-bit integer that's relative to the starting address of linear memory. If you pass a pointer from the guest to the host, then to access that memory location the host needs to add that integer to the base address of that guest's linear memory.</p>\n<p>And yes, the runtime knows where the module's linear memory is with respect to the host's address space. But the Wasmtime API (as well as the APIs of other runtimes, I assume) doesn't give you a way to access resources of a module unless the module explicitly exports those resources.</p>",
+        "id": 366287028,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1686771313
+    },
+    {
+        "content": "<p>Thanks, still a little confused.</p>\n<blockquote>\n<p>But the Wasmtime API (as well as the APIs of other runtimes, I assume) doesn't give you a way to access resources of a module unless the module explicitly exports those resources.</p>\n</blockquote>\n<p>Will <code>Memory::read</code> and <code>Memory::write</code> not do essentially this? Or is that not considered part of the wasmtime API?</p>",
+        "id": 366288032,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686771624
+    },
+    {
+        "content": "<p>The issue is where you get the <code>Memory</code> from in order to call that method on it. I believe the only option here is <a href=\"https://docs.rs/wasmtime/latest/wasmtime/struct.Instance.html#method.get_memory\">https://docs.rs/wasmtime/latest/wasmtime/struct.Instance.html#method.get_memory</a> which only operates on exported memories.</p>",
+        "id": 366288951,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1686771915
+    },
+    {
+        "content": "<p>and to be clear, most modules <em>do</em> export their single memory</p>",
+        "id": 366289698,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1686772136
+    },
+    {
+        "content": "<p>I'm not sure LLVM even knows how to produce a non-exported memory section... <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 366292066,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1686772902
+    },
+    {
+        "content": "<p>You can tell wasm-ld (lld) to import a memory without re-exporting it and in fact that is the default when importing a memory afaik.</p>",
+        "id": 366300694,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1686775711
+    },
+    {
+        "content": "<p>(deleted)</p>",
+        "id": 366300744,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1686775735
+    },
+    {
+        "content": "<p>Would that look like <code>caller.get_export(\"memory\")</code> or</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">engine</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Engine</span>::<span class=\"n\">default</span><span class=\"p\">();</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">module</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Module</span>::<span class=\"n\">from_binary</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">engine</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">binary</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Store</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">engine</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">MyData</span>::<span class=\"n\">default</span><span class=\"p\">());</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">memory</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Memory</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">MemoryType</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">None</span><span class=\"p\">))</span><span class=\"o\">?</span><span class=\"p\">;</span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">get</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Func</span>::<span class=\"n\">wrap</span><span class=\"p\">(</span>\n<span class=\"w\">    </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"k\">move</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">caller</span>: <span class=\"nc\">Caller</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">MyData</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ptr</span>: <span class=\"kt\">i32</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">caller</span><span class=\"p\">.</span><span class=\"n\">data_mut</span><span class=\"p\">().</span><span class=\"n\">get</span><span class=\"p\">().</span><span class=\"n\">serialize_bytes</span><span class=\"p\">();</span>\n<span class=\"w\">        </span><span class=\"n\">memory</span><span class=\"p\">.</span><span class=\"n\">write</span><span class=\"p\">(</span><span class=\"n\">caller</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ptr</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">data</span><span class=\"p\">).</span><span class=\"n\">unwrap</span><span class=\"p\">();</span>\n<span class=\"w\">    </span><span class=\"p\">},</span>\n<span class=\"p\">);</span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">set</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Func</span>::<span class=\"n\">wrap</span><span class=\"p\">(</span>\n<span class=\"w\">    </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"k\">move</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">caller</span>: <span class=\"nc\">Caller</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">MyData</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ptr</span>: <span class=\"kt\">i32</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">buffer</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">1024</span><span class=\"p\">];</span>\n<span class=\"w\">        </span><span class=\"n\">memory</span>\n<span class=\"w\">            </span><span class=\"p\">.</span><span class=\"n\">read</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">caller</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ptr</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">buffer</span><span class=\"p\">)</span>\n<span class=\"w\">            </span><span class=\"p\">.</span><span class=\"n\">unwrap</span><span class=\"p\">();</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">MyData</span>::<span class=\"n\">deserialize_bytes</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">buffer</span><span class=\"p\">).</span><span class=\"n\">unwrap</span><span class=\"p\">();</span>\n<span class=\"w\">        </span><span class=\"n\">caller</span><span class=\"p\">.</span><span class=\"n\">data_mut</span><span class=\"p\">().</span><span class=\"n\">set</span><span class=\"p\">(</span><span class=\"n\">data</span><span class=\"p\">);</span>\n<span class=\"w\">    </span><span class=\"p\">},</span>\n<span class=\"p\">)</span>\n</code></pre></div>",
+        "id": 366328204,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686787298
+    },
+    {
+        "content": "<p>The code sample you've pasted there creates a new <code>Memory</code>, independent from the one your instance is actually using. So those read and write calls would run successfully but access an entirely different chunk of memory than your guest is using. No, I think your other suggestion of <code>Caller::get_export</code> is the right choice here.</p>",
+        "id": 366328643,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1686787536
+    },
+    {
+        "content": "<p>Thanks! The docs for <code>Memory::new</code> say</p>\n<blockquote>\n<p>The <code>store</code> argument will be the owner of the returned [<code>Memory</code>].</p>\n</blockquote>\n<p>Does this mean that the supplied store would have two distinct linear memory segments?</p>",
+        "id": 366328864,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686787649
+    },
+    {
+        "content": "<p>Yes. A <code>Store</code> can hold resources for many instances if you want. You still have to explicitly provide those resources to the instances they belong to. I believe <code>Instance::new</code> can take a <code>Extern::Memory</code> or something for memory imports. The main limitation is that <code>Store</code>s don't currently clean up resources until the whole thing is dropped.</p>",
+        "id": 366333015,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1686789867
+    },
+    {
+        "content": "<p>Okay I think that makes sense. So I can get the export with <code>Caller::get_export</code> and cast it to <code>Memory</code> with <code>Extern::into_memory</code>. Is there a special name that LLVM gives to the memory export? Is it just <code>\"memory\"</code>? Or do I need to define the export manually in some language-dependent manner?</p>",
+        "id": 366342492,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686794290
+    },
+    {
+        "content": "<p>Wasi requires the linear memory to be called <code>memory</code> and wasm-ld exports it with this name if told to export it. Another language that doesn't use wasi may export it with another name, but you could require that any wasm module that will use your interface has to use <code>memory</code> as name for the export.</p>",
+        "id": 366423027,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1686821492
+    },
+    {
+        "content": "<p>Thank you, Jamey, Lann, Bjorn, and fitzgen. This is really helpful for my understanding.</p>",
+        "id": 366555519,
+        "sender_full_name": "Ben Little",
+        "timestamp": 1686845708
+    }
+]

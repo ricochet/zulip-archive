@@ -1,0 +1,122 @@
+[
+    {
+        "content": "<p>Hello would wasmtime be open to an option that would allow disabling the usage of signals for implementing traps like the unreachable wasm instruction generating a SIGILL, etc? We run in an <a href=\"http://seastar.io\">environment</a> that has some complex interactions with signal handlers and signal blocking/unblocking. There are cases we I'm running into the process aborting or hanging due to these signals and I was wondering if a config option would be something the project would consider.</p>",
+        "id": 386672498,
+        "sender_full_name": "Tyler Rockwood",
+        "timestamp": 1692729497
+    },
+    {
+        "content": "<p>set these options to zero and you should only use explicit bounds checks for memories:</p>\n<ul>\n<li><a href=\"https://docs.rs/wasmtime/latest/wasmtime/struct.Config.html#method.static_memory_maximum_size\">https://docs.rs/wasmtime/latest/wasmtime/struct.Config.html#method.static_memory_maximum_size</a></li>\n<li><a href=\"https://docs.rs/wasmtime/latest/wasmtime/struct.Config.html#method.dynamic_memory_guard_size\">https://docs.rs/wasmtime/latest/wasmtime/struct.Config.html#method.dynamic_memory_guard_size</a></li>\n</ul>",
+        "id": 386674510,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1692730358
+    },
+    {
+        "content": "<p>(instead of relying on signals)</p>",
+        "id": 386674551,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1692730370
+    },
+    {
+        "content": "<p>Note that we still rely on signals for floating point errors on ISAs that support that (x86 does, aarch64 doesn't, for example)</p>",
+        "id": 386683722,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692734397
+    },
+    {
+        "content": "<p>Currently we don't have a codegen option to not rely on this, it seems; I think we might have in the past and it was removed (someone would have to do some more digging here)</p>",
+        "id": 386684061,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692734508
+    },
+    {
+        "content": "<p>(this is for div-by-0 at least; we seem to still have explicit checks for INT_MIN / -1)</p>",
+        "id": 386684197,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692734543
+    },
+    {
+        "content": "<p>Thank you, yes I'm thinking about the SIGFPE for division by zero on x86 and not using <code>ud2</code> and similar instructions for unreachable.</p>\n<p>Would having a codegen option to not rely on this be something that would be considered?</p>",
+        "id": 386687454,
+        "sender_full_name": "Tyler Rockwood",
+        "timestamp": 1692735988
+    },
+    {
+        "content": "<p>I think it's reasonable to at least consider. One thing we always worry about with more configuration options is the testing and maintenance overhead; but if this is localized to a few operations (div, rem) maybe it's not so bad.</p>\n<p>Getting from a <code>ud2</code> to the trap handler may be a bit trickier though: right now our \"explicit checks\" still rely on that opcode to exit the Wasm. We'd need an alternate mechanism (e.g. a jump to some address that we patch in, or provide in the vmctx) for this to work.</p>\n<p>If we do have this mode, we'd want to test it with an integration test that sets a new option on <code>Engine</code> to <em>not</em> register any signal handlers, then run either the Wasm test suite or at least specific tests we know to rely on trapping.</p>\n<p>Especially given the difficulties we've had with signal handling on macOS, I think this could have real value; it's not just a \"support some weird use-case we've never heard of\" sort of PR. But starting the discussion here and then sketching it out in an issue and maybe a prototype to show the extent of the changes would help us decide for sure</p>",
+        "id": 386687969,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692736227
+    },
+    {
+        "content": "<p>I think many of our remaining limitations in Cranelift's test suite and fuzzing are due to not being able to handle traps, so maybe we'd want to use this mode for all Cranelift testing? That would help ensure that it's well-exercised.</p>",
+        "id": 386688540,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1692736492
+    },
+    {
+        "content": "<p>Understand completely on the maintenance + testing bits. </p>\n<blockquote>\n<p>Getting from a ud2 to the trap handler may be a bit trickier though: right now our \"explicit checks\" still rely on that opcode to exit the Wasm. We'd need an alternate mechanism (e.g. a jump to some address that we patch in, or provide in the vmctx) for this to work.</p>\n</blockquote>\n<p>Yes exactly, I'm thinking the easiest thing is to always jump to a predefined function, we could pass in a parameter for which trap. It would increase the size of the generated code, but not by much?</p>\n<blockquote>\n<p>If we do have this mode, we'd want to test it with an integration test that sets a new option on Engine to not register any signal handlers, then run either the Wasm test suite or at least specific tests we know to rely on trapping.</p>\n</blockquote>\n<p>You can also just <code>pthread_sigmask</code> and block that signal from being allowed to be handled by the thread (assuming tests are single threaded).</p>\n<blockquote>\n<p>I think this could have real value</p>\n</blockquote>\n<p>That's good to know! It seems there are a bunch of places that use <code>ud2</code> from a quick code search so I assume this would be a largish change...</p>",
+        "id": 386688904,
+        "sender_full_name": "Tyler Rockwood",
+        "timestamp": 1692736674
+    },
+    {
+        "content": "<p>Three things to consider with the code to replace <code>ud2</code>: (i) we have a <em>bunch</em> of them; disassembly of some functions will show a whole stream of <code>ud2</code> ops at the end of the function, each a specific trap-point. <code>ud2</code> is two bytes (<code>0x0f 0x0b</code>); we'd have to take some inflation but every byte counts here. So e.g. <code>jmp *offset(%rN)</code> where <code>%rN</code> is the register holding <code>vmctx</code> is 8 bytes, but that's better than a full callsite with moves into registers, a call, and cleanup. (We also can't represent \"non-returning callsite\" and optimize based on that currently.) (ii) we try to avoid having any relocations in the code (i.e., emit PIC where possible): this makes loading precompiled <code>.cwasm</code>s much faster, as it lets us mmap straight from disk. So we'd want to go through a pointer in <code>vmctx</code>. (iii) we can see the return address if we jump to a trampoline, so we could just use that; no need to pass other args. Basically we want a \"fake ud2\" that jumps to a little handwritten assembly trampoline that then calls into the runtime and never returns.</p>",
+        "id": 386691203,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692737870
+    },
+    {
+        "content": "<blockquote>\n<p>disassembly of some functions will show a whole stream of ud2 ops at the end of the function, each a specific trap-point.</p>\n</blockquote>\n<p>I don't quite follow here - are you saying that cranelift injects a stream of ud2 ops at the end of a function? Or that upstream wasm toolchains (e.g. clang) outputs <code>unreachable</code> instructions in batches at the end of functions? If cranelift is doing this - why? alignment?</p>\n<p>Just to make sure I follow, the pointer in <code>vmctx</code> would point to the \"fake ud2\" right? And the assembly trampoline essentially reads the return address, and passes that into the runtime, and the runtime looks up the trapcode for that location?</p>",
+        "id": 386692124,
+        "sender_full_name": "Tyler Rockwood",
+        "timestamp": 1692738312
+    },
+    {
+        "content": "<blockquote>\n<p>I don't quite follow here - are you saying that cranelift injects a stream of ud2 ops at the end of a function? Or that upstream wasm toolchains (e.g. clang) outputs unreachable instructions in batches at the end of functions? If cranelift is doing this - why? alignment?</p>\n</blockquote>\n<p>The former; and not as a direct action, but as a consequence of compilation. The IR has a bunch of basic blocks, each of which ends with an <code>unreachable</code>. We compile <code>unreachable</code> as <code>ud2</code>, and we also mark these blocks as cold so they are sunk to the bottom of the function. So the effect is a bunch of <code>ud2</code>s; the identity of the trapsite is determined by the address of the specific one that traps</p>",
+        "id": 386692460,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692738466
+    },
+    {
+        "content": "<p>The pointer in <code>vmctx</code> would point to trampoline code; the \"fake ud2\" is what we generate instead of <code>ud2</code> in the function body itself</p>",
+        "id": 386692533,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692738487
+    },
+    {
+        "content": "<p>the address of that code (which becomes the return address in the trampoline) serves as the identity of the particular trap we took, just as the address of the <code>ud2</code> did</p>",
+        "id": 386692582,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692738513
+    },
+    {
+        "content": "<blockquote>\n<p>which ends with an unreachable.<br>\nmark these blocks as cold</p>\n</blockquote>\n<p>Would the side bloat of replaces these ud2 with jumps to the fake ud2 be acceptible? Or would there need to be work to optimize away those ud2s? (assuming that is possible)</p>",
+        "id": 386697336,
+        "sender_full_name": "Tyler Rockwood",
+        "timestamp": 1692739322
+    },
+    {
+        "content": "<p>That's what I was getting at above about 2 vs. 8 bytes; I'm not sure, but I guess the real question is just \"is it still reasonable / workable\" (since this mode wouldn't be on by default) and it seems likely</p>",
+        "id": 386697653,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692739477
+    },
+    {
+        "content": "<p>(likely to be acceptable that is)</p>",
+        "id": 386697674,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1692739490
+    },
+    {
+        "content": "<p>I tried to distill this thread into <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6926\">https://github.com/bytecodealliance/wasmtime/issues/6926</a> - please feel free to chime in if there is anything incorrect or you have other thoughts. Otherwise it's probably better to consolidate the discussion there? Thanks for this!</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/6926\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/7d327290519c7cc779743746cd769ad678cb02a7\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f393464613661363162343265366165633665623237663335363263393933663261616335313864646366633064383236613662316237613939636238383539322f62797465636f6465616c6c69616e63652f7761736d74696d652f6973737565732f36393236)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/6926\" title=\"Support for not relying on signals for trap handling · Issue #6926 · bytecodealliance/wasmtime\">Support for not relying on signals for trap handling · Issue #6926 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Currently, on unix platforms, Wasmtime relies on a few signals to operate, here's a list of the ones I'm aware of: SIGSEGV: Used for bounds checking when static memory is used. AFAIK using dynamic ...</div></div></div>",
+        "id": 387935468,
+        "sender_full_name": "Tyler Rockwood",
+        "timestamp": 1693332006
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"610749\">Tyler Rockwood</span> has marked this topic as resolved.</p>",
+        "id": 387935491,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1693332014
+    }
+]

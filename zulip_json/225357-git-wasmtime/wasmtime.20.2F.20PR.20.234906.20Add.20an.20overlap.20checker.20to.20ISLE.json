@@ -1,0 +1,494 @@
+[
+    {
+        "content": "<p>elliottt edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>:</p>\n<blockquote>\n<p>Introduce overlap checking for ISLE as the start of addressing #4717.</p>\n<p>The overlap checker detects cases where ISLE rules could fire for the same input. Consider the following example from the x64 lowerings (line numbers added for clarity):</p>\n<div class=\"codehilite\" data-code-language=\"Common Lisp\"><pre><span></span><code><span class=\"nv\">13:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">sse_xor_op</span><span class=\"w\"> </span><span class=\"nv\">$F32X4</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">SseOpcode.Xorps</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"nv\">14:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">sse_xor_op</span><span class=\"w\"> </span><span class=\"nv\">$F64X2</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">SseOpcode.Xorpd</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"nv\">15:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">sse_xor_op</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">multi_lane</span><span class=\"w\"> </span><span class=\"nv\">_bits</span><span class=\"w\"> </span><span class=\"nv\">_lanes</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">SseOpcode.Pxor</span><span class=\"p\">))</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Rule 15 overlaps separately with rules 13 and 14, but rules 13 and 14 don't overlap with each other. With overlap checking enabled this will be reported as an overlap of all three rules, where the rule on line 15 will be identified as the source of the overlap (error messages could definitely be improved here). In this case the overlap can be resolved by setting a lower priority for rule 3.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">Error</span>:\n  <span class=\"err\">×</span><span class=\"w\"> </span><span class=\"n\">overlap</span><span class=\"w\"> </span><span class=\"n\">error</span>: <span class=\"nc\">rules</span><span class=\"w\"> </span><span class=\"n\">are</span><span class=\"w\"> </span><span class=\"n\">overlapping</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"err\">│</span><span class=\"w\">   </span><span class=\"o\">../</span><span class=\"n\">x64</span><span class=\"p\">.</span><span class=\"n\">isle</span>:<span class=\"mi\">15</span>:<span class=\"mi\">0</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"err\">│</span><span class=\"w\">   </span><span class=\"o\">../</span><span class=\"n\">x64</span><span class=\"p\">.</span><span class=\"n\">isle</span>:<span class=\"mi\">13</span>:<span class=\"mi\">0</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"err\">│</span><span class=\"w\">   </span><span class=\"o\">../</span><span class=\"n\">x64</span><span class=\"p\">.</span><span class=\"n\">isle</span>:<span class=\"mi\">14</span>:<span class=\"mi\">0</span><span class=\"w\"></span>\n</code></pre></div>\n<p>For another example, consider the following:</p>\n<div class=\"codehilite\" data-code-language=\"Common Lisp\"><pre><span></span><code><span class=\"nv\">1:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">example</span><span class=\"w\"> </span><span class=\"nv\">$F32</span><span class=\"w\"> </span><span class=\"mi\">25</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">...</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"nv\">2:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">example</span><span class=\"w\"> </span><span class=\"nv\">$F32</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">fallible_extractor</span><span class=\"w\"> </span><span class=\"nv\">y</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">...</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"nv\">3:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">example</span><span class=\"w\"> </span><span class=\"nv\">$F64</span><span class=\"w\"> </span><span class=\"nv\">_</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">...</span><span class=\"p\">)</span><span class=\"w\"></span>\n</code></pre></div>\n<p>In this case, only the rules on lines 1 and 2 overlap, as we don't know that the fallible extractor won't fire successfully on the input <code>25</code>. As the rule on line 3 has a different leading pattern (<code>$F64</code>) it won't be part of  the overlap group generated.</p>\n<p>However, if the example looks instead like the following:</p>\n<div class=\"codehilite\" data-code-language=\"Common Lisp\"><pre><span></span><code><span class=\"nv\">1:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">example</span><span class=\"w\"> </span><span class=\"nv\">$F32</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">fallible_extractor</span><span class=\"w\"> </span><span class=\"mi\">25</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">...</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"nv\">2:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">example</span><span class=\"w\"> </span><span class=\"nv\">$F32</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">fallible_extractor</span><span class=\"w\"> </span><span class=\"mi\">31</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">...</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"nv\">3:</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">example</span><span class=\"w\"> </span><span class=\"nv\">$F64</span><span class=\"w\"> </span><span class=\"nv\">_</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">...</span><span class=\"p\">)</span><span class=\"w\"></span>\n</code></pre></div>\n<p>We consider there to be no overlap in the rules as fallible extractors are expected to be pure.</p>\n<p>&lt;!--</p>\n<p>Please ensure that the following steps are all taken care of before submitting<br>\nthe PR.</p>\n<ul>\n<li>[ ] This has been discussed in issue #..., or if not, please tell us why<br>\n  here.</li>\n<li>[ ] A short description of what this does, why it is needed; if the<br>\n  description becomes long, the matter should probably be discussed in an issue<br>\n  first.</li>\n<li>[ ] This PR contains test cases, if meaningful.</li>\n<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>\n  If you don't know who could review this, please indicate so. The list of<br>\n  suggested reviewers on the right can help you.</li>\n</ul>\n<p>Please ensure all communication adheres to the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md\">code of\nconduct</a>.<br>\n--&gt;<br>\n</p>\n</blockquote>",
+        "id": 298631043,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663089502
+    },
+    {
+        "content": "<p>elliottt updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 298634485,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663090702
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106204460\">PR review</a>.</p>",
+        "id": 298647753,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095449
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969911715\">PR review comment</a>:</p>\n<blockquote>\n<p>How much trouble would it be to make this a runtime option of some sort?</p>\n</blockquote>",
+        "id": 298647754,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095449
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969913882\">PR review comment</a>:</p>\n<blockquote>\n<p>How would you feel about a <code>HashSet&lt;RuleId&gt;</code> instead of <code>Vec&lt;bool&gt;</code>? Or, if you want the edges sorted by rule ID, at least a <code>BTreeSet</code>.</p>\n<p>As written, this uses O(n^2) space even if there aren't any errors.</p>\n<p>A cute side benefit is that then you can tag this struct with <code>#[derive(Default)]</code> and use <code>Node::default</code> instead of having to hand-implement <code>Node::new</code>.</p>\n</blockquote>",
+        "id": 298647755,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095449
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106204460\">PR review</a>.</p>",
+        "id": 298647756,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969922153\">PR review comment</a>:</p>\n<blockquote>\n<p>There's a neat idiom if <code>self.edges</code> were a <code>HashSet</code> or <code>BTreeSet</code>: </p>\n<div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>        if self.edges.insert(other.0) {\n            self.degree += 1;\n        }\n</code></pre></div>\n<p>The same pattern works for calling <code>edges.remove</code> in <code>remove_edge</code> below.</p>\n</blockquote>",
+        "id": 298647757,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969929464\">PR review comment</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>/// Check for overlapping rules within a single priority group.\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 298647758,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969931438\">PR review comment</a>:</p>\n<blockquote>\n<p>I'm not sure whether it's an improvement here, but there's a handy macro in the standard library for this pattern:</p>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>        matches!(\n            self.get_term(id).kind,\n            TermKind::Decl {\n                constructor_kind: Some(ConstructorKind::InternalConstructor),\n                ..\n            },\n        )\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 298647759,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969939227\">PR review comment</a>:</p>\n<blockquote>\n<p>Assuming that you switch both <code>Node</code> and <code>Errors</code> to using hash-tables, you can implement <code>add_edge</code> concisely like this:</p>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>        self.nodes.entry(a.0).or_insert_with(Node::new).add_edge(b);\n        self.nodes.entry(b.0).or_insert_with(Node::new).add_edge(a);\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 298647760,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969937827\">PR review comment</a>:</p>\n<blockquote>\n<p>Is the comment that \"the edges are normalized by ordering the rule ids\" still true? I'm guessing that's left over from an earlier version.</p>\n<p>Like for <code>Node</code>, I'd prefer <code>HashMap</code> over <code>Vec</code> so there's no heap allocation unless an error is actually found. And like for <code>Node</code> that means you can use <code>#[derive(Default)]</code>.</p>\n</blockquote>",
+        "id": 298647761,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969948006\">PR review comment</a>:</p>\n<blockquote>\n<p>I'd suggest making <code>Errors::report</code> consume <code>self</code>, instead of taking it by reference. You don't need it any more afterward, and anyway there's nothing useful in it: all the edges have been deleted.</p>\n</blockquote>",
+        "id": 298647762,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969978878\">PR review comment</a>:</p>\n<blockquote>\n<p>Does this guarantee that the degree is monotonically decreasing? I can't quite pin it down but I feel like there's some situation where higher-degree rules can reduce some other rule's degree to the point that by the time you get there, it has lower degree than later rules (but still non-zero degree).</p>\n<p>Here's someplace I'd actually be happier with an O(n^2) algorithm: Iterate over the rules to find one that currently has maximum degree (perhaps with <code>Iterator::max_by_key</code>), process it, and repeat. As long as <code>n</code> here is the number of rules that actually have overlaps, rather than the total number of rules, a quadratic algorithm is free in the expected case where we've already fixed all the overlaps.</p>\n</blockquote>",
+        "id": 298647763,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969954767\">PR review comment</a>:</p>\n<blockquote>\n<p>The <code>Errors::remove_edges</code> method is only called by <code>report</code>. I'd suggest inlining it there, and here's why:</p>\n<p>If you change <code>Errors</code> to contain a <code>HashMap</code>, then you could establish an invariant that every node in the map has non-zero degree. That's useful because <code>Errors::is_empty</code> can just call <code>HashMap::is_empty</code>, and <code>Errors::report</code> doesn't need to filter the set of nodes to find non-empty ones.</p>\n<p>That invariant automatically holds initially and after any sequence of calls to <code>add_edge</code>. But <code>remove_edges</code> breaks that invariant unless you're careful. Still, you don't need the invariant once you start looping over the overlaps in <code>report</code>, so if you inline this there then you don't have to be careful about the invariant.</p>\n</blockquote>",
+        "id": 298647764,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969957922\">PR review comment</a>:</p>\n<blockquote>\n<p>I don't think there's a good idiom for \"loop over all pairs in this slice\", but I found this version of it confusing for a moment. Maybe this instead?</p>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>        let mut rows = &amp;matrix.rows[..];\n        while let Some((rule, rest)) = rows.split_first() {\n            for other in rest {\n                self.add_edge(rule.rule, other.rule);\n            }\n            rows = others;\n        }\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 298647765,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969982732\">PR review comment</a>:</p>\n<blockquote>\n<p>I think <code>errors.report</code> will correctly return an empty vector if there are no errors, so I don't think you need the <code>is_empty</code> check up front. Also I think Rust will let you match directly on the returned vector:</p>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>    match errors.report(&amp;env) {\n        [] =&gt; Ok(()),\n        [e] =&gt; Err(e),\n        errors =&gt; Err(Error::Errors(errors)),\n    }\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 298647766,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r969966675\">PR review comment</a>:</p>\n<blockquote>\n<p>I think <code>sort_unstable_by_key</code> should do fine here, and it lets you avoid temporary heap allocations for the cached keys. You can impose a total order for the sort by using the pair of <code>(degree, id)</code> as the sort key, so stable sort isn't important. Neither is the order that you iterate over nodes when building the <code>rules</code> vector, so it's okay for <code>self.nodes</code> to be a <code>HashMap</code>.</p>\n</blockquote>",
+        "id": 298647768,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663095450
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106339064\">PR review</a>.</p>",
+        "id": 298652220,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663096990
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970004546\">PR review comment</a>:</p>\n<blockquote>\n<p>I used a HashSet to begin with, and it was considerably slower when building without <code>--release</code>. The switch to this dense representation made the runtime go from 55s for the x64 lowering down to about 10s. One thought I had was that the vector could be an <code>Option&lt;Vec&lt;Bool&gt;&gt;</code> where it would only allocate the bool vector if there was overlap present involving that rule. Another thought I had was that something like c++'s specialization of <code>std::vector&lt;bool&gt;</code> would be really nice here.</p>\n</blockquote>",
+        "id": 298652221,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663096990
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106344821\">PR review</a>.</p>",
+        "id": 298653060,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663097302
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970008660\">PR review comment</a>:</p>\n<blockquote>\n<p>The motivation for improving performance when building without <code>--release</code> is that cranelift currently builds the isle source without <code>--release</code> in the cranelift-codegen <a href=\"http://build.rs\">build.rs</a>.</p>\n</blockquote>",
+        "id": 298653063,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663097302
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970038213\">PR review comment</a>:</p>\n<blockquote>\n<p>You don't need to wrap the <code>Vec</code> in an <code>Option</code>; <code>Vec::new()</code> already doesn't heap-allocate, so you can just use <code>Vec::is_empty</code> as your flag instead of <code>Some</code>/<code>None</code>. And yeah, I keep wanting to use the <code>bitvec</code> crate for bit-packed boolean vectors, but we don't use it anywhere else and we don't add dependencies if we can help it.</p>\n<p>But also: wat? How could HashSet be that much slower? I feel like there must have been something else going on. (While trying to come up with hypotheses that might explain the difference, I worked out that the HashSet is smaller than the <code>Vec&lt;bool&gt;</code> as long as a rule overlaps with less than 11% of the other rules, but that doesn't seem likely to answer the question.)</p>\n<p>Also, in the long run I don't want to optimize for the case where there are a bunch of overlap errors if doing that makes things worse when there aren't any errors. While we're fixing the current backlog of overlaps, of course, it's reasonable to try to keep the debug loop short. But on the other hand, we can use <code>--release</code> builds of islec for that, right?</p>\n</blockquote>",
+        "id": 298659582,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663099622
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106387550\">PR review</a>.</p>",
+        "id": 298659583,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663099622
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106404886\">PR review</a>.</p>",
+        "id": 298661667,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663100552
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970050043\">PR review comment</a>:</p>\n<blockquote>\n<p>My assumption about why the vector is faster is that all the allocation is done up front. I don't know the specifics of how <code>HashSet</code> is implemented under the hood, but a lot of insertions to different rows could cause an allocation for each insertion, right?</p>\n<p>I agree that it's not worth over-optimizing for the case where we have lots of overlap, but we're talking about 1MB of memory to track the overlaps in the x64 lowerings. Paired with the one-off allocation strategy when we need to start adding overlap edges, it feels like this is a reasonable strategy to keep, but if you'd rather go back to the <code>HashSet</code> I'm not opposed.</p>\n</blockquote>",
+        "id": 298661668,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663100552
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1106623994\">PR review</a>.</p>",
+        "id": 298689672,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663118574
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r970210761\">PR review comment</a>:</p>\n<blockquote>\n<p>For anyone else following this: After a bunch of profiling with Trevor, we've learned that the <code>Errors::overlap_error</code> method is getting called super frequently, to the point that many of the x64 rules are getting marked millions of times each. So tiny differences in how long that method takes get multiplied out to big runtime differences, which is why two data structures show significantly different performance despite both supporting O(1) access. Even the bounds-checks in the vector version have a measurable impact, if I remember the <code>perf</code> report correctly.</p>\n<p>It looks like wildcard handling is currently exponential. We investigated ways to reduce that and Trevor has some things he's planning to try. I think fixing this may not only improve runtime but also fix some false positives in the overlap check.</p>\n</blockquote>",
+        "id": 298689673,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663118574
+    },
+    {
+        "content": "<p>elliottt updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 298887655,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663204011
+    },
+    {
+        "content": "<p>elliottt updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299030095,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663267297
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972337795\">PR review comment</a>:</p>\n<blockquote>\n<p>I've changed it so that the feature controls whether or not the overlaps are considered errors. It currently only prints the number of overlaps when the feature is disabled, would you prefer that it always prints the errors out even if they're not going to fail the build?</p>\n</blockquote>",
+        "id": 299035209,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663269024
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109715444\">PR review</a>.</p>",
+        "id": 299035210,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663269024
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109716334\">PR review</a>.</p>",
+        "id": 299035330,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663269076
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972338445\">PR review comment</a>:</p>\n<blockquote>\n<p>I reworked the overlap checking to work over pairs of related rules instead, which is much faster and reported more accurate overlap information.</p>\n</blockquote>",
+        "id": 299035331,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663269076
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109721714\">PR review</a>.</p>",
+        "id": 299036041,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663269379
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972342187\">PR review comment</a>:</p>\n<blockquote>\n<p>Nah, printing just the overlap count is fine, I think.</p>\n</blockquote>",
+        "id": 299036042,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663269379
+    },
+    {
+        "content": "<p>elliottt updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299037605,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663269981
+    },
+    {
+        "content": "<p>elliottt updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299038004,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663270141
+    },
+    {
+        "content": "<p>elliottt updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299038886,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663270458
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109741315\">PR review</a>.</p>",
+        "id": 299038946,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663270495
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972355724\">PR review comment</a>:</p>\n<blockquote>\n<p>Great idea!</p>\n</blockquote>",
+        "id": 299038947,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663270495
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109741880\">PR review</a>.</p>",
+        "id": 299039012,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663270528
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972356078\">PR review comment</a>:</p>\n<blockquote>\n<p>I could go either way on this, do you feel strongly about switching to the macro?</p>\n</blockquote>",
+        "id": 299039013,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663270528
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1109764997\">PR review</a>.</p>",
+        "id": 299042249,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663271895
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r972371613\">PR review comment</a>:</p>\n<blockquote>\n<p>I think this is a bad name for this type now, how about <code>Patterns</code>?</p>\n</blockquote>",
+        "id": 299042250,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663271895
+    },
+    {
+        "content": "<p><strong>elliottt</strong> has marked <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> as ready for review.</p>",
+        "id": 299053336,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663276740
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1110997479\">PR review</a>.</p>",
+        "id": 299213877,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663351115
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1110997479\">PR review</a>.</p>",
+        "id": 299213878,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663351115
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973242223\">PR review comment</a>:</p>\n<blockquote>\n<p>As far as I can tell, this field is never read and can be removed, along with the <code>is_single_constructor_enum</code> method. I'm puzzled why you didn't get a build warning about this...</p>\n<p>Once you do that I believe <code>Variant</code> and <code>Extractor</code> are treated the same way everywhere so you can merge them. I'm assuming that the same <code>TermId</code> is never used both for an enum variant and for an extractor.</p>\n</blockquote>",
+        "id": 299213881,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663351116
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973236666\">PR review comment</a>:</p>\n<blockquote>\n<p>I do not feel strongly about that, nope!</p>\n</blockquote>",
+        "id": 299213882,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663351116
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973237495\">PR review comment</a>:</p>\n<blockquote>\n<p>This is immediately converted back to an iterator by its only caller, so I'd return <code>impl Iterator&lt;Item = RuleId&gt;</code> instead of calling <code>.collect()</code>.</p>\n</blockquote>",
+        "id": 299213883,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663351116
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1111217851\">PR review</a>.</p>",
+        "id": 299240817,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663362055
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973389312\">PR review comment</a>:</p>\n<blockquote>\n<blockquote>\n<p>As far as I can tell, this field is never read and can be removed, along with the <code>is_single_constructor_enum</code> method. I'm puzzled why you didn't get a build warning about this...</p>\n</blockquote>\n<p>This was originally when I was going to try to reason about the interaction of single-constructor enums to know that no other case was ever possible. I'm not sure there's anything we can do with that information now, so it should be removed.</p>\n<blockquote>\n<p>Once you do that I believe <code>Variant</code> and <code>Extractor</code> are treated the same way everywhere so you can merge them. I'm assuming that the same <code>TermId</code> is never used both for an enum variant and for an extractor.</p>\n</blockquote>\n<p>We'd still need to be able to differentiate between a Variant and an Extractor for the case where the match fails: in that case the variant means that the two don't overlap, while the extractor could still potentially fire.</p>\n</blockquote>",
+        "id": 299240818,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663362055
+    },
+    {
+        "content": "<p>elliottt updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299241037,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663362142
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1111233765\">PR review</a>.</p>",
+        "id": 299243316,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663363437
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r973400764\">PR review comment</a>:</p>\n<blockquote>\n<p>Yeah, I figured that out after writing this comment. <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span> </p>\n</blockquote>",
+        "id": 299243318,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663363437
+    },
+    {
+        "content": "<p>jameysharp updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299638675,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663618829
+    },
+    {
+        "content": "<p>jameysharp updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299658803,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663628443
+    },
+    {
+        "content": "<p>jameysharp updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299661221,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663629932
+    },
+    {
+        "content": "<p>jameysharp updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a> from <code>trevor/isle-overlap-checker</code> to <code>main</code>.</p>",
+        "id": 299664005,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663631870
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116026861\">PR review</a>.</p>",
+        "id": 300031119,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663790740
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116026861\">PR review</a>.</p>",
+        "id": 300031121,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663790740
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r976939862\">PR review comment</a>:</p>\n<blockquote>\n<p>Do we need to flatten the <code>and</code>s here? E.g. what happens if I have a left-hand side like</p>\n<div class=\"codehilite\" data-code-language=\"Common Lisp\"><pre><span></span><code><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"p\">(</span><span class=\"nv\">f</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">(</span><span class=\"nb\">and</span><span class=\"w\"></span>\n<span class=\"w\">      </span><span class=\"p\">(</span><span class=\"nb\">and</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">g</span><span class=\"w\"> </span><span class=\"nv\">_</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">h</span><span class=\"w\"> </span><span class=\"nv\">_</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"w\">      </span><span class=\"p\">(</span><span class=\"nv\">k</span><span class=\"w\"> </span><span class=\"nv\">_</span><span class=\"p\">)))</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"nv\">rhs</span><span class=\"p\">)</span><span class=\"w\"></span>\n</code></pre></div>\n<p>?</p>\n</blockquote>",
+        "id": 300031122,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663790740
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116029578\">PR review</a>.</p>",
+        "id": 300031475,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663790871
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r976941685\">PR review comment</a>:</p>\n<blockquote>\n<p>We would need to do that, except we decided to flatten those earlier in the pipeline, and merged that in #4915.</p>\n</blockquote>",
+        "id": 300031476,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663790872
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r976958505\">PR review comment</a>:</p>\n<blockquote>\n<p>Oh, excellent! I somehow missed that. Thanks!</p>\n</blockquote>",
+        "id": 300034929,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663792207
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116054095\">PR review</a>.</p>",
+        "id": 300034930,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663792208
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1116054493\">PR review</a>.</p>",
+        "id": 300034984,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663792232
+    },
+    {
+        "content": "<p>elliottt merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906\">PR #4906</a>.</p>",
+        "id": 300039771,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1663794481
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152298416\">PR review</a>.</p>",
+        "id": 305654018,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666525993
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002697557\">PR review comment</a>:</p>\n<blockquote>\n<p>This adds a lot of dependencies to Cranelift. Is the overlap checking really so expensive that paralleling it makes a lot of difference?</p>\n</blockquote>",
+        "id": 305654019,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666525993
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152298909\">PR review</a>.</p>",
+        "id": 305654356,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666526237
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002698188\">PR review comment</a>:</p>\n<blockquote>\n<p>I just checked it. Takes less than half a second total even when not parallelizing. Will open a PR to remove rayon.</p>\n</blockquote>",
+        "id": 305654357,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666526238
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002741596\">PR review comment</a>:</p>\n<blockquote>\n<p>We depend on rayon elsewhere in cranelift, which is why we added it to the overlap checker. Were you removing it completely from cranelift?</p>\n</blockquote>",
+        "id": 305685545,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666545329
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152337393\">PR review</a>.</p>",
+        "id": 305685546,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666545329
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152337952\">PR review</a>.</p>",
+        "id": 305685999,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666545661
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002742315\">PR review comment</a>:</p>\n<blockquote>\n<p>wasmtime-cranelift depends on rayon, but cranelift itself doesn't apart from cranelift-isle because of this PR. <a href=\"https://github.com/bjorn3/rustc_codegen_cranelift/commit/266e96785ab71834b917bf474f130a6d8fdecd4b\">https://github.com/bjorn3/rustc_codegen_cranelift/commit/266e96785ab71834b917bf474f130a6d8fdecd4b</a> reverted cg_clif back to cranelift 0.88.1 from before this PR. This commit removes rayon from cg_clif's Cargo.lock.</p>\n</blockquote>",
+        "id": 305686000,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666545661
+    },
+    {
+        "content": "<p>elliottt created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002752347\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah I see. My assumption had been that since it was in <code>cranelift/Cargo.toml</code> that it would be okay to rely on it in isle.</p>\n</blockquote>",
+        "id": 305693376,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666550811
+    },
+    {
+        "content": "<p>elliottt submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152346156\">PR review</a>.</p>",
+        "id": 305693377,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666550811
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1152348016\">PR review</a>.</p>",
+        "id": 305695952,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666552011
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1002754734\">PR review comment</a>:</p>\n<blockquote>\n<p>FWIW <code>cranelift/Cargo.toml</code> defines the crate for <code>cranelift-tools</code>, the CLI utility; we do want to keep dependencies of <code>cranelift-codegen</code> as minimal as possible, and since <code>cranelift-isle</code> is a build-dep of that I'd consider the same policy to apply. Sorry for not catching this earlier!</p>\n</blockquote>",
+        "id": 305695954,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666552011
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#pullrequestreview-1153707110\">PR review</a>.</p>",
+        "id": 305904856,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666641849
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4906#discussion_r1003702782\">PR review comment</a>:</p>\n<blockquote>\n<p>If I remember correctly, when we added the rayon dependency, overlap checking was dramatically slower, so parallelism shaved a lot of time off the wasmtime build. But by the time we actually merged overlap checking to <code>main</code>, we'd fixed its performance, so rayon didn't matter any more; we just didn't re-evaluate it at that point.</p>\n<p>So thank you for #5101: it's a good change.</p>\n</blockquote>",
+        "id": 305904857,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1666641849
+    }
+]

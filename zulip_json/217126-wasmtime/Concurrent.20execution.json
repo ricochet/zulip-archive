@@ -1,0 +1,140 @@
+[
+    {
+        "content": "<p>Hi, is it possible to run multiple functions on a wasmtime Instance concurrently or do I need to call each function sequentially?</p>",
+        "id": 357793696,
+        "sender_full_name": "Buster Styren",
+        "timestamp": 1683880523
+    },
+    {
+        "content": "<p>I'm guessing it might not work due to the memory model. But lets say I want to run a type of wasm server, if I have to create a separate instance for each invocation wouldn't that carry quite a big memory overhead?</p>",
+        "id": 357794611,
+        "sender_full_name": "Buster Styren",
+        "timestamp": 1683880700
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"616787\">Buster Styren</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Concurrent.20execution/near/357793696\">said</a>:</p>\n<blockquote>\n<p>Hi, is it possible to run multiple functions on a wasmtime Instance concurrently or do I need to call each function sequentially?</p>\n</blockquote>\n<p>For a single instance, calls must be sequential. There is ongoing work to add threading to wasmtime but afaik it isn't generally usable yet.</p>",
+        "id": 357854352,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1683894527
+    },
+    {
+        "content": "<blockquote>\n<p>if I have to create a separate instance for each invocation wouldn't that carry quite a big memory overhead</p>\n</blockquote>\n<p>Not necessarily, though it depends a bit on the host OS. Linux and macOS can use <a href=\"https://docs.rs/wasmtime/8.0.1/wasmtime/struct.Config.html#method.memory_init_cow\">copy-on-write memory initialization</a> which - depending on the module - can give you some of the same memory behavior as multithreading.</p>",
+        "id": 357855081,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1683894689
+    },
+    {
+        "content": "<p>Note that the threading support is good enough to use in Wasmtime today for testing out, but it requires cooperation with the wasm module and module's can't transparently be multi-threaded. Most modules aren't in multi-threaded mode (e.g. support in Rust is unstable) so that's probably not viable.</p>\n<p>Otherwise though to add to what Lann already mentioned the overhead for a new instance is relatively small with copy-on-write and it largely depends on the guest. If the guest only needs 64k of memory then that's the rough overhead, but larger guests may require more memory. In that sense the overhead may depend on whether you control the wasm module or it's given as an arbitrary module to you</p>",
+        "id": 357886908,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1683901259
+    },
+    {
+        "content": "<p>Alright, that answers all my questions. Thank you both!</p>",
+        "id": 358757061,
+        "sender_full_name": "Buster Styren",
+        "timestamp": 1684248646
+    },
+    {
+        "content": "<p><a href=\"https://docs.rs/wasmtime/latest/wasmtime/struct.Caller.html\">wasmtime::Caller</a>: </p>\n<blockquote>\n<p>Second a <code>Caller</code> can be used as the name implies, learning about the caller’s context, namely it’s exported memory and exported functions. This allows functions which take pointers as arguments to easily read the memory the pointers point into, or if a function is expected to call malloc in the wasm module to reserve space for the output you can do that.</p>\n</blockquote>\n<p>When a host exported function is called from inside wasm, the caller is accessible. Using <code>caller.get_export()</code> I can access <code>Option&lt;Extern&gt;</code> and get <code>Func</code> out of it, which is a <code>malloc</code> equivalent exported by wasm. How do I call this malloc, I do not have access to <code>&amp;mut store</code>? Would that not be concurrent execution, which is not allowed. </p>\n<p>How do I allocate space for say an array and return the array back to wasm function?</p>",
+        "id": 358902054,
+        "sender_full_name": "Amit Upadhyay",
+        "timestamp": 1684304586
+    },
+    {
+        "content": "<p>So I double checked where I got my information from: <a href=\"https://docs.rs/wasmtime/latest/wasmtime/struct.Memory.html#memory-and-safety\"><code>wasmtime::Memory</code> -&gt; Memory And Safety</a>:</p>\n<blockquote>\n<p>This includes getting access to the T on Store&lt;T&gt;, _but it also means that you can’t recursively call into WebAssembly for instance_.</p>\n</blockquote>\n<p>But <code>caller</code> is proxy for <code>store</code>, so this works:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">anyhow</span>::<span class=\"nb\">Result</span><span class=\"o\">&lt;</span><span class=\"p\">()</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">engine</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">Engine</span>::<span class=\"n\">default</span><span class=\"p\">();</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">module</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">Module</span>::<span class=\"n\">from_file</span><span class=\"p\">(</span>\n<span class=\"w\">        </span><span class=\"o\">&amp;</span><span class=\"n\">engine</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"s\">\"../guest/target/wasm32-unknown-unknown/debug/guest.wasm\"</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span>\n\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">Store</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">engine</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">());</span>\n\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">from_host</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">Func</span>::<span class=\"n\">wrap</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">caller</span>: <span class=\"nc\">wasmtime</span>::<span class=\"n\">Caller</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">()</span><span class=\"o\">&gt;|</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"called from wasm\"</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">o</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">Val</span>::<span class=\"n\">I32</span><span class=\"p\">(</span><span class=\"mi\">0</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">v</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"fm\">vec!</span><span class=\"p\">[</span><span class=\"n\">o</span><span class=\"p\">];</span>\n<span class=\"w\">        </span><span class=\"n\">caller</span><span class=\"p\">.</span><span class=\"n\">get_export</span><span class=\"p\">(</span><span class=\"s\">\"foo\"</span><span class=\"p\">).</span><span class=\"n\">expect</span><span class=\"p\">(</span><span class=\"s\">\"foo not found\"</span><span class=\"p\">).</span><span class=\"n\">into_func</span><span class=\"p\">().</span><span class=\"n\">expect</span><span class=\"p\">(</span><span class=\"s\">\"foo not a func\"</span><span class=\"p\">).</span><span class=\"n\">call</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">caller</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"p\">[],</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">v</span><span class=\"p\">).</span><span class=\"n\">expect</span><span class=\"p\">(</span><span class=\"s\">\"call failed\"</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"fm\">dbg!</span><span class=\"p\">(</span><span class=\"n\">v</span><span class=\"p\">);</span>\n<span class=\"w\">    </span><span class=\"p\">});</span>\n\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">from_host2</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">Func</span>::<span class=\"n\">wrap</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">_caller</span>: <span class=\"nc\">wasmtime</span>::<span class=\"n\">Caller</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">()</span><span class=\"o\">&gt;|</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"called from wasm2\"</span><span class=\"p\">);</span>\n<span class=\"w\">        </span><span class=\"mi\">10</span>\n<span class=\"w\">    </span><span class=\"p\">});</span>\n\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">instance</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">Instance</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">module</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"p\">[</span><span class=\"n\">from_host</span><span class=\"p\">.</span><span class=\"n\">into</span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">from_host2</span><span class=\"p\">.</span><span class=\"n\">into</span><span class=\"p\">()])</span><span class=\"o\">?</span><span class=\"p\">;</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">sum</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">instance</span><span class=\"p\">.</span><span class=\"n\">get_typed_func</span>::<span class=\"o\">&lt;</span><span class=\"p\">(</span><span class=\"kt\">i32</span><span class=\"p\">,),</span><span class=\"w\"> </span><span class=\"kt\">i32</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"s\">\"sum\"</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span>\n<span class=\"w\">    </span><span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"wasm said: {}\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">sum</span><span class=\"p\">.</span><span class=\"n\">call</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mi\">1</span><span class=\"p\">,))</span><span class=\"o\">?</span><span class=\"p\">);</span>\n\n<span class=\"w\">    </span><span class=\"nb\">Ok</span><span class=\"p\">(())</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p><a href=\"https://github.com/fastn-stack/experiments/tree/main/02-export-host-function\">Full source</a>.</p>\n<p>Can we conclude the <code>wasmtime::Memory</code> is inaccurate? Even in this thread <span class=\"user-mention\" data-user-id=\"480579\">@Lann Martin</span> says \"For a single instance, calls must be sequential. \". </p>\n<p>What am I missing?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/fastn-stack/experiments/tree/main/02-export-host-function\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/c60ba13ebc50ef994aefd8b8a03af805653c73ed\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f383335383466383766333938623539396433333761373433373339623831383465393331616233663761646530323930333736383939653836386361633538392f666173746e2d737461636b2f6578706572696d656e7473)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/fastn-stack/experiments/tree/main/02-export-host-function\" title=\"experiments/02-export-host-function at main · fastn-stack/experiments\">experiments/02-export-host-function at main · fastn-stack/experiments</a></div><div class=\"message_embed_description\">Contribute to fastn-stack/experiments development by creating an account on GitHub.</div></div></div>",
+        "id": 358918110,
+        "sender_full_name": "Amit Upadhyay",
+        "timestamp": 1684311182
+    },
+    {
+        "content": "<p>It makes sense to me that the code you posted should work. I'm not sure I understand what \"can’t recursively call into WebAssembly\" in the docs means exactly.</p>\n<blockquote>\n<p>For a single instance, calls must be sequential.</p>\n</blockquote>\n<p>This was just in response to whether calls can be concurrent in a single instance, which they can't (module the wasm threading proposal); you could say that Wasm supports only a single call stack at a time.</p>",
+        "id": 358982946,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1684329848
+    },
+    {
+        "content": "<p>With the Wasmtime embedding API if you can do it without <code>unsafe</code> then it's safe to do it. The documentation on <code>Memory</code> is about code that may be tempted to use <code>unsafe</code>. You're not using <code>unsafe</code> here so you're good.</p>",
+        "id": 358994918,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1684332750
+    },
+    {
+        "content": "<p>So, I just looked into copy-on-write and I'm unsure how I can get that to work properly in a multi-threaded context. Even if it's cheap to create multiple Instance I still need to supply a mutable reference to the Store in order to add host functions during linking, so I can't \"prepare\" the whole module and instantiate them (cheaply) at will, I guess?</p>\n<p>Which means that I can't readily instantiate Instances from the linked module without doing the actual linking with a separate store, which I guess will not make it possible to copy-on-write any significant part of the mem allocation? Or is it possible to copy or clone the store for each new invocation?</p>",
+        "id": 359085304,
+        "sender_full_name": "Buster Styren",
+        "timestamp": 1684358821
+    },
+    {
+        "content": "<p>The fastest way to instantiate is by first creating an <code>InstancePre&lt;T&gt;</code> and then repeatedly using that to instantiate. Each instantiation requires a unique <code>Store&lt;T&gt;</code> but those should be cheap to create and destroy. The copy-on-write optimizations have to do with linear memory initialization and is a per-module property that the embedder doesn't actively need to enable as it will happen automatically.</p>",
+        "id": 359085884,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1684359049
+    },
+    {
+        "content": "<p>Ah beautiful, now it all makes sense. Thank you for being so helpful.</p>",
+        "id": 359086486,
+        "sender_full_name": "Buster Styren",
+        "timestamp": 1684359315
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"616787\">@Buster Styren</span> You may be interested in some performance testing I did using various execution strategies in Wasmtime, including pre-compilation, pre-instantiation, allocation pooling, etc.: <a href=\"https://github.com/dicej/wasmtime-serverless-performance\">https://github.com/dicej/wasmtime-serverless-performance</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/wasmtime-serverless-performance\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/9a55dd51898c35273a729c042d68218209282556\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f643830336463336335363535626137393064336134363333643736623334333235326465326231316463333737346265643861623530323565643036316130622f646963656a2f7761736d74696d652d7365727665726c6573732d706572666f726d616e6365)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/wasmtime-serverless-performance\" title=\"GitHub - dicej/wasmtime-serverless-performance\">GitHub - dicej/wasmtime-serverless-performance</a></div><div class=\"message_embed_description\">Contribute to dicej/wasmtime-serverless-performance development by creating an account on GitHub.</div></div></div>",
+        "id": 359088685,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1684360359
+    },
+    {
+        "content": "<p>\"how I got wasmtime to be 30x slower than <code>fork</code>\" hehe a great comparison!</p>",
+        "id": 359092422,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1684362125
+    },
+    {
+        "content": "<p>I had no idea that a fresh instance with pooling plus reusing an instance was only ~2x, that's actually much lower than I might have expected</p>",
+        "id": 359092514,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1684362198
+    },
+    {
+        "content": "<p>One interesting axis in case anyone's curious for benchmarks like this to explore is what happens at higher parallelism too. For example have N background threads all doing the same work as the main thread and time how long it takes the main thread to do its iteration (we have this in Wasmtime's <code>instantiate</code> benchmarks). Strategies such as CoW and pooling show pretty big effects at &gt;2 concurrency when IPIs and the kernel come into play more</p>",
+        "id": 359092726,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1684362308
+    },
+    {
+        "content": "<p>This is a year old thread, but I think it makes sense to reconsider its answer now that no-std starts to be an option. In embedded context, there is not necessarily copy-on-write capabilities and creating a new store and instance for each thread might be too costly. Is my understanding correct that this is a limitation of wasmtime and that the wasm specification theoretically permits concurrent usage of a single store? (i.e. running concurrent threads within the same store) Is this a capability that wasmtime might be considering to add in the future? (in particular once no-std is supported) Thanks! (I can create a separate discussion thread or open an issue on GitHub if that's preferred)</p>",
+        "id": 434753766,
+        "sender_full_name": "Julien Cretin (ia0)",
+        "timestamp": 1713793506
+    },
+    {
+        "content": "<p>Wasmtime won't support concurrent execution within a single store, even with no_std support. That part is pretty foundational to Wasmtime right now. Wasmtime has been optimized for cheap instantiation but you by no means need to use that, you can create a single instance and run with that as well. If the instance-per-thread model is too expensive for you then you probably want to follow the <a href=\"https://github.com/WebAssembly/shared-everything-threads/\">shared-everything-threads</a> proposal, but if you're also interested to use Wasmtime I'd recommend profiling if possible to see what the hot spots are and we can help see if we can optimize those. It's going to take quite some time to get shared-everything-threads implemented.</p>\n<p>But yeah if you'd like to open a tracking issue/discussion place that's also reasonable!</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/shared-everything-threads/\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/6b38a62b4b9881a36cdea1c6ae42417efb228266\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f613134346238653436613361323036333332343064393162336330373835653761373366666362353630373432366631343433383361623266663039373130352f576562417373656d626c792f7368617265642d65766572797468696e672d74687265616473)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/shared-everything-threads/\" title=\"GitHub - WebAssembly/shared-everything-threads: A draft proposal for spawning threads in WebAssembly\">GitHub - WebAssembly/shared-everything-threads: A draft proposal for spawning threads in WebAssembly</a></div><div class=\"message_embed_description\">A draft proposal for spawning threads in WebAssembly - WebAssembly/shared-everything-threads</div></div></div>",
+        "id": 434769033,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1713797077
+    },
+    {
+        "content": "<p>Thanks for the link! I'll follow that proposal. And I'll definitely give wasmtime a try once no-std is supported. But I expect other issues before reaching threads, like supporting smaller page sizes (which I discovered has a proposal now, nice).</p>",
+        "id": 434785647,
+        "sender_full_name": "Julien Cretin (ia0)",
+        "timestamp": 1713800997
+    },
+    {
+        "content": "<p>Sorry, actually one more question. Do we agree that this instance-per-thread approach requires modules that want parallel threads to import their shared memory? Otherwise each instance would get its own if I understand Wasmtime correctly. However, my reading of the spec says <a href=\"https://webassembly.github.io/threads/core/exec/runtime.html#memory-instances\">\"For memories of shared type, no state is recorded in the instance itself.\"</a> which seems to differ with what Wasmtime does. Or am I missing something?</p>",
+        "id": 434927749,
+        "sender_full_name": "Julien Cretin (ia0)",
+        "timestamp": 1713859719
+    },
+    {
+        "content": "<p>Modules/instances have no inherent memories attached to them, they need to either import them or define them. In that sense if memory were not imported you'd still need to decide how to represent linear memory. If memory were defined then that wouldn't work in the instance-per-thread model because then each instance would define its own memory, defeating the purpose of sharing memory across threads. </p>\n<p>So to answer your question, effectively yes - the instance-per-thread model basically requires a module to import shared linear memory. The shared part is required as it's the only wasm type that's safe to share across threads.</p>\n<p>As for the spec, wasmtime implements those semantics which is that a shared memory is not attached to a particular instance or doesn't close over instance state. It sounds though like you've got something which you think contradicts this? I can take a closer look if you'd like to point that out</p>",
+        "id": 435035408,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1713893686
+    },
+    {
+        "content": "<p>Thanks! This answers my first question (and confirms my understanding). Regarding my second question, now that I think about it, it's actually not a contradiction, but just a correct implementation detail. (The spec does not record any state in a shared memory instance, but this doesn't prevent an embedded to do so for convenience. What matters is that the trace of events be consistent, which doesn't prevent storing the shared memory state in its memory instance. To give an example of an alternative design to Wasmtime: each time a module is instantiated, for each shared memory it defines, the Wasmtime user should provide an appropriate shared memory. Wasmtime decided to create one automatically for the user and store it in the memory instance, or somewhere equivalent in the store.)</p>",
+        "id": 435146202,
+        "sender_full_name": "Julien Cretin (ia0)",
+        "timestamp": 1713950181
+    }
+]

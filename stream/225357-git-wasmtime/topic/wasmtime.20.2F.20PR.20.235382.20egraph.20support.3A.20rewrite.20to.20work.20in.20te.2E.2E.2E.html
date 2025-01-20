@@ -1,0 +1,580 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #5382 egraph support: rewrite to work in te... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html">wasmtime / PR #5382 egraph support: rewrite to work in te...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="314172061"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314172061" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314172061">(Dec 06 2022 at 05:21)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>:</p>
+<blockquote>
+<p>(Stacked on #5380.)</p>
+<p>This work rewrites the "egraph"-based optimization framework in<br>
+Cranelift to operate on aegraphs (acyclic egraphs) represented in the<br>
+CLIF itself rather than as a separate data structure to which and from<br>
+which we translate the CLIF.</p>
+<p>The basic idea is to add a new kind of value, a "union", that is like an<br>
+alias but refers to two other values rather than one.  This allows us to<br>
+represent an eclass of enodes (values) as a tree. The union node allows<br>
+for a value to have <em>multiple representations</em>: either constituent value<br>
+could be used, and (in well-formed CLIF produced by correct<br>
+optimization rules) they must be equivalent.</p>
+<p>Like the old egraph infrastructure, we take advantage of acyclicity and<br>
+eager rule application to do optimization in a single pass. Like before,<br>
+we integrate GVN (during the optimization pass) and LICM (during<br>
+elaboration).</p>
+<p>Unlike the old egraph infrastructure, everything stays in the<br>
+DataFlowGraph. "Pure" enodes are represented as instructions that have<br>
+values attached, but that are not placed into the function layout. When<br>
+entering "egraph" form, we remove them from the layout while optimizing.<br>
+When leaving "egraph" form, during elaboration, we can place an<br>
+instruction back into the layout the first time we elaborate the enode;<br>
+if we elaborate it more than once, we clone the instruction.</p>
+<p>The implementation performs two passes overall:</p>
+<ul>
+<li>
+<p>One, a forward pass in RPO (to see defs before uses), that (i) removes<br>
+  "pure" instructions from the layout and (ii) optimizes as it goes. As<br>
+  before, we eagerly optimize, so we form the entire union of optimized<br>
+  forms of a value before we see any uses of that value. This lets us<br>
+  rewrite uses to use the most "up-to-date" form of the value and<br>
+  canonicalize and optimize that form.</p>
+<p>The eager rewriting and acyclic representation make each other work<br>
+(we could not eagerly rewrite if there were cycles; and acyclicity<br>
+does not miss optimization opportunities only because the first time<br>
+we introduce a value, we immediately produce its "best" form). This<br>
+design choice is also what allows us to avoid the "parent pointers"<br>
+and fixpoint loop of traditional egraphs.</p>
+<p>This forward optimization pass keeps a scoped hashmap to "intern"<br>
+nodes (thus performing GVN), and also interleaves on a per-instruction<br>
+level with alias analysis. The interleaving with alias analysis allows<br>
+alias analysis to see the most optimized form of each address (so it<br>
+can see equivalences), and allows the next value to see any<br>
+equivalences (reuses of loads or stored values) that alias analysis<br>
+uncovers.</p>
+</li>
+<li>
+<p>Two, a forward pass in domtree preorder, that "elaborates" pure enodes<br>
+  back into the layout, possibly in multiple places if needed. This<br>
+  tracks the loop nest and hoists nodes as needed, performing LICM as it<br>
+  goes. Note that by doing this in forward order, we avoid the<br>
+  "fixpoint" that traditional LICM needs: we hoist a def before its<br>
+  uses, so when we place a node, we place it in the right place the<br>
+  first time rather than moving later.</p>
+</li>
+</ul>
+<p>This PR replaces the old (a)egraph implementation. It removes both the<br>
+cranelift-egraph crate and the logic in cranelift-codegen that uses it.</p>
+<p>On <code>spidermonkey.wasm</code> running a simple recursive Fibonacci<br>
+microbenchmark, this work shows 5.5% compile-time reduction and 7.7%<br>
+runtime improvement (speedup). More benchmarks to come.</p>
+<p>Most of this implementation was done in (very productive) pair<br>
+programming sessions with Jamey Sharp, thus:</p>
+<p>Co-authored-by: Jamey Sharp &lt;<a href="mailto:jsharp@fastly.com">jsharp@fastly.com</a>&gt;</p>
+</blockquote>
+
+
+
+<a name="314172063"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314172063" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314172063">(Dec 06 2022 at 05:21)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a>.</p>
+
+
+
+<a name="314174729"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314174729" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314174729">(Dec 06 2022 at 05:56)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314210302"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314210302" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314210302">(Dec 06 2022 at 10:48)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1206344571">PR review</a>.</p>
+
+
+
+<a name="314210303"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314210303" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314210303">(Dec 06 2022 at 10:48)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1040806262">PR review comment</a>:</p>
+<blockquote>
+<p>We already have an fxhash impl in the fx module.</p>
+</blockquote>
+
+
+
+<a name="314211239"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314211239" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314211239">(Dec 06 2022 at 10:54)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1206354334">PR review</a>.</p>
+
+
+
+<a name="314211240"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314211240" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314211240">(Dec 06 2022 at 10:54)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1040814149">PR review comment</a>:</p>
+<blockquote>
+<p>What exactly is hashbrown necessary for? std::collection::HashMap is a wrapper around hashbrown.</p>
+</blockquote>
+
+
+
+<a name="314285233"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314285233" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314285233">(Dec 06 2022 at 17:28)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041261000">PR review comment</a>:</p>
+<blockquote>
+<p>It's necessary for <code>crate::ctxhash::CtxHashMap</code>, which is a hashmap that uses external context for hashing and equality. <code>HashMap</code> isn't sufficient for this.</p>
+<p>Note that this was previously in the <code>cranelift-egraph</code> crate, which was unconditionally required by <code>cranelift-codegen</code>, and now has been moved into <code>cranelift-codegen</code>; so there's no change in the dependency footprint.</p>
+</blockquote>
+
+
+
+<a name="314285234"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314285234" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314285234">(Dec 06 2022 at 17:28)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207022608">PR review</a>.</p>
+
+
+
+<a name="314285520"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314285520" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314285520">(Dec 06 2022 at 17:29)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314285587"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314285587" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314285587">(Dec 06 2022 at 17:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207024874">PR review</a>.</p>
+
+
+
+<a name="314285589"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314285589" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314285589">(Dec 06 2022 at 17:30)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041262524">PR review comment</a>:</p>
+<blockquote>
+<p>Ah, yes, I had forgotten that; thanks, updated.</p>
+</blockquote>
+
+
+
+<a name="314287170"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314287170" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314287170">(Dec 06 2022 at 17:37)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314289726"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314289726" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314289726">(Dec 06 2022 at 17:51)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314300309"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314300309" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314300309">(Dec 06 2022 at 18:43)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314300333"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314300333" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314300333">(Dec 06 2022 at 18:43)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>:</p>
+<blockquote>
+<p>This work rewrites the "egraph"-based optimization framework in<br>
+Cranelift to operate on aegraphs (acyclic egraphs) represented in the<br>
+CLIF itself rather than as a separate data structure to which and from<br>
+which we translate the CLIF.</p>
+<p>The basic idea is to add a new kind of value, a "union", that is like an<br>
+alias but refers to two other values rather than one.  This allows us to<br>
+represent an eclass of enodes (values) as a tree. The union node allows<br>
+for a value to have <em>multiple representations</em>: either constituent value<br>
+could be used, and (in well-formed CLIF produced by correct<br>
+optimization rules) they must be equivalent.</p>
+<p>Like the old egraph infrastructure, we take advantage of acyclicity and<br>
+eager rule application to do optimization in a single pass. Like before,<br>
+we integrate GVN (during the optimization pass) and LICM (during<br>
+elaboration).</p>
+<p>Unlike the old egraph infrastructure, everything stays in the<br>
+DataFlowGraph. "Pure" enodes are represented as instructions that have<br>
+values attached, but that are not placed into the function layout. When<br>
+entering "egraph" form, we remove them from the layout while optimizing.<br>
+When leaving "egraph" form, during elaboration, we can place an<br>
+instruction back into the layout the first time we elaborate the enode;<br>
+if we elaborate it more than once, we clone the instruction.</p>
+<p>The implementation performs two passes overall:</p>
+<ul>
+<li>
+<p>One, a forward pass in RPO (to see defs before uses), that (i) removes<br>
+  "pure" instructions from the layout and (ii) optimizes as it goes. As<br>
+  before, we eagerly optimize, so we form the entire union of optimized<br>
+  forms of a value before we see any uses of that value. This lets us<br>
+  rewrite uses to use the most "up-to-date" form of the value and<br>
+  canonicalize and optimize that form.</p>
+<p>The eager rewriting and acyclic representation make each other work<br>
+(we could not eagerly rewrite if there were cycles; and acyclicity<br>
+does not miss optimization opportunities only because the first time<br>
+we introduce a value, we immediately produce its "best" form). This<br>
+design choice is also what allows us to avoid the "parent pointers"<br>
+and fixpoint loop of traditional egraphs.</p>
+<p>This forward optimization pass keeps a scoped hashmap to "intern"<br>
+nodes (thus performing GVN), and also interleaves on a per-instruction<br>
+level with alias analysis. The interleaving with alias analysis allows<br>
+alias analysis to see the most optimized form of each address (so it<br>
+can see equivalences), and allows the next value to see any<br>
+equivalences (reuses of loads or stored values) that alias analysis<br>
+uncovers.</p>
+</li>
+<li>
+<p>Two, a forward pass in domtree preorder, that "elaborates" pure enodes<br>
+  back into the layout, possibly in multiple places if needed. This<br>
+  tracks the loop nest and hoists nodes as needed, performing LICM as it<br>
+  goes. Note that by doing this in forward order, we avoid the<br>
+  "fixpoint" that traditional LICM needs: we hoist a def before its<br>
+  uses, so when we place a node, we place it in the right place the<br>
+  first time rather than moving later.</p>
+</li>
+</ul>
+<p>This PR replaces the old (a)egraph implementation. It removes both the<br>
+cranelift-egraph crate and the logic in cranelift-codegen that uses it.</p>
+<p>On <code>spidermonkey.wasm</code> running a simple recursive Fibonacci<br>
+microbenchmark, this work shows 5.5% compile-time reduction and 7.7%<br>
+runtime improvement (speedup). More benchmarks to come.</p>
+<p>Most of this implementation was done in (very productive) pair<br>
+programming sessions with Jamey Sharp, thus:</p>
+<p>Co-authored-by: Jamey Sharp &lt;<a href="mailto:jsharp@fastly.com">jsharp@fastly.com</a>&gt;</p>
+</blockquote>
+
+
+
+<a name="314302809"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302809" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302809">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207071954">PR review</a>.</p>
+
+
+
+<a name="314302815"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302815" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302815">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207071954">PR review</a>.</p>
+
+
+
+<a name="314302816"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302816" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302816">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041300869">PR review comment</a>:</p>
+<blockquote>
+<p>Nitpick: in general, I think a <code>where</code> clause would make these methods easier to read.</p>
+</blockquote>
+
+
+
+<a name="314302820"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302820" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302820">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041338771">PR review comment</a>:</p>
+<blockquote>
+<p>Could we wrap this up into <code>process_skeleton_inst</code> or something like that, just to make the overall algorithm a little easier to read at a glance?</p>
+</blockquote>
+
+
+
+<a name="314302822"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302822" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302822">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041308958">PR review comment</a>:</p>
+<blockquote>
+<p><code>InstructionData</code> is <code>Copy</code> so this can be</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>            NewOrExistingInst::New(data, ty) =&gt; (*ty, *data),
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="314302824"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302824" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302824">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041329755">PR review comment</a>:</p>
+<blockquote>
+<p>This is shorter and allows for reserving capacity for all children at once:</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>            block_stack.extend(self.domtree_children.children(block));
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="314302826"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302826" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302826">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041295326">PR review comment</a>:</p>
+<blockquote>
+<p>Can we package this up in a <code>self.egraph_pass()</code> method, similar to other passes, rather than have all the bits of state exposed in our pass-ordering / mid end? I think that would be a bit nicer.</p>
+</blockquote>
+
+
+
+<a name="314302827"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302827" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302827">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041313360">PR review comment</a>:</p>
+<blockquote>
+<ul>
+<li>What about something like <code>iadd_carry</code>, which is a pure instruction with two results, how does that fit in here? We used to return tuples and then project fields out of them, but now that we are using the DFG directly, how is this handled?</li>
+<li>This could be simplified as<br>
+<code>suggestion
+          let orig_value = self.func.dfg.first_result(inst);
+  </code></li>
+</ul>
+</blockquote>
+
+
+
+<a name="314302828"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302828" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302828">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041323487">PR review comment</a>:</p>
+<blockquote>
+<p>Should this be behind <code>if cfg!(feature = "trace-log")</code> or something? Or are we pretty confident that LLVM will clean this up?</p>
+</blockquote>
+
+
+
+<a name="314302831"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314302831" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314302831">(Dec 06 2022 at 18:56)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041298220">PR review comment</a>:</p>
+<blockquote>
+<p>I would expect this to more closely mirror <code>std::hash::Hash::hash</code>, like</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">ctx_hash</span><span class="o">&lt;</span><span class="n">H</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">state</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="n">H</span><span class="p">,</span><span class="w"> </span><span class="n">value</span>: <span class="kp">&amp;</span><span class="nc">Value</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">where</span><span class="w"> </span><span class="n">H</span>: <span class="nc">Hasher</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<p>Is there a reason it doesn't?</p>
+</blockquote>
+
+
+
+<a name="314321917"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314321917" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314321917">(Dec 06 2022 at 20:37)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207149554">PR review</a>.</p>
+
+
+
+<a name="314321918"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314321918" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314321918">(Dec 06 2022 at 20:37)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207149554">PR review</a>.</p>
+
+
+
+<a name="314321919"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314321919" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314321919">(Dec 06 2022 at 20:37)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041347564">PR review comment</a>:</p>
+<blockquote>
+<p>A comment at the top of <code>Cost</code> explaining what sentinel values there are would be useful here, especially since I had a comment about how the loop level max should be 3 not 2 until I realized that it was leaving room for sentinels.</p>
+</blockquote>
+
+
+
+<a name="314321921"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314321921" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314321921">(Dec 06 2022 at 20:37)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041429315">PR review comment</a>:</p>
+<blockquote>
+<p>Do we really need <code>u32</code>s here? With the <code>Cost</code> we limit the loop level to 2 at most...</p>
+</blockquote>
+
+
+
+<a name="314321923"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314321923" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314321923">(Dec 06 2022 at 20:37)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041433366">PR review comment</a>:</p>
+<blockquote>
+<p>Additionally, can we debug assert that there are no <code>ValueDef::Union</code>s in the layout after running this pass?</p>
+</blockquote>
+
+
+
+<a name="314330124"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330124" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330124">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314330231"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330231" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330231">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207357620">PR review</a>.</p>
+
+
+
+<a name="314330233"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330233" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330233">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041479620">PR review comment</a>:</p>
+<blockquote>
+<p>Done!</p>
+</blockquote>
+
+
+
+<a name="314330241"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330241" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330241">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207357743">PR review</a>.</p>
+
+
+
+<a name="314330242"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330242" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330242">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041479682">PR review comment</a>:</p>
+<blockquote>
+<p>No particular reason, just expediency at the time (it was this way in the original egraph prototype then carried over). Updated as suggested!</p>
+</blockquote>
+
+
+
+<a name="314330255"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330255" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330255">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207357903">PR review</a>.</p>
+
+
+
+<a name="314330256"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330256" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330256">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041479750">PR review comment</a>:</p>
+<blockquote>
+<p>Done!</p>
+</blockquote>
+
+
+
+<a name="314330263"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330263" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330263">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041479800">PR review comment</a>:</p>
+<blockquote>
+<p>Done!</p>
+</blockquote>
+
+
+
+<a name="314330264"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330264" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330264">(Dec 06 2022 at 21:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207358046">PR review</a>.</p>
+
+
+
+<a name="314330277"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330277" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330277">(Dec 06 2022 at 21:31)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207358199">PR review</a>.</p>
+
+
+
+<a name="314330278"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330278" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330278">(Dec 06 2022 at 21:31)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041479869">PR review comment</a>:</p>
+<blockquote>
+<p>Good point, added the conditional to be sure (it never hurts to make LLVM's life easier in this way either...).</p>
+</blockquote>
+
+
+
+<a name="314330294"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330294" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330294">(Dec 06 2022 at 21:31)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207358346">PR review</a>.</p>
+
+
+
+<a name="314330295"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330295" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330295">(Dec 06 2022 at 21:31)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041479926">PR review comment</a>:</p>
+<blockquote>
+<p>Ah, the <code>DomTreeChildIter</code> doesn't give a size hint (it traverses a linked list internally) so we won't get that one-reservation benefit, but this form is still clearer, so updated, thanks!</p>
+</blockquote>
+
+
+
+<a name="314330302"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330302" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330302">(Dec 06 2022 at 21:31)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207358477">PR review</a>.</p>
+
+
+
+<a name="314330303"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314330303" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314330303">(Dec 06 2022 at 21:31)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041479976">PR review comment</a>:</p>
+<blockquote>
+<p>This was a bit ugly because of <code>AliasAnalysis</code> carrying a lifetime parameter, and ended up propagating lifetimes outward to the point that the ISLE context has three lifetimes with two constraints between them. But now that it's done, the factoring is kind of nice, so I think I'll leave it...</p>
+</blockquote>
+
+
+
+<a name="314331090"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314331090" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314331090">(Dec 06 2022 at 21:37)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207365507">PR review</a>.</p>
+
+
+
+<a name="314331092"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314331092" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314331092">(Dec 06 2022 at 21:37)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041484289">PR review comment</a>:</p>
+<blockquote>
+<p>Ah, great point with <code>first_result</code>, I hadn't remembered that method existed. Updated!</p>
+<p>Regarding multi-output instructions in general: yes, this was a bit of a compromise for now. Jamey and I went back and forth a bit on an <code>Inst</code>-centric vs. <code>Value</code>-centric design in the elaborator and ultimately basing everything on <code>Value</code>s was far, far simpler; so to keep everything straight, we need to deal only with single-result instructions.</p>
+<p>We judged this to be acceptable-ish because the most common multi-result instructions are calls. There are indeed also adds-with-carries but, for now, not optimizing these probably will not have a material impact on speedups.</p>
+<p>Ultimately I'm curious whether we might be able to adapt a tuple-types-and-projection approach to CLIF as well, though that's a much larger change. </p>
+</blockquote>
+
+
+
+<a name="314331144"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314331144" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314331144">(Dec 06 2022 at 21:37)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314332928"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314332928" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314332928">(Dec 06 2022 at 21:50)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314332949"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314332949" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314332949">(Dec 06 2022 at 21:50)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207386159">PR review</a>.</p>
+
+
+
+<a name="314332950"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314332950" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314332950">(Dec 06 2022 at 21:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041496555">PR review comment</a>:</p>
+<blockquote>
+<p>Added! Hopefully the explanation helps.</p>
+</blockquote>
+
+
+
+<a name="314332974"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314332974" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314332974">(Dec 06 2022 at 21:50)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#pullrequestreview-1207386431">PR review</a>.</p>
+
+
+
+<a name="314332976"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314332976" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314332976">(Dec 06 2022 at 21:50)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/5382#discussion_r1041496725">PR review comment</a>:</p>
+<blockquote>
+<p>Ah, reverted, thanks for catching this!</p>
+<p>For the curious, this change came from a dead-end (since reverted) where we invented a notion of a "pseudo-loop nest" based on the domtree (basic idea is that we wanted the loop nest to fully be a subtree of the domtree; consider e.g. a loop exit dominating the rest of the function, that's where the loop tree and domtree differ) and loop nests could get much deeper. But we've reverted all that and <code>LoopLevel</code> should correspond only to true loop-nest level again, now.</p>
+</blockquote>
+
+
+
+<a name="314338198"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314338198" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314338198">(Dec 06 2022 at 22:25)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314338317"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314338317" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314338317">(Dec 06 2022 at 22:26)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a> from <code>egraph-in-dfg-rebase</code> to <code>main</code>.</p>
+
+
+
+<a name="314343071"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235382%20egraph%20support%3A%20rewrite%20to%20work%20in%20te.../near/314343071" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235382.20egraph.20support.3A.20rewrite.20to.20work.20in.20te.2E.2E.2E.html#314343071">(Dec 06 2022 at 22:58)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/5382">PR #5382</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

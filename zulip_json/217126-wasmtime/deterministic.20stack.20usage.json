@@ -1,0 +1,56 @@
+[
+    {
+        "content": "<p>I am working on a project that requires absolute determinism of the executed code. One of the parts that has non-deterministic behavior  is the wasm stack. This non-determinism can be exhibited even by the same engine running under different conditions, e.g. x86-64 vs aarch64. In order to make it deterministic we want to run an instrumentation pass that would eradicate all the non-determinism. </p>\n<p>The idea is to for each function we would compute its logical size. The logical size would assume the dumbest implementation ever. That is, each value costs some of this logical units. It doesn't matter whether the value comes from the value stack or a local/arg. Moveover, we assume that args are not shared between the frames but rather copied.</p>\n<p>Once we have these costs for each function, we would go over all call sites and instrument each call site with a simple sequence:</p>\n<ul>\n<li>increment the counter with the cost of the function, then</li>\n<li>trap if exceeds some preconfigured value, then</li>\n<li>perform the actual call, then</li>\n<li>decrement the counter. </li>\n</ul>\n<p>Then we would configure the engine, i.e. wasmtime, to allocate the wasm native stack so big so that the logical stack limiter will be always hit first. </p>\n<p>However, this scheme relies on the assumption that cranelift will generate a stack frame which is always smaller than the overestimated logical size. </p>\n<p>I suspect that this assumption can be invalidated by:</p>\n<ul>\n<li>optimizations performed by the cranelift. Maybe inlining under some circumstances could lead to that? I suspect even if it's a problem we can turn off some of the optimizations.</li>\n<li>regalloc. </li>\n</ul>\n<p>The regalloc is totally unclear to me. I know that regalloc would need to allocate a spill area. What is not clear to me, if the worst case size for this area is capped by the number of locals?</p>\n<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> , or anybody else familiar with the regalloc, is it actually possible for the regalloc to go rogue and potentially allocate the spill area bigger than the number of locals, say, multiplied by the biggest value wasm supports (16 bytes)?</p>",
+        "id": 241809381,
+        "sender_full_name": "Sergei Pepyakin",
+        "timestamp": 1623085920
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"267712\">@Sergei Pepyakin</span> interesting ideas! Regarding regalloc spill-area size: in general it's hard to make tight guarantees about this, simply because of the complexity of the algorithms involved. (Even ensuring termination is subtle when e.g. splitting or backtracking.) The first aspect that's important is the number of <em>live ranges</em>, rather than locals: internally, the code is represented in SSA form, and locals no longer exist, only individual SSA values at new definition sites. There is an upper bound on the number of <em>live</em> values determined by the number of locals plus the maximum wasm operand stack size, but conservatively, the only bound we can confidently state is that there will be (at most) one spillslot per live range. Tighter bounds than that rely on reasoning about spillslot coalescing, which is complex</p>",
+        "id": 241810001,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1623086158
+    },
+    {
+        "content": "<p>This actually feels like sort of an open-ended research question: what bounds can one prove about a realistic register allocator? Such proofs are notoriously hard when termination conditions are complex (i.e., when one has more than just structural recursion and simple iteration)</p>",
+        "id": 241810158,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1623086220
+    },
+    {
+        "content": "<p>I might encourage approaching this problem from the opposite side: decide a stack-depth bound to deterministically enforce, then modify the engine so that it will dynamically (re-)allocate the stack up until this logical limit is exceeded</p>",
+        "id": 241810266,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1623086276
+    },
+    {
+        "content": "<p>that trades off potential OOM at runtime for determinism of stack-overflow</p>",
+        "id": 241810362,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1623086307
+    },
+    {
+        "content": "<p>This is summary of my understanding:</p>\n<ol>\n<li>spillslot is an allocation of memory on the machine stack. </li>\n<li>conservatively we can state that there is at most one spillslot per live range</li>\n<li>we can conservatively assume that each variable lives from start to finish of the function. </li>\n<li>Therefore the number live ranges at all points is the number of variables, and thus we get the number  of spillslots.</li>\n<li>if we assume a maximum size of a spillslot to be a constant C, we can get the maximum spill area size by multiplying C by the number of variables.</li>\n</ol>\n<p>It seems that knowing this we will be able to compute a very conservative upper bound for the stack usage for a given logical stack size (described in the OP).</p>\n<p>There is a catch though: the above uses the term variable referring to an SSA variable from Cranelift IR. They are created from stack operands and locals. As you mentioned it may be the maximum depth we are interested in. But besides that, translation of wasm into clif also produces temp variables. I assume we can find the absolute maximum of variables created by the translation or if it is unbounded impose application specific limits on wasm. Then knowing the number of instruction we can get the hard cap of the values produced by lowering wasm to clif.</p>\n<p>As if it wasn't enough, there are some variables created by optimizations. If we had loop unrolling it may multiply all the variables found in the the loop.</p>\n<p>Is my understanding roughly right?</p>\n<p>Thanks for the idea of approaching this problem from the opposite side. Why we wanted to go with the instrumentation approach is because we would like to have some freedom in choosing an engine. That is a preference at this moment, not a strong requirement, so we may as well consider altering wasmtime for these purposes.</p>",
+        "id": 241912933,
+        "sender_full_name": "Sergei Pepyakin",
+        "timestamp": 1623156421
+    },
+    {
+        "content": "<p>Hi <span class=\"user-mention\" data-user-id=\"267712\">@Sergei Pepyakin</span> -- that's very close! The conservative upper bounds for live ranges are actually:</p>\n<ol>\n<li>\n<p>We should assume that there is a new SSA value for every Wasm value definition ( == operand stack push), and for every value that is live across a control-flow-merge point (phi node), and for every Wasm local modification (<code>local.set</code> or <code>local.tee</code> opcode) or merge point thereof. A very conservative bound on that is <code>(len(wasm opcodes) * (worst-case number of values pushed by wasm opcode) + (wasm local modifications)) * (number of basic blocks)</code>, though that is a very very loose bound because only a very sparse subset of values will be live at any given program point in a realistic program.</p>\n</li>\n<li>\n<p>Given that bound on the number of SSA values, the bound on the number of <em>live ranges</em> is, at most, one live range per SSA value per basic block (because a value can flow across discontiguous blocks and live-ranges are just contiguous ranges of instructions).</p>\n</li>\n<li>\n<p>Then, if the spillslot coalescer doesn't work, we have up to one spillslot (or N spillslots depending on types -- concretely, 2 spillslots for float/vector-typed values) per live range.</p>\n</li>\n</ol>\n<p>So that's <code>O(len(program) ^ 3)</code>, effectively</p>",
+        "id": 241977283,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1623182276
+    },
+    {
+        "content": "<p>Given that very loose bound, and the difficulty in making it tighter, I'd go as far as saying that the only <em>practical</em> way to do this would be to follow the logical limit exclusively and expand the physical stack to match, but possibly there are better ideas I've missed :-)</p>",
+        "id": 241977396,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1623182317
+    },
+    {
+        "content": "<p>This is immensely useful. Thank you for help!</p>",
+        "id": 242101594,
+        "sender_full_name": "Sergei Pepyakin",
+        "timestamp": 1623259694
+    }
+]

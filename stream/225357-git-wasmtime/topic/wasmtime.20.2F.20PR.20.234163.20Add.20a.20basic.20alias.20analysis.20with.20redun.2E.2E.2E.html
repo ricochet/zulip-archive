@@ -1,0 +1,563 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #4163 Add a basic alias analysis with redun... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html">wasmtime / PR #4163 Add a basic alias analysis with redun...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="282864958"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282864958" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282864958">(May 18 2022 at 23:58)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a>.</p>
+
+
+
+<a name="282864959"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282864959" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282864959">(May 18 2022 at 23:58)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> from <code>alias-analysis</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR adds a basic <em>alias analysis</em>, and optimizations that use it.<br>
+This is a "mid-end optimization": it operates on CLIF, the<br>
+machine-independent IR, before lowering occurs.</p>
+<p>The alias analysis (or maybe more properly, a sort of memory-value<br>
+analysis) determines when it can prove a particular memory<br>
+location is equal to a given SSA value, and when it can, it replaces any<br>
+loads of that location.</p>
+<p>This subsumes two common optimizations:</p>
+<ul>
+<li>
+<p>Redundant load elimination: when the same memory address is loaded two<br>
+  times, and it can be proven that no intervening operations will write<br>
+  to that memory, then the second load is <em>redundant</em> and its result<br>
+  must be the same as the first. We can use the first load's result and<br>
+  remove the second load.</p>
+</li>
+<li>
+<p>Store-to-load forwarding: when a load can be proven to access exactly<br>
+  the memory written by a preceding store, we can replace the load's<br>
+  result with the store's data operand, and remove the load.</p>
+</li>
+</ul>
+<p>Both of these optimizations rely on a "last store" analysis that is a<br>
+sort of coloring mechanism, split across disjoint categories of abstract<br>
+state. The basic idea is that every memory-accessing operation is put<br>
+into one of N disjoint categories; it is disallowed for memory to ever<br>
+be accessed by an op in one category and later accessed by an op in<br>
+another category. (The frontend must ensure this.)</p>
+<p>Then, given this, we scan the code and determine, for each<br>
+memory-accessing op, when a single prior instruction is a store to the<br>
+same category. This "colors" the instruction: it is, in a sense, a<br>
+static name for that version of memory.</p>
+<p>This analysis provides an important invariant: if two operations access<br>
+memory with the same last-store, then <em>no other store can alias</em> in the<br>
+time between that last store and these operations. This must-not-alias<br>
+property, together with a check that the accessed address is *exactly<br>
+the same* (same SSA value and offset), and other attributes of the<br>
+access (type, extension mode) are the same, let us prove that the<br>
+results are the same.</p>
+<p>Given last-store info, we scan the instructions and build a table from<br>
+"memory location" key (last store, address, offset, type, extension) to<br>
+known SSA value stored in that location. A store inserts a new mapping.<br>
+A load may also insert a new mapping, if we didn't already have one.<br>
+Then when a load occurs and an entry already exists for its "location",<br>
+we can reuse the value. This will be either RLE or St-to-Ld depending on<br>
+where the value came from.</p>
+<p>Note that this <em>does</em> work across basic blocks: the last-store analysis<br>
+is a full iterative dataflow pass, and we are careful to check dominance<br>
+of a previously-defined value before aliasing to it at a potentially<br>
+redundant load. So we will do the right thing if we only have a<br>
+"partially redundant" load (loaded already but only in one predecessor<br>
+block), but we will also correctly reuse a value if there is a store or<br>
+load above a loop and a redundant load of that value within the loop, as<br>
+long as no potentially-aliasing stores happen within the loop.</p>
+<p>Fixes #4131.</p>
+<p>Passes tests and runs SpiderMonkey correctly locally; benchmarks TBD.</p>
+<p>Creating this as a draft for early feedback; will likely refine the comments<br>
+and explanations a bit more, and benchmark this.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="282865013"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282865013" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282865013">(May 18 2022 at 23:58)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> from <code>alias-analysis</code> to <code>main</code>.</p>
+
+
+
+<a name="282884575"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282884575" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282884575">(May 19 2022 at 05:56)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-977980978">PR review</a>.</p>
+
+
+
+<a name="282884576"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282884576" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282884576">(May 19 2022 at 05:56)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r876629579">PR review comment</a>:</p>
+<blockquote>
+<p>It would be nice if all stack slots would be their own category until their address is leaked using stack_addr.</p>
+</blockquote>
+
+
+
+<a name="282885860"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282885860" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282885860">(May 19 2022 at 06:16)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-978003232">PR review</a>.</p>
+
+
+
+<a name="282885861"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282885861" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282885861">(May 19 2022 at 06:16)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r876644508">PR review comment</a>:</p>
+<blockquote>
+<p>Sure, that would be nice, but entails an escape analysis, which is outside the scope of this PR. Happy to discuss further (and review PRs!) once this is in, of course.</p>
+</blockquote>
+
+
+
+<a name="282900599"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282900599" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282900599">(May 19 2022 at 09:02)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-978222588">PR review</a>.</p>
+
+
+
+<a name="282900601"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282900601" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282900601">(May 19 2022 at 09:02)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r876805710">PR review comment</a>:</p>
+<blockquote>
+<p>Even stopping optimization entirely if stack_addr is used on a stack slot would likely help cg_clif a lot. Having each stack slot whose address is never leaked be optimized independently is the most important for cg_clif. I'm fine with leaving that for a later PR.</p>
+</blockquote>
+
+
+
+<a name="282957815"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282957815" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282957815">(May 19 2022 at 16:46)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> from <code>alias-analysis</code> to <code>main</code>.</p>
+
+
+
+<a name="282974327"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282974327" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282974327">(May 19 2022 at 18:44)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> from <code>alias-analysis</code> to <code>main</code>.</p>
+
+
+
+<a name="282974336"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282974336" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282974336">(May 19 2022 at 18:44)</a>:</h4>
+<p><strong>cfallin</strong> has marked <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> as ready for review.</p>
+
+
+
+<a name="282978483"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282978483" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282978483">(May 19 2022 at 19:15)</a>:</h4>
+<p>lqd submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979136536">PR review</a>.</p>
+
+
+
+<a name="282978484"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282978484" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282978484">(May 19 2022 at 19:15)</a>:</h4>
+<p>lqd created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877450883">PR review comment</a>:</p>
+<blockquote>
+<p>Tiny typo</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>//! to the abstract state category occurred, *and* no other trapping
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="282979870"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979870" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979870">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979089671">PR review</a>.</p>
+
+
+
+<a name="282979871"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979871" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979871">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979089671">PR review</a>.</p>
+
+
+
+<a name="282979872"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979872" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979872">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877424864">PR review comment</a>:</p>
+<blockquote>
+<p>For clarity:</p>
+<div class="codehilite" data-code-language="suggestion"><pre><span></span><code>    /// Accesses only the "heap" part of abstract state. Used for alias
+</code></pre></div>
+<p>Same for the other abstract state parts.</p>
+</blockquote>
+
+
+
+<a name="282979873"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979873" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979873">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877428093">PR review comment</a>:</p>
+<blockquote>
+<p>Slightly unfortunate that we can't easily differentiate between two different memories or two different tables. I don't think it will matter too much in practice, but unfortunate none the less.</p>
+<p>File a follow up issue for having an alias analysis bit for each memory/table instead of lumping all memories and all tables together?</p>
+</blockquote>
+
+
+
+<a name="282979874"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979874" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979874">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877420973">PR review comment</a>:</p>
+<blockquote>
+<p>I think this already exists as <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/instructions/enum.InstructionData.html#method.memflags">https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/instructions/enum.InstructionData.html#method.memflags</a> no?</p>
+</blockquote>
+
+
+
+<a name="282979875"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979875" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979875">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877431046">PR review comment</a>:</p>
+<blockquote>
+<p>Could you add some comments about what cases this is testing and what is expected? That will be really helpful for folks updating tests for unrelated reasons and trying to determine whether the new precise output is valid or not. Also useful for reviewers trying to figure out which cases do or don't have tests ;)</p>
+</blockquote>
+
+
+
+<a name="282979876"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979876" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979876">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877443585">PR review comment</a>:</p>
+<blockquote>
+<p>These are becoming very verbose. Can we make <code>set_table</code> et al take and return <code>Self</code> so that we can chain the methods like</p>
+<p><div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">ir</span>::<span class="n">MemFlags</span>::<span class="n">trusted</span><span class="p">().</span><span class="n">set_table</span><span class="p">()</span><span class="w"></span>
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="282979877"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979877" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979877">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877434952">PR review comment</a>:</p>
+<blockquote>
+<p>I think these tests would be a lot easier to read as CLIF to CLIF tests. That way we don't have to figure out what changes are from unrelated passes or just related to aarch64-specific lowering, or even have to know aarch64 to understand these tests that are logically portable and architecture-independent.</p>
+<p>Adding <code>test alias_analysis</code> that just does alias analysis followed by GVN by calling <code>Context::remove_redundant_loads</code> should be really straightforward. Should be able to pretty much copy+paste the <code>test simple_gvn</code> implementation:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/0a0c232a14e651f1457ced0ad0c950771de2f3c3/cranelift/filetests/src/test_simple_gvn.rs">https://github.com/bytecodealliance/wasmtime/blob/0a0c232a14e651f1457ced0ad0c950771de2f3c3/cranelift/filetests/src/test_simple_gvn.rs</a></p>
+</blockquote>
+
+
+
+<a name="282979878"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979878" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979878">(May 19 2022 at 19:27)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877455350">PR review comment</a>:</p>
+<blockquote>
+<p>File a follow up issue to track/discuss dead-store elimination?</p>
+</blockquote>
+
+
+
+<a name="282979916"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979916" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979916">(May 19 2022 at 19:27)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> from <code>alias-analysis</code> to <code>main</code>.</p>
+
+
+
+<a name="282979935"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979935" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979935">(May 19 2022 at 19:27)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979149292">PR review</a>.</p>
+
+
+
+<a name="282979937"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/282979937" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#282979937">(May 19 2022 at 19:27)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877460766">PR review comment</a>:</p>
+<blockquote>
+<p>Thanks!</p>
+</blockquote>
+
+
+
+<a name="283003316"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283003316" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283003316">(May 19 2022 at 23:03)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> from <code>alias-analysis</code> to <code>main</code>.</p>
+
+
+
+<a name="283003353"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283003353" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283003353">(May 19 2022 at 23:03)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979351703">PR review</a>.</p>
+
+
+
+<a name="283003354"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283003354" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283003354">(May 19 2022 at 23:03)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877603253">PR review comment</a>:</p>
+<blockquote>
+<p>That's a great idea, thanks -- done!</p>
+</blockquote>
+
+
+
+<a name="283003365"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283003365" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283003365">(May 19 2022 at 23:03)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979351786">PR review</a>.</p>
+
+
+
+<a name="283003366"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283003366" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283003366">(May 19 2022 at 23:03)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877603341">PR review comment</a>:</p>
+<blockquote>
+<p>Done (here and in other new tests)!</p>
+</blockquote>
+
+
+
+<a name="283004206"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004206" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004206">(May 19 2022 at 23:13)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> from <code>alias-analysis</code> to <code>main</code>.</p>
+
+
+
+<a name="283004233"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004233" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004233">(May 19 2022 at 23:13)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979356488">PR review</a>.</p>
+
+
+
+<a name="283004234"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004234" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004234">(May 19 2022 at 23:13)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877607038">PR review comment</a>:</p>
+<blockquote>
+<p>Ah yes, I had missed that; using that one now, thanks.</p>
+</blockquote>
+
+
+
+<a name="283004241"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004241" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004241">(May 19 2022 at 23:13)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877607073">PR review comment</a>:</p>
+<blockquote>
+<p>Done!</p>
+</blockquote>
+
+
+
+<a name="283004242"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004242" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004242">(May 19 2022 at 23:13)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979356534">PR review</a>.</p>
+
+
+
+<a name="283004329"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004329" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004329">(May 19 2022 at 23:14)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979356817">PR review</a>.</p>
+
+
+
+<a name="283004330"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004330" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004330">(May 19 2022 at 23:14)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877607349">PR review comment</a>:</p>
+<blockquote>
+<p>Sure, good idea; I added <code>with_&lt;flag&gt;</code> methods to <code>MemFlags</code>.</p>
+</blockquote>
+
+
+
+<a name="283004809"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004809" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004809">(May 19 2022 at 23:19)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979359149">PR review</a>.</p>
+
+
+
+<a name="283004810"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283004810" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283004810">(May 19 2022 at 23:19)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877609293">PR review comment</a>:</p>
+<blockquote>
+<p>Sure! There are efficiency reasons why this is not trivial -- bits in a bitset (<code>MemFlags</code> is a <code>u8</code>, but even with a <code>u32</code> or <code>u64</code> that's still a small fixed number of heaps/tables), and the vector of last-stores (does it scale arbitrarily?). But maybe there's a hybrid approach (small number of privileged heaps/tables) or maybe we can find a way to scale it well enough.</p>
+<p>Filed #4166.</p>
+</blockquote>
+
+
+
+<a name="283005110"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283005110" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283005110">(May 19 2022 at 23:23)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-979360855">PR review</a>.</p>
+
+
+
+<a name="283005111"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283005111" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283005111">(May 19 2022 at 23:23)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r877610596">PR review comment</a>:</p>
+<blockquote>
+<p>Sure, #4167.</p>
+</blockquote>
+
+
+
+<a name="283108443"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283108443" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283108443">(May 20 2022 at 18:22)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-980513131">PR review</a>.</p>
+
+
+
+<a name="283108445"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283108445" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283108445">(May 20 2022 at 18:22)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-980513131">PR review</a>.</p>
+
+
+
+<a name="283108446"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283108446" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283108446">(May 20 2022 at 18:22)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r878423680">PR review comment</a>:</p>
+<blockquote>
+<p>Can we add a test for loads of the same address but of different types? I.e. something like</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">f32</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="p">;;</span><span class="w"> </span><span class="n">check</span>: <span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">second</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">was</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="n">eliminated</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+</code></pre></div>
+<p>Probably would be good to test signed vs unsigned extensions and 8-to-32 vs 16-to-32 extensions as well.</p>
+</blockquote>
+
+
+
+<a name="283108447"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283108447" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283108447">(May 20 2022 at 18:22)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r878415770">PR review comment</a>:</p>
+<blockquote>
+<p>Can we also have tests for the other fence-semantics instructions too? Just tiny functions for each of them like</p>
+<p><div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">v1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="o">&lt;</span><span class="n">fence</span><span class="w"> </span><span class="n">instruction</span><span class="o">&gt;</span><span class="w"></span>
+<span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i32</span><span class="w"> </span><span class="n">v0</span><span class="w"></span>
+<span class="p">;;</span><span class="w"> </span><span class="n">check</span>: <span class="o">..</span><span class="p">.</span><span class="w"></span>
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="283108449"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283108449" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283108449">(May 20 2022 at 18:22)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r878427270">PR review comment</a>:</p>
+<blockquote>
+<p>It might make sense to reduce indentation here, since this is basically the rest of the function:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="p">(</span><span class="n">address</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">ty</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">inst_addr_offset_type</span><span class="p">(</span><span class="n">pos</span><span class="p">.</span><span class="n">func</span><span class="p">,</span><span class="w"> </span><span class="n">inst</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">None</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">continue</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nb">Some</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">x</span><span class="p">,</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="c1">// ...</span>
+</code></pre></div>
+<p>Totally up to you.</p>
+</blockquote>
+
+
+
+<a name="283108450"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283108450" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283108450">(May 20 2022 at 18:22)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r878431213">PR review comment</a>:</p>
+<blockquote>
+<p>Just to double check ourselves</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>fn get_ext_opcode(op: Opcode) -&gt; Option&lt;Opcode&gt; {
+    debug_assert!(op.can_load() || op.can_store());
+    match op {
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="283116912"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283116912" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283116912">(May 20 2022 at 19:38)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a> from <code>alias-analysis</code> to <code>main</code>.</p>
+
+
+
+<a name="283116931"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283116931" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283116931">(May 20 2022 at 19:38)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-980595966">PR review</a>.</p>
+
+
+
+<a name="283116932"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283116932" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283116932">(May 20 2022 at 19:38)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r878492434">PR review comment</a>:</p>
+<blockquote>
+<p>Done! Added <code>filetests/alias/fence.clif</code>.</p>
+</blockquote>
+
+
+
+<a name="283116940"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283116940" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283116940">(May 20 2022 at 19:39)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-980596163">PR review</a>.</p>
+
+
+
+<a name="283116942"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283116942" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283116942">(May 20 2022 at 19:39)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r878492539">PR review comment</a>:</p>
+<blockquote>
+<p>Done!</p>
+</blockquote>
+
+
+
+<a name="283116972"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283116972" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283116972">(May 20 2022 at 19:39)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-980596605">PR review</a>.</p>
+
+
+
+<a name="283116975"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283116975" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283116975">(May 20 2022 at 19:39)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r878492729">PR review comment</a>:</p>
+<blockquote>
+<p>Done! Added <code>filetests/alias/extends.clif</code>.</p>
+</blockquote>
+
+
+
+<a name="283117063"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283117063" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283117063">(May 20 2022 at 19:40)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#pullrequestreview-980597710">PR review</a>.</p>
+
+
+
+<a name="283117064"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283117064" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283117064">(May 20 2022 at 19:40)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4163#discussion_r878493208">PR review comment</a>:</p>
+<blockquote>
+<p>Ah, there's actually a final call to <code>update_state</code> below the long if-let, which this would skip, and factoring the body out is a bit complex because of mutable borrows of self. Left it as-is for now, but thanks in any case!</p>
+</blockquote>
+
+
+
+<a name="283121089"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234163%20Add%20a%20basic%20alias%20analysis%20with%20redun.../near/283121089" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234163.20Add.20a.20basic.20alias.20analysis.20with.20redun.2E.2E.2E.html#283121089">(May 20 2022 at 20:19)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/4163">PR #4163</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

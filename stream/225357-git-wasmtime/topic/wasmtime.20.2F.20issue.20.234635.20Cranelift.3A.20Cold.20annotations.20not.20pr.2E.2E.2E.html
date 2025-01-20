@@ -1,0 +1,772 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #4635 Cranelift: Cold annotations not pr... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html">wasmtime / issue #4635 Cranelift: Cold annotations not pr...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="292360106"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234635%20Cranelift%3A%20Cold%20annotations%20not%20pr.../near/292360106" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html#292360106">(Aug 08 2022 at 04:40)</a>:</h4>
+<p>mchesser opened <a href="https://github.com/bytecodealliance/wasmtime/issues/4635">issue #4635</a>:</p>
+<blockquote>
+<p>During lowering Cranelift may generate additional blocks to handle moves that conceptually occur on edges. The block ordering code treats these blocks the same as ordinary blocks, irrespective of whether they are associated with a cold block. This means that edges from a cold block can cause additional code to be inserted in the hot path.</p>
+<p>For example, consider the following IL:</p>
+<div class="codehilite" data-code-language="clif"><pre><span></span><code>function %test_cold(i64, i64, i64, i64) -&gt; i64 {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    brz v0, block2
+    jump block1
+
+block1:
+    v10 = iadd.i64 v0, v2
+    jump block3(v10)
+
+block2 cold:
+    v20 = iadd.i64 v1, v3
+    brnz v20, block3(v20)
+    jump block4(v3)
+
+block3(v30: i64):
+    v34 = iadd.i64 v30, v1
+    jump block4(v34)
+
+block4(v40: i64):
+    return v40
+}
+</code></pre></div>
+<p>Currently Cranelift emits the following (annotated x86-64 code):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x28</span><span class="w">        </span><span class="c1">; .block2</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x1a</span><span class="w">        </span><span class="c1">; .block1</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x20</span><span class="w">        </span><span class="c1">; .block4</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="nl">.block4:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x1d</span><span class="w">        </span><span class="c1">; .block3</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x12</span><span class="w">        </span><span class="c1">; .block2_to_block4_edge</span>
+</code></pre></div>
+<p>Modifying the lowering stage to mark edge blocks as cold if either the predecessor or successor block is cold, improves code generation:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">```</span><span class="nf">asm</span><span class="w"></span>
+<span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x1b</span><span class="w">  </span><span class="c1">; .block2</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="na">.block4</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x10</span><span class="w">      </span><span class="c1">; .block3</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x13</span><span class="w">      </span><span class="c1">; .block4</span>
+</code></pre></div>
+<p>This provided significant runtime speedups (~11%) for my code (which is severely frontend bound and uses heavy cold annotations).</p>
+</blockquote>
+
+
+
+<a name="292360107"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234635%20Cranelift%3A%20Cold%20annotations%20not%20pr.../near/292360107" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html#292360107">(Aug 08 2022 at 04:40)</a>:</h4>
+<p>mchesser labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4635">issue #4635</a>:</p>
+<blockquote>
+<p>During lowering Cranelift may generate additional blocks to handle moves that conceptually occur on edges. The block ordering code treats these blocks the same as ordinary blocks, irrespective of whether they are associated with a cold block. This means that edges from a cold block can cause additional code to be inserted in the hot path.</p>
+<p>For example, consider the following IL:</p>
+<div class="codehilite" data-code-language="clif"><pre><span></span><code>function %test_cold(i64, i64, i64, i64) -&gt; i64 {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    brz v0, block2
+    jump block1
+
+block1:
+    v10 = iadd.i64 v0, v2
+    jump block3(v10)
+
+block2 cold:
+    v20 = iadd.i64 v1, v3
+    brnz v20, block3(v20)
+    jump block4(v3)
+
+block3(v30: i64):
+    v34 = iadd.i64 v30, v1
+    jump block4(v34)
+
+block4(v40: i64):
+    return v40
+}
+</code></pre></div>
+<p>Currently Cranelift emits the following (annotated x86-64 code):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x28</span><span class="w">        </span><span class="c1">; .block2</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x1a</span><span class="w">        </span><span class="c1">; .block1</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x20</span><span class="w">        </span><span class="c1">; .block4</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="nl">.block4:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x1d</span><span class="w">        </span><span class="c1">; .block3</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x12</span><span class="w">        </span><span class="c1">; .block2_to_block4_edge</span>
+</code></pre></div>
+<p>Modifying the lowering stage to mark edge blocks as cold if either the predecessor or successor block is cold, improves code generation:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">```</span><span class="nf">asm</span><span class="w"></span>
+<span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x1b</span><span class="w">  </span><span class="c1">; .block2</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="na">.block4</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x10</span><span class="w">      </span><span class="c1">; .block3</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x13</span><span class="w">      </span><span class="c1">; .block4</span>
+</code></pre></div>
+<p>This provided significant runtime speedups (~11%) for my code (which is severely frontend bound and uses heavy cold annotations).</p>
+</blockquote>
+
+
+
+<a name="292360108"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234635%20Cranelift%3A%20Cold%20annotations%20not%20pr.../near/292360108" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html#292360108">(Aug 08 2022 at 04:40)</a>:</h4>
+<p>mchesser labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4635">issue #4635</a>:</p>
+<blockquote>
+<p>During lowering Cranelift may generate additional blocks to handle moves that conceptually occur on edges. The block ordering code treats these blocks the same as ordinary blocks, irrespective of whether they are associated with a cold block. This means that edges from a cold block can cause additional code to be inserted in the hot path.</p>
+<p>For example, consider the following IL:</p>
+<div class="codehilite" data-code-language="clif"><pre><span></span><code>function %test_cold(i64, i64, i64, i64) -&gt; i64 {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    brz v0, block2
+    jump block1
+
+block1:
+    v10 = iadd.i64 v0, v2
+    jump block3(v10)
+
+block2 cold:
+    v20 = iadd.i64 v1, v3
+    brnz v20, block3(v20)
+    jump block4(v3)
+
+block3(v30: i64):
+    v34 = iadd.i64 v30, v1
+    jump block4(v34)
+
+block4(v40: i64):
+    return v40
+}
+</code></pre></div>
+<p>Currently Cranelift emits the following (annotated x86-64 code):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x28</span><span class="w">        </span><span class="c1">; .block2</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x1a</span><span class="w">        </span><span class="c1">; .block1</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x20</span><span class="w">        </span><span class="c1">; .block4</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="nl">.block4:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x1d</span><span class="w">        </span><span class="c1">; .block3</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x12</span><span class="w">        </span><span class="c1">; .block2_to_block4_edge</span>
+</code></pre></div>
+<p>Modifying the lowering stage to mark edge blocks as cold if either the predecessor or successor block is cold, improves code generation:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">```</span><span class="nf">asm</span><span class="w"></span>
+<span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x1b</span><span class="w">  </span><span class="c1">; .block2</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="na">.block4</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x10</span><span class="w">      </span><span class="c1">; .block3</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x13</span><span class="w">      </span><span class="c1">; .block4</span>
+</code></pre></div>
+<p>This provided significant runtime speedups (~11%) for my code (which is severely frontend bound and uses heavy cold annotations).</p>
+</blockquote>
+
+
+
+<a name="292360202"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234635%20Cranelift%3A%20Cold%20annotations%20not%20pr.../near/292360202" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html#292360202">(Aug 08 2022 at 04:42)</a>:</h4>
+<p>mchesser edited <a href="https://github.com/bytecodealliance/wasmtime/issues/4635">issue #4635</a>:</p>
+<blockquote>
+<p>During lowering Cranelift may generate additional blocks to handle moves that conceptually occur on edges. The block ordering code treats these blocks the same as ordinary blocks, irrespective of whether they are associated with a cold block. This means that edges from a cold block can cause additional code to be inserted in the hot path.</p>
+<p>For example, consider the following IL:</p>
+<div class="codehilite" data-code-language="clif"><pre><span></span><code>function %test_cold(i64, i64, i64, i64) -&gt; i64 {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    brz v0, block2
+    jump block1
+
+block1:
+    v10 = iadd.i64 v0, v2
+    jump block3(v10)
+
+block2 cold:
+    v20 = iadd.i64 v1, v3
+    brnz v20, block3(v20)
+    jump block4(v3)
+
+block3(v30: i64):
+    v34 = iadd.i64 v30, v1
+    jump block4(v34)
+
+block4(v40: i64):
+    return v40
+}
+</code></pre></div>
+<p>Currently Cranelift emits the following (annotated x86-64 code):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x28</span><span class="w">        </span><span class="c1">; .block2</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x1a</span><span class="w">        </span><span class="c1">; .block1</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x20</span><span class="w">        </span><span class="c1">; .block4</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="nl">.block4:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x1d</span><span class="w">        </span><span class="c1">; .block3</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x12</span><span class="w">        </span><span class="c1">; .block2_to_block4_edge</span>
+</code></pre></div>
+<p>Modifying the lowering stage to mark edge blocks as cold if either the predecessor or successor block is cold, improves code generation:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">```</span><span class="nf">asm</span><span class="w"></span>
+<span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x1b</span><span class="w">  </span><span class="c1">; .block2</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="na">.block4</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x10</span><span class="w">      </span><span class="c1">; .block3</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x13</span><span class="w">      </span><span class="c1">; .block4</span>
+</code></pre></div>
+<p>This provided significant runtime speedups (~11%) for my code (which is severely frontend bound and heavily uses cold annotations).</p>
+</blockquote>
+
+
+
+<a name="292360218"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234635%20Cranelift%3A%20Cold%20annotations%20not%20pr.../near/292360218" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html#292360218">(Aug 08 2022 at 04:42)</a>:</h4>
+<p>mchesser edited <a href="https://github.com/bytecodealliance/wasmtime/issues/4635">issue #4635</a>:</p>
+<blockquote>
+<p>During lowering Cranelift may generate additional blocks to handle moves that conceptually occur on edges. The block ordering code treats these blocks the same as ordinary blocks, irrespective of whether they are associated with a cold block. This means that edges from a cold block can cause additional code to be inserted in the hot path.</p>
+<p>For example, consider the following IL:</p>
+<div class="codehilite" data-code-language="clif"><pre><span></span><code>function %test_cold(i64, i64, i64, i64) -&gt; i64 {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    brz v0, block2
+    jump block1
+
+block1:
+    v10 = iadd.i64 v0, v2
+    jump block3(v10)
+
+block2 cold:
+    v20 = iadd.i64 v1, v3
+    brnz v20, block3(v20)
+    jump block4(v3)
+
+block3(v30: i64):
+    v34 = iadd.i64 v30, v1
+    jump block4(v34)
+
+block4(v40: i64):
+    return v40
+}
+</code></pre></div>
+<p>Currently Cranelift emits the following (annotated x86-64 code):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x28</span><span class="w">        </span><span class="c1">; .block2</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x1a</span><span class="w">        </span><span class="c1">; .block1</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x20</span><span class="w">        </span><span class="c1">; .block4</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="nl">.block4:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x1d</span><span class="w">        </span><span class="c1">; .block3</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x12</span><span class="w">        </span><span class="c1">; .block2_to_block4_edge</span>
+</code></pre></div>
+<p>Modifying the lowering stage to mark edge blocks as cold if either the predecessor or successor block is cold (#4636), improves code generation:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">```</span><span class="nf">asm</span><span class="w"></span>
+<span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x1b</span><span class="w">  </span><span class="c1">; .block2</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="na">.block4</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x10</span><span class="w">      </span><span class="c1">; .block3</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x13</span><span class="w">      </span><span class="c1">; .block4</span>
+</code></pre></div>
+<p>This provided significant runtime speedups (~11%) for my code (which is severely frontend bound and heavily uses cold annotations).</p>
+</blockquote>
+
+
+
+<a name="292360227"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234635%20Cranelift%3A%20Cold%20annotations%20not%20pr.../near/292360227" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html#292360227">(Aug 08 2022 at 04:43)</a>:</h4>
+<p>mchesser edited <a href="https://github.com/bytecodealliance/wasmtime/issues/4635">issue #4635</a>:</p>
+<blockquote>
+<p>During lowering Cranelift may generate additional blocks to handle moves that conceptually occur on edges. The block ordering code treats these blocks the same as ordinary blocks, irrespective of whether they are associated with a cold block. This means that edges from a cold block can cause additional code to be inserted in the hot path.</p>
+<p>For example, consider the following IL:</p>
+<div class="codehilite" data-code-language="clif"><pre><span></span><code>function %test_cold(i64, i64, i64, i64) -&gt; i64 {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    brz v0, block2
+    jump block1
+
+block1:
+    v10 = iadd.i64 v0, v2
+    jump block3(v10)
+
+block2 cold:
+    v20 = iadd.i64 v1, v3
+    brnz v20, block3(v20)
+    jump block4(v3)
+
+block3(v30: i64):
+    v34 = iadd.i64 v30, v1
+    jump block4(v34)
+
+block4(v40: i64):
+    return v40
+}
+</code></pre></div>
+<p>Currently Cranelift emits the following (annotated x86-64 code):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x28</span><span class="w">        </span><span class="c1">; .block2</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x1a</span><span class="w">        </span><span class="c1">; .block1</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x20</span><span class="w">        </span><span class="c1">; .block4</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="nl">.block4:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x1d</span><span class="w">        </span><span class="c1">; .block3</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x12</span><span class="w">        </span><span class="c1">; .block2_to_block4_edge</span>
+</code></pre></div>
+<p>Modifying the lowering stage to mark edge blocks as cold if either the predecessor or successor block is cold (#4636), improves code generation:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x1b</span><span class="w">  </span><span class="c1">; .block2</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="na">.block4</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x10</span><span class="w">      </span><span class="c1">; .block3</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x13</span><span class="w">      </span><span class="c1">; .block4</span>
+</code></pre></div>
+<p>This provided significant runtime speedups (~11%) for my code (which is severely frontend bound and heavily uses cold annotations).</p>
+</blockquote>
+
+
+
+<a name="292361081"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234635%20Cranelift%3A%20Cold%20annotations%20not%20pr.../near/292361081" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html#292361081">(Aug 08 2022 at 05:03)</a>:</h4>
+<p>mchesser edited <a href="https://github.com/bytecodealliance/wasmtime/issues/4635">issue #4635</a>:</p>
+<blockquote>
+<p>During lowering Cranelift may generate additional blocks to handle moves that conceptually occur on edges. The block ordering code treats these blocks the same as ordinary blocks, irrespective of whether they are associated with a cold block. This means that edges from a cold block can cause additional code to be inserted in the hot path.</p>
+<p>For example, consider the following IL:</p>
+<div class="codehilite" data-code-language="clif"><pre><span></span><code>function %test_cold(i64, i64, i64, i64) -&gt; i64 {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    brz v0, block2
+    jump block1
+
+block1:
+    v10 = iadd.i64 v0, v2
+    jump block3(v10)
+
+block2 cold:
+    v20 = iadd.i64 v1, v3
+    brnz v20, block3(v20)
+    jump block4(v3)
+
+block3(v30: i64):
+    v34 = iadd.i64 v30, v1
+    jump block4(v34)
+
+block4(v40: i64):
+    return v40
+}
+</code></pre></div>
+<p>Currently Cranelift emits the following (annotated x86-64 code):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x28</span><span class="w">        </span><span class="c1">; .block2</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x1a</span><span class="w">        </span><span class="c1">; .block1</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x20</span><span class="w">        </span><span class="c1">; .block4</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="nl">.block4:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x1d</span><span class="w">        </span><span class="c1">; .block3</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x12</span><span class="w">        </span><span class="c1">; .block2_to_block4_edge</span>
+</code></pre></div>
+<p>Modifying the lowering stage to mark edge blocks as cold if either the predecessor or successor block is cold (#4636), improves code generation:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x1b</span><span class="w">  </span><span class="c1">; .block2</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="na">.block4</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x10</span><span class="w">      </span><span class="c1">; .block3</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x13</span><span class="w">      </span><span class="c1">; .block4</span>
+</code></pre></div>
+<p>This provided significant runtime speedups (~11%) for my code (which is severely frontend bound and heavily uses cold annotations).</p>
+</blockquote>
+
+
+
+<a name="292527234"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234635%20Cranelift%3A%20Cold%20annotations%20not%20pr.../near/292527234" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234635.20Cranelift.3A.20Cold.20annotations.20not.20pr.2E.2E.2E.html#292527234">(Aug 09 2022 at 05:05)</a>:</h4>
+<p>cfallin closed <a href="https://github.com/bytecodealliance/wasmtime/issues/4635">issue #4635</a>:</p>
+<blockquote>
+<p>During lowering Cranelift may generate additional blocks to handle moves that conceptually occur on edges. The block ordering code treats these blocks the same as ordinary blocks, irrespective of whether they are associated with a cold block. This means that edges from a cold block can cause additional code to be inserted in the hot path.</p>
+<p>For example, consider the following IL:</p>
+<div class="codehilite" data-code-language="clif"><pre><span></span><code>function %test_cold(i64, i64, i64, i64) -&gt; i64 {
+block0(v0: i64, v1: i64, v2: i64, v3: i64):
+    brz v0, block2
+    jump block1
+
+block1:
+    v10 = iadd.i64 v0, v2
+    jump block3(v10)
+
+block2 cold:
+    v20 = iadd.i64 v1, v3
+    brnz v20, block3(v20)
+    jump block4(v3)
+
+block3(v30: i64):
+    v34 = iadd.i64 v30, v1
+    jump block4(v34)
+
+block4(v40: i64):
+    return v40
+}
+</code></pre></div>
+<p>Currently Cranelift emits the following (annotated x86-64 code):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x28</span><span class="w">        </span><span class="c1">; .block2</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x1a</span><span class="w">        </span><span class="c1">; .block1</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x20</span><span class="w">        </span><span class="c1">; .block4</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="nl">.block4:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x1d</span><span class="w">        </span><span class="c1">; .block3</span>
+
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x12</span><span class="w">        </span><span class="c1">; .block2_to_block4_edge</span>
+</code></pre></div>
+<p>Modifying the lowering stage to mark edge blocks as cold if either the predecessor or successor block is cold (#4636), improves code generation:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nl">.block0:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">push</span><span class="w">    </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rbp</span><span class="p">,</span><span class="w"> </span><span class="no">rsp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">je</span><span class="w">      </span><span class="mi">0x1b</span><span class="w">  </span><span class="c1">; .block2</span>
+
+<span class="nl">.block1:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdx</span><span class="w"></span>
+
+<span class="nl">.block3:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+
+<span class="na">.block4</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rax</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rsp</span><span class="p">,</span><span class="w"> </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">pop</span><span class="w">     </span><span class="no">rbp</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+
+<span class="nl">.block2:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rsi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">add</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">test</span><span class="w">    </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rdi</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jne</span><span class="w">     </span><span class="mi">0x10</span><span class="w">      </span><span class="c1">; .block3</span>
+
+<span class="nl">.block2_to_block4_edge:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">mov</span><span class="w">     </span><span class="no">rdi</span><span class="p">,</span><span class="w"> </span><span class="no">rcx</span><span class="w"></span>
+<span class="w">    </span><span class="nf">jmp</span><span class="w">     </span><span class="mi">0x13</span><span class="w">      </span><span class="c1">; .block4</span>
+</code></pre></div>
+<p>This provided significant runtime speedups (~11%) for my code (which is severely frontend bound and heavily uses cold annotations).</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

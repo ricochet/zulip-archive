@@ -1,0 +1,68 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #4861 Don&#x27;t use libtest harness for wast... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234861.20Don.27t.20use.20libtest.20harness.20for.20wast.2E.2E.2E.html">wasmtime / issue #4861 Don&#x27;t use libtest harness for wast...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="296914887"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234861%20Don%27t%20use%20libtest%20harness%20for%20wast.../near/296914887" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234861.20Don.27t.20use.20libtest.20harness.20for.20wast.2E.2E.2E.html#296914887">(Sep 03 2022 at 00:45)</a>:</h4>
+<p>jameysharp opened <a href="https://github.com/bytecodealliance/wasmtime/issues/4861">issue #4861</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>Currently, the wasmtime top-level crate has a <code>build.rs</code> to generate a bunch of <code>#[test]</code>-annotated functions in <code>$OUT_DIR</code>. At build-time it finds all the "wast" tests in <code>tests/misc_testuite</code> and <code>tests/spec_testsuite</code> (if the latter submodule is present), and generates a couple test functions for each.</p>
+<p>Instead I think we should set <code>harness = false</code> in <code>Cargo.toml</code> for <code>tests/all/wast.rs</code>, and give it a <code>main</code> function. It should find these tests when the test runs, not when it's compiled.</p>
+<h4>Benefit</h4>
+<p>I noticed this because adding a new test in <code>tests/misc_testsuite</code> didn't cause <code>$OUT_DIR/wast_testsuite_tests.rs</code> to get regenerated. Avoiding the build step means we don't have to make cargo re-run the build step when tests are added or changed.</p>
+<p>Locating the wast files during runtime also means that if somebody didn't have <code>tests/spec_testsuite</code> cloned before trying to run the tests, they just have to run the appropriate <code>git submodule update</code> command and then try running tests again.</p>
+<p>This should improve build time, both because we don't have to compile and run a <code>build.rs</code> plus <code>rustfmt</code>, and also because we don't have to compile a 140kB Rust source file when running tests.</p>
+<h4>Implementation</h4>
+<p>We have a similar situation in <code>cranelift/tests/filetests.rs</code>, which switched away from the libtest harness in 54f9587569f80c5899d1e75482197d87d2406e15.</p>
+<p>With the current libtest-based implementation, we can run a specific wast test by passing its name to <code>cargo test</code>. It'd be nice to keep that feature. So the new <code>main</code> function would need to interpret <code>std::env::args</code> as passed to it by <a href="https://doc.rust-lang.org/cargo/commands/cargo-test.html">cargo test</a>, and ideally match <a href="https://doc.rust-lang.org/rustc/tests/index.html#filters">how libtest interprets filters</a>. Maybe some of the other libtest command-line options would be nice to have too.</p>
+<p>The parts of <code>build.rs</code> that find all the tests should get moved into <code>tests/all/wast.rs</code>. (I think it's especially helpful to preserve the warning that's reported if <code>tests/spec_testsuite</code> is empty.) Otherwise a significant part of the code is just arranging to emit calls to <code>run_wast</code>, which the non-libtest version can just call directly.</p>
+<p>Under libtest, tests are run in parallel by default, but there's some effort in <code>tests/all/wast.rs</code> to somewhat limit parallelism. I think a purely sequential test-runner would probably do okay here, especially for a first cut. We could use rayon to add parallelism later if we want.</p>
+<h4>Alternatives</h4>
+<p>We could keep the current implementation. For use in CI, the current approach is okay and helps us catch bugs. I think it's mostly a footgun for developers who might try to add tests. But, uh, that's kind of important too.</p>
+<p>We could also stop trying to use the cargo/rustc test infrastructure entirely, and either use shell scripts or a dedicated Rust program along the lines of clif-util. But it's nice to have all tests run in the same framework.</p>
+</blockquote>
+
+
+
+<a name="296943842"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234861%20Don%27t%20use%20libtest%20harness%20for%20wast.../near/296943842" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234861.20Don.27t.20use.20libtest.20harness.20for.20wast.2E.2E.2E.html#296943842">(Sep 03 2022 at 05:38)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4861#issuecomment-1236053791">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4861">issue #4861</a>:</p>
+<blockquote>
+<p>The downside of this is that it would mean giving up on a lot of features libtest offers out of the box like the way it prints test results, showing failed test crash backtraces and stdout/stderr (relevant libstd api's are unstable), test filtering, ...</p>
+</blockquote>
+
+
+
+<a name="438400939"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234861%20Don%27t%20use%20libtest%20harness%20for%20wast.../near/438400939" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234861.20Don.27t.20use.20libtest.20harness.20for.20wast.2E.2E.2E.html#438400939">(May 13 2024 at 16:21)</a>:</h4>
+<p>alexcrichton closed <a href="https://github.com/bytecodealliance/wasmtime/issues/4861">issue #4861</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>Currently, the wasmtime top-level crate has a <code>build.rs</code> to generate a bunch of <code>#[test]</code>-annotated functions in <code>$OUT_DIR</code>. At build-time it finds all the "wast" tests in <code>tests/misc_testuite</code> and <code>tests/spec_testsuite</code> (if the latter submodule is present), and generates a couple test functions for each.</p>
+<p>Instead I think we should set <code>harness = false</code> in <code>Cargo.toml</code> for <code>tests/all/wast.rs</code>, and give it a <code>main</code> function. It should find these tests when the test runs, not when it's compiled.</p>
+<h4>Benefit</h4>
+<p>I noticed this because adding a new test in <code>tests/misc_testsuite</code> didn't cause <code>$OUT_DIR/wast_testsuite_tests.rs</code> to get regenerated. Avoiding the build step means we don't have to make cargo re-run the build step when tests are added or changed.</p>
+<p>Locating the wast files during runtime also means that if somebody didn't have <code>tests/spec_testsuite</code> cloned before trying to run the tests, they just have to run the appropriate <code>git submodule update</code> command and then try running tests again.</p>
+<p>This should improve build time, both because we don't have to compile and run a <code>build.rs</code> plus <code>rustfmt</code>, and also because we don't have to compile a 140kB Rust source file when running tests.</p>
+<h4>Implementation</h4>
+<p>We have a similar situation in <code>cranelift/tests/filetests.rs</code>, which switched away from the libtest harness in 54f9587569f80c5899d1e75482197d87d2406e15.</p>
+<p>With the current libtest-based implementation, we can run a specific wast test by passing its name to <code>cargo test</code>. It'd be nice to keep that feature. So the new <code>main</code> function would need to interpret <code>std::env::args</code> as passed to it by <a href="https://doc.rust-lang.org/cargo/commands/cargo-test.html">cargo test</a>, and ideally match <a href="https://doc.rust-lang.org/rustc/tests/index.html#filters">how libtest interprets filters</a>. Maybe some of the other libtest command-line options would be nice to have too.</p>
+<p>The parts of <code>build.rs</code> that find all the tests should get moved into <code>tests/all/wast.rs</code>. (I think it's especially helpful to preserve the warning that's reported if <code>tests/spec_testsuite</code> is empty.) Otherwise a significant part of the code is just arranging to emit calls to <code>run_wast</code>, which the non-libtest version can just call directly.</p>
+<p>Under libtest, tests are run in parallel by default, but there's some effort in <code>tests/all/wast.rs</code> to somewhat limit parallelism. I think a purely sequential test-runner would probably do okay here, especially for a first cut. We could use rayon to add parallelism later if we want.</p>
+<h4>Alternatives</h4>
+<p>We could keep the current implementation. For use in CI, the current approach is okay and helps us catch bugs. I think it's mostly a footgun for developers who might try to add tests. But, uh, that's kind of important too.</p>
+<p>We could also stop trying to use the cargo/rustc test infrastructure entirely, and either use shell scripts or a dedicated Rust program along the lines of clif-util. But it's nice to have all tests run in the same framework.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

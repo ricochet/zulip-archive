@@ -1,0 +1,287 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #7054 Threading in a Scripting Environment · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html">wasmtime / issue #7054 Threading in a Scripting Environment</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="391600234"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/391600234" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#391600234">(Sep 18 2023 at 01:50)</a>:</h4>
+<p>WireWhiz opened <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>The title basically says it, I've been attempting to block out a scripting system for a game engine the past few weeks and the current feature I've been attempting to figure out is multi-threading. And I can't seem to find any way to run two threads at once, that have access to the same data. This is the only requirement I'm trying to fulfill by any method. </p>
+<p>The engine runs on ECS, so you have big shared arrays of data, operated upon by a bunch of scripts containing functions that interact with those arrays. </p>
+<p>Ideally I'd like to accomplish two things, have systems/jobs called from separate threads be able to act on the shared data at the same time. And possibly multi thread access to data arrays within those systems/jobs.</p>
+<p>My current setup is multiple wasm modules (one for each job/system, though I'm undecided if I need to segment them that much), with an imported shared array buffer so they're able to access each other's memory through pointers. Ideally built to raw wasm, not wasi, since I want to keep my experimental dependencies down, but for this threading exploration I switched to building wasi targets without entry points. </p>
+<p>Initially I tried figuring out a way to multi-thread calls into the wasm runtime, but with the <code>&amp;mut store</code> requirement that's not possible unless I want to risk some unsafe skirt around the borrow checker stuff.</p>
+<p>So then I decided to try to build the job scheduling/thread pooling system inside of wasm, If I can't use threads outside I might as well use them inside right? After researching this, upgrading to wasi since I found out you need too, I looked into the wasmtime_wasi_threading crate and it seems intended (as all things wasi) for the entire application to be embedded in a wasm module. This doesn't really vibe with my "host runtime calling scripts" end goal. So that path of exploration has kind of ended as well. It also seems that an entirely different store is created for each thread (unverified through testing, but the source looks that way), and my understanding is that stores can't interact with each other, and that's my basic requirement. </p>
+<p>I'm fully aware you can instantiate clones of a module in different stores, but again, the memory cant interact. I also know you can copy data but I just cringe instantly at that because with a game engine you really need that performance. </p>
+<p>My question/issue is how do I access shared data from multiple threads. Does the wasi threading runtime do some black magic behind the scenes to share data and I just need to write my job scheduling system as a program that lives on another thread? Even then how would I interact with it while it's running?</p>
+<p>My thoughts are that since SharedMemoryBuffer is already supposed to be thread-safe, threaded function calls modifying that should be fine, even for calls that would cause a memory allocation behind the scenes, so the &amp;mut store lock is only really needed for loading or unloading new modules. I can totally see a system where I have the job scheduling system create multiple (unsafe) references to the store to be able to call functions from multiple threads, then periodically pause so that modules may be loaded or unloaded before continuing to make sure that no functions bug out while stuff is changing. </p>
+<p>Is there an intended way to do this? Or is my use case unexplored territory? I'm also more than happy to get involved with the project and try to get something working if it's not possible currently.</p>
+</blockquote>
+
+
+
+<a name="391713249"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/391713249" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#391713249">(Sep 18 2023 at 14:31)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1723548522">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p><a href="https://bytecodealliance.org/articles/wasi-threads">This blog post</a> might be interesting for you, but I can try to help fill in some other gaps here:</p>
+<ul>
+<li>As you've discovered the only way to have multithreading with wasm today and is through <a href="https://docs.rs/wasmtime/latest/wasmtime/struct.SharedMemory.html"><code>SharedMemory</code></a> as the linear memory for wasm. This is the WebAssembly <code>threads</code> proposal (which actually mostly just adds atomic-related instructions).</li>
+<li>Multithreading via the WebAssembly <code>threads</code> proposal is modeled as an instance-per-thread. This means that your module should likely import a <code>shared</code> memory which will then be instantiated once per thread.</li>
+<li>Wasmtime's design requires a <code>Store</code>-per-thread, which means for your application you'll have a <code>Store</code> per thread, each with a single <code>Instance</code>, all of which instantiate the same module (<code>Module</code> can be shared across threads).</li>
+</ul>
+<p>This should all work today if you enable the right features and flags in both LLVM and Wasmtime, but it's unlikely to be easy. The developer experience story here is pretty underbaked and you're very much on your own unfortunately. There's spec work for threads however which is intended to provide a better story here in the future, but that's far out.</p>
+<p>That I hope is at least some basic information to help clear up a few things. Whether or not you use small modules or one large module is up to you and your embedding and I won't have much guidance on that myself. Or I should also ask, does that help clear things up? Are there other Wasmtime questions I can help with?</p>
+</blockquote>
+
+
+
+<a name="391731052"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/391731052" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#391731052">(Sep 18 2023 at 15:58)</a>:</h4>
+<p>WireWhiz <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1723799725">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>It clears up the intended set up for threads, so that's more clear. My last question would be, if I were to create a separate store per thread, and separate model instances, would I be able to share a single SharedMemoryBuffer between them? My understanding currently is that memory allocated in one store cannot be used by a module in a different store. </p>
+</blockquote>
+
+
+
+<a name="391734530"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/391734530" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#391734530">(Sep 18 2023 at 16:17)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1723834980">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p><code>Memory::new</code> requires a reference to a <code>Store</code> as argument. <code>SharedMemory::new</code> merely requires a references to an <code>Engine</code> which is not bound to a single thread and generally shared between all <code>Store</code>s in the process.</p>
+</blockquote>
+
+
+
+<a name="391737460"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/391737460" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#391737460">(Sep 18 2023 at 16:34)</a>:</h4>
+<p>WireWhiz <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1723909411">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>OH I don't know how I missed that, I've just been creating shared memory buffer by passing in the type to the Memory constructor: <code>Memory::new(&amp;mut store, MemoryType::shared(32, 32768)).unwrap()</code> </p>
+<p>I'll look into this and see if I can get it working, this probably provides a route for me. </p>
+</blockquote>
+
+
+
+<a name="392252567"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392252567" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392252567">(Sep 21 2023 at 05:44)</a>:</h4>
+<p>WireWhiz <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1728890433">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>Ok, after some testing I've run into a super weird bug. Before everything was fine, I could load several different wasm modules into the same shared memory and they coexisted fine. But changing to SharedMemory::new with no other significant changes from what I was doing before causes the first memory allocation within wasm to throw an error. </p>
+<p>I suspected it might be different modules not coexisting well so I removed all but one and that fixed it.</p>
+<p>So it looks like for some reason memory allocation gets messed up but the presence of differing modules.</p>
+<p>Could this be some variables to do with malloc not being synced between them? Do they not sync in the first place? If that's the case would I need to look into maybe writing a custom allocator that can handle memory allocation for multiple modules together? </p>
+</blockquote>
+
+
+
+<a name="392372359"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392372359" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392372359">(Sep 21 2023 at 18:10)</a>:</h4>
+<p>WireWhiz <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730068215">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>I attempted switching from <code>wasm32-unknown-unknown</code> to using the <code>wasm32-wasi-preview1-threads</code> build target, though and appears to be throwing the same error. At the moment the two modules I have are spawned on the same thread (different code in each), and the error is triggered before any threads and thus module instances on other threads are spawned. Would shadow stacks still be something worth looking into? Or do those only apply for multi-threaded scenarios?</p>
+</blockquote>
+
+
+
+<a name="392373164"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392373164" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392373164">(Sep 21 2023 at 18:16)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730077250">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>If on a single thread, shadow-stack interference wouldn't be a factor, no.</p>
+<p>Another thing that could be going wrong: perhaps the memory is just missing the initial heap image entirely? How are you providing the shared-memory -- did you change the exported memory 0 to an imported memory instead? Are there still data segments in the module to initialize it?</p>
+</blockquote>
+
+
+
+<a name="392376296"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392376296" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392376296">(Sep 21 2023 at 18:37)</a>:</h4>
+<p>WireWhiz <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730107559">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>Here's the shell script I currently use to build, to give an idea of the flags/options I'm using</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">export</span><span class="w"> </span><span class="n">RUSTFLAGS</span><span class="o">=</span><span class="s">"--cfg=web_sys_unstable_apis -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--no-entry -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=2147483648"</span>
+<span class="n">echo</span><span class="w"> </span><span class="s">"Compiling scripts with flags:"</span><span class="w"> </span><span class="cp">$RUSTFLAGS</span>
+<span class="n">cargo</span><span class="w"> </span><span class="o">+</span><span class="n">nightly</span><span class="w"> </span><span class="n">build</span><span class="w"> </span><span class="o">--</span><span class="n">target</span><span class="w"> </span><span class="n">wasm32</span><span class="o">-</span><span class="n">wasi</span><span class="o">-</span><span class="n">preview1</span><span class="o">-</span><span class="n">threads</span><span class="w"> </span><span class="o">-</span><span class="n">Z</span><span class="w"> </span><span class="n">build</span><span class="o">-</span><span class="n">std</span><span class="o">=</span><span class="n">std</span><span class="p">,</span><span class="n">panic_abort</span>
+</code></pre></div>
+<p>running wasm2wat it seems that memory is both imported and exported, I'm unsure if this is by design. My intent is to allocate the shared memory in the runtime and then provide it to modules for them to import.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="o">..</span><span class="p">.</span>
+<span class="w">  </span><span class="p">(</span><span class="n">import</span><span class="w"> </span><span class="s">"env"</span><span class="w"> </span><span class="s">"memory"</span><span class="w"> </span><span class="p">(</span><span class="n">memory</span><span class="w"> </span><span class="p">(;</span><span class="mi">0</span><span class="p">;)</span><span class="w"> </span><span class="mi">17</span><span class="w"> </span><span class="mi">32768</span><span class="w"> </span><span class="n">shared</span><span class="p">))</span>
+<span class="o">..</span><span class="p">.</span>
+<span class="w">  </span><span class="p">(</span><span class="n">export</span><span class="w"> </span><span class="s">"memory"</span><span class="w"> </span><span class="p">(</span><span class="n">memory</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span>
+<span class="o">..</span><span class="p">.</span>
+</code></pre></div>
+<p>If I print out imports and exports after loading the module with wasmtime it appears to both export and import the same shared memory (excuse my command line formatting):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">Imports</span>
+<span class="n">Memory</span><span class="p">(</span><span class="n">MemoryType</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ty</span>: <span class="nc">Memory</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">minimum</span>: <span class="mi">17</span><span class="p">,</span><span class="w"> </span><span class="n">maximum</span>: <span class="nb">Some</span><span class="p">(</span><span class="mi">32768</span><span class="p">),</span><span class="w"> </span><span class="n">shared</span>: <span class="nc">true</span><span class="p">,</span><span class="w"> </span><span class="n">memory64</span>: <span class="nc">false</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span>: <span class="nc">env</span><span class="p">.</span><span class="n">memory</span>
+<span class="n">Exports</span>
+<span class="n">Memory</span><span class="p">(</span><span class="n">MemoryType</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ty</span>: <span class="nc">Memory</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">minimum</span>: <span class="mi">17</span><span class="p">,</span><span class="w"> </span><span class="n">maximum</span>: <span class="nb">Some</span><span class="p">(</span><span class="mi">32768</span><span class="p">),</span><span class="w"> </span><span class="n">shared</span>: <span class="nc">true</span><span class="p">,</span><span class="w"> </span><span class="n">memory64</span>: <span class="nc">false</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span>: <span class="nc">env</span><span class="p">.</span><span class="n">memory</span>
+</code></pre></div>
+<p>I'm unsure where to look for data initialization but I'd guess it'd have something to do with this portion of the file?<br>
+![image](<a href="https://github.com/bytecodealliance/wasmtime/assets/43615314/9776ea63-ca9b-441e-ba29-3f3d90c4c8ac">https://github.com/bytecodealliance/wasmtime/assets/43615314/9776ea63-ca9b-441e-ba29-3f3d90c4c8ac</a>)</p>
+</blockquote>
+
+
+
+<a name="392377218"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392377218" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392377218">(Sep 21 2023 at 18:43)</a>:</h4>
+<p>WireWhiz <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730115261">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>Here's that init memory function, I assume that's useful as well. I should note I never call this, and I'm directly calling functions from a wasmtime::Linker so I don't know if it would be called automatically.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">func</span><span class="w"> </span><span class="cp">$__wasm_init_memory</span><span class="w"> </span><span class="p">(</span><span class="k">type</span> <span class="mi">9</span><span class="p">)</span>
+<span class="w">    </span><span class="n">block</span><span class="w">  </span><span class="p">;;</span><span class="w"> </span><span class="n">label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">@</span><span class="mi">1</span>
+<span class="w">      </span><span class="n">block</span><span class="w">  </span><span class="p">;;</span><span class="w"> </span><span class="n">label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">@</span><span class="mi">2</span>
+<span class="w">        </span><span class="n">block</span><span class="w">  </span><span class="p">;;</span><span class="w"> </span><span class="n">label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">@</span><span class="mi">3</span>
+<span class="w">          </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1097564</span>
+<span class="w">          </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">          </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">          </span><span class="kt">i32</span><span class="p">.</span><span class="n">atomic</span><span class="p">.</span><span class="n">rmw</span><span class="p">.</span><span class="n">cmpxchg</span>
+<span class="w">          </span><span class="n">br_table</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">(;</span><span class="o">@</span><span class="mi">3</span><span class="p">;)</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">(;</span><span class="o">@</span><span class="mi">2</span><span class="p">;)</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="p">(;</span><span class="o">@</span><span class="mi">1</span><span class="p">;)</span>
+<span class="w">        </span><span class="n">end</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1048576</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1048576</span>
+<span class="w">        </span><span class="n">global</span><span class="p">.</span><span class="n">set</span><span class="w"> </span><span class="cp">$__tls_base</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">148</span>
+<span class="w">        </span><span class="n">memory</span><span class="p">.</span><span class="n">init</span><span class="w"> </span><span class="cp">$</span><span class="p">.</span><span class="n">tdata</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1048736</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">48153</span>
+<span class="w">        </span><span class="n">memory</span><span class="p">.</span><span class="n">init</span><span class="w"> </span><span class="cp">$</span><span class="p">.</span><span class="n">rodata</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1096892</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">12</span>
+<span class="w">        </span><span class="n">memory</span><span class="p">.</span><span class="n">init</span><span class="w"> </span><span class="cp">$</span><span class="p">.</span><span class="n">data</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1096904</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">660</span>
+<span class="w">        </span><span class="n">memory</span><span class="p">.</span><span class="n">fill</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1097564</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">2</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="n">atomic</span><span class="p">.</span><span class="n">store</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1097564</span>
+<span class="w">        </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span>
+<span class="w">        </span><span class="n">memory</span><span class="p">.</span><span class="n">atomic</span><span class="p">.</span><span class="n">notify</span>
+<span class="w">        </span><span class="nb">drop</span>
+<span class="w">        </span><span class="n">br</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">(;</span><span class="o">@</span><span class="mi">1</span><span class="p">;)</span>
+<span class="w">      </span><span class="n">end</span>
+<span class="w">      </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1097564</span>
+<span class="w">      </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">      </span><span class="kt">i64</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span>
+<span class="w">      </span><span class="n">memory</span><span class="p">.</span><span class="n">atomic</span><span class="p">.</span><span class="n">wait32</span>
+<span class="w">      </span><span class="nb">drop</span>
+<span class="w">    </span><span class="n">end</span>
+<span class="w">    </span><span class="n">data</span><span class="p">.</span><span class="nb">drop</span><span class="w"> </span><span class="cp">$</span><span class="p">.</span><span class="n">rodata</span>
+<span class="w">    </span><span class="n">data</span><span class="p">.</span><span class="nb">drop</span><span class="w"> </span><span class="cp">$</span><span class="p">.</span><span class="n">data</span><span class="p">)</span>
+</code></pre></div>
+</blockquote>
+
+
+
+<a name="392378733"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392378733" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392378733">(Sep 21 2023 at 18:54)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730129587">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p><code>__wasm_init_memory</code> shouldn't be in the start section. That will cause every spawned thread to overwrite the shared memory. Instead it should be called once on the main thread and then the function for initializing TLS should be called once per thread.</p>
+</blockquote>
+
+
+
+<a name="392380780"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392380780" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392380780">(Sep 21 2023 at 19:08)</a>:</h4>
+<p>WireWhiz <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730147573">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>Is there a link option I can use to set that? Or should I write a script to modify it? Also does linker.module auto call any functions if wasi has been added to it? Or am I in charge of calling those functions. I'm not currently using WasiThreadsCtx either. I'm also not seeing an explicit init tls function, but I am seeing a wasi_thread_start function, does that serve a similar purpose?</p>
+</blockquote>
+
+
+
+<a name="392381282"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392381282" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392381282">(Sep 21 2023 at 19:11)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730152123">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<blockquote>
+<p>I'm also not seeing an explicit init tls function, but I am seeing a wasi_thread_start function, does that serve a similar purpose?</p>
+</blockquote>
+<p>I believe that is one of the things <code>wasi_thread_start</code> does.</p>
+<blockquote>
+<p>Is there a link option I can use to set that?</p>
+</blockquote>
+<p>The wasm32-wasi-preview1-threads target uses <code>--import-memory --export-memory --shared-memory</code>, but I don't think the extra <code>--export-memory</code> argument would help.</p>
+</blockquote>
+
+
+
+<a name="392407214"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392407214" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392407214">(Sep 21 2023 at 22:56)</a>:</h4>
+<p>abrown <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730457269">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>cc: @g0djan, who worked on the Rust <code>wasm32-wasi-preview1-threads</code> target you're using. That target uses the wasi-libc implemetation IIRC, which boils down to <a href="https://github.com/WebAssembly/wasi-libc/blob/ce2f157d46e04f323edf93f02c8f60069d88df96/libc-top-half/musl/src/thread/wasm32/wasi_thread_start.s#L13"><code>wasi_thread_start</code></a> and <a href="https://github.com/WebAssembly/wasi-libc/blob/ce2f157d46e04f323edf93f02c8f60069d88df96/libc-top-half/musl/src/thread/pthread_create.c#L308"><code>__wasi_thread_start_C</code></a>. It could very well be that there is a bug here somewhere; remember this target is still a work in progress.</p>
+</blockquote>
+
+
+
+<a name="392460205"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392460205" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392460205">(Sep 22 2023 at 07:52)</a>:</h4>
+<p>WireWhiz <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1730967955">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>But thread start shouldn't need to be called for single threaded instantiation of multiple modules, maybe I should create a new issue over in the rust or wasm repos for the memory issue and then come back to this once that's fixed since it is technically a separate issue that most likely isn't in wasmtime. </p>
+</blockquote>
+
+
+
+<a name="392521874"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392521874" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392521874">(Sep 22 2023 at 13:47)</a>:</h4>
+<p>g0djan <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1731450955">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<blockquote>
+<p>running wasm2wat it seems that memory is both imported and exported, I'm unsure if this is by design. <br>
+Yes it was by design but idk remember the exact reasoning for that as it was done just the same way as it's done in C by <code>wasi-sdk</code>. And also wasmtime didn't allow to run it until it's compiled with <code>--export-memory</code> .</p>
+</blockquote>
+</blockquote>
+
+
+
+<a name="392521901"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392521901" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392521901">(Sep 22 2023 at 13:47)</a>:</h4>
+<p>g0djan edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1731450955">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<blockquote>
+<p>running wasm2wat it seems that memory is both imported and exported, I'm unsure if this is by design. </p>
+</blockquote>
+<p>Yes it was by design but idk remember the exact reasoning for that as it was done just the same way as it's done in C by <code>wasi-sdk</code>. And also wasmtime didn't allow to run it until it's compiled with <code>--export-memory</code> .</p>
+</blockquote>
+
+
+
+<a name="392521975"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392521975" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392521975">(Sep 22 2023 at 13:47)</a>:</h4>
+<p>g0djan edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1731450955">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<blockquote>
+<p>running wasm2wat it seems that memory is both imported and exported, I'm unsure if this is by design. </p>
+</blockquote>
+<p>Yes it was by design but idk remember the exact reasoning for that as it was done just the same way as it's done in C by <code>wasi-sdk</code>. And also wasmtime didn't allow to run it until it's compiled with <code>--export-memory</code> .</p>
+<p>I'll take a look at your example next week.</p>
+</blockquote>
+
+
+
+<a name="392556396"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237054%20Threading%20in%20a%20Scripting%20Environment/near/392556396" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237054.20Threading.20in.20a.20Scripting.20Environment.html#392556396">(Sep 22 2023 at 16:14)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/7054#issuecomment-1731688087">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7054">issue #7054</a>:</p>
+<blockquote>
+<p>Wasi requires exporting the memory for the wasi runtime to know where to read and write, but multi threading requires importing the memory to aboid each module getting it's own distinct memory.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

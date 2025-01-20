@@ -1,0 +1,224 @@
+[
+    {
+        "content": "<p>Hi,<br>\nI'm currently thinking about how we can SVE support in and I'm wondering how this could work with the current register allocator. My issue is that the bottom 128-bits of an SVE 'Z' register aliases a 'V' register and, from my basic understanding, this currently wouldn't be supported. Also, do I remember hearing that another regalloc is in the works..?</p>",
+        "id": 260808582,
+        "sender_full_name": "Sam Parker",
+        "timestamp": 1636469652
+    },
+    {
+        "content": "<p>The register allocator doesn't need to track 'V' and 'Z' registers separately: if an SVE instruction is using a 'Z' register then the corresponding 'V' register can't be used, and vice-versa.</p>",
+        "id": 260809171,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1636469873
+    },
+    {
+        "content": "<p>Hi <span class=\"user-mention\" data-user-id=\"421408\">@Sam Parker</span> -- agree with what Amanieu said in this case; the unit of allocation is just a \"V or Z register\" since (if I understand correctly) they're 1-to-1 (?). In other cases where non-1-to-1 overlaps are needed, e.g. ARM32 with 64-bit float <code>d0</code> aliasing <code>s0</code> and <code>s1</code>, we do need a solution, but haven't had the resources to develop one yet.</p>\n<p>Re: new regalloc, yes, that's regalloc2; it doesn't solve this problem either, yet, but conceivably it could, with some work, by adding subunits to the commitment map or something like that. (RA2 is currently stalled on a licensing issue before we can release it, and the compatibility shim that allows Cranelift to use it via the current <a href=\"http://regalloc.rs\">regalloc.rs</a> API is also pending review still due to limited resources, but I'm hoping to nudge things forward...)</p>",
+        "id": 260824568,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636476142
+    },
+    {
+        "content": "<p>Okay, thanks. So how is the aliasing handled, could you point me to an example? My reasoning for thinking this wouldn't work is because currently the AArch64 backend only has two disjoint register classes, and I will need to add a third because the scalable type is wildly different from the existing V128 class. So I need to somehow map 'distinct' registers to each other, which is different from H,S,D and Q 'regs' being the same register.</p>",
+        "id": 260959961,
+        "sender_full_name": "Sam Parker",
+        "timestamp": 1636534068
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"421408\">@Sam Parker</span> is my understanding correct that register <code>Zn</code> aliases <code>Vn</code> (and only that)? If so, I think we can just use the existing register class; allocating, say, <code>v13</code> means you can either use <code>v13</code> or <code>z13</code> at your leisure. Or is the aliasing more complex than that?</p>\n<p>Reading <a href=\"https://developer.arm.com/documentation/102340/0001/SVE2-architecture-fundamentals\">this intro</a> I see that there are also predicate registers <code>p0</code> through <code>p15</code>; those indeed would need a separate register class. I haven't looked at the relevant bits of <code>regalloc.rs</code> in long enough to remember details, but adding to the <code>RegAlloc</code> enum and seeing what breaks might give a reasonable indication of how much work is required. Alternately, depending on how hacky you're feeling, you could just reuse an unused class (say, <code>RegClass::I32</code>) for the predicate registers; the allocator doesn't actually care what the classes <em>are</em>, just that they're different bins of resources.</p>",
+        "id": 261017874,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636562952
+    },
+    {
+        "content": "<p>Ah, and before I forget, the ABI code definitely has some per-reg-class behavior in the prologue/epilogue generation and for the clobber list on calls; that'll need updates too, I think.</p>",
+        "id": 261018191,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636563085
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> Yes, this is my main concern. I'm assuming we're going to need to make some significant changes around the frame layout because we'll now have an implementation (runtime) defined sized register to store/restore on the stack. The ABI doesn't seem to suggest that we can rely on accurate type information being passed, so I'm assuming we need to be able to fallback safely.</p>",
+        "id": 261018768,
+        "sender_full_name": "Sam Parker",
+        "timestamp": 1636563300
+    },
+    {
+        "content": "<p>Ah! OK, I understand better now what's going on. In the current state of things, the <code>Option&lt;Type&gt;</code> should always be a <code>Some</code> I think, but that's not guaranteed and in fact not the case moving forward as regalloc2 handles all moves in a consolidated way and forgets type info before spill generation (or more precisely, can share a reg between two different types that live in the same class depending on path, so would need a lattice to merge types)</p>",
+        "id": 261019235,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636563463
+    },
+    {
+        "content": "<p>So we need a better answer for this, or else we need separate reg classes; agreed</p>",
+        "id": 261019314,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636563483
+    },
+    {
+        "content": "<p>I think separate reg classes are the cleaner answer at the API/conceptual level (at the boundary between regalloc and lowering) so I think I'd prefer to go that way, rather than try to preserve type info, which can be fragile and is catastrophic if wrong (see e.g. the CVE last April). Aliasing classes should be possible in regalloc2; in <a href=\"http://regalloc.rs\">regalloc.rs</a> it's dicier, so maybe rely on the type info just for prototyping</p>",
+        "id": 261019584,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636563586
+    },
+    {
+        "content": "<p>are the regs caller- or callee-saved, out of curiosity?</p>",
+        "id": 261019704,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636563616
+    },
+    {
+        "content": "<p>The answer is actually complicated.</p>",
+        "id": 261020386,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636563859
+    },
+    {
+        "content": "<p>It depends on whether the function has a parameter that is either a scalable vector or predicate register or whether it returns one.</p>",
+        "id": 261020557,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636563932
+    },
+    {
+        "content": "<p>If the answer to both questions is no, then the function can be treated as if it has no awareness of SVE at all, at least with respect to ABI issues.</p>",
+        "id": 261020954,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564092
+    },
+    {
+        "content": "<p>That is, only <code>d8</code> - <code>d15</code> are callee-saved.</p>",
+        "id": 261021229,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564229
+    },
+    {
+        "content": "<p>Otherwise <code>z8</code> - <code>z23</code> and <code>p4</code> - <code>p15</code> are callee-saved.</p>",
+        "id": 261021767,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564466
+    },
+    {
+        "content": "<p>There is a further complication - all predicate registers are not equivalent.</p>",
+        "id": 261022016,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564564
+    },
+    {
+        "content": "<p>Only the first 8 can be used to control an operation, i.e. as a governing predicate.</p>",
+        "id": 261022113,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564601
+    },
+    {
+        "content": "<p>This is very interesting indeed! The last constraint sounds like a bit of a challenge; I imagine some lowerings will require a first-8 pred reg and others can take any? So that's two overlapping classes as well</p>",
+        "id": 261022337,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636564695
+    },
+    {
+        "content": "<p>So, we may actually need 2 register classes for predicate registers - one for governing predicates and another for the rest.</p>",
+        "id": 261022391,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564709
+    },
+    {
+        "content": "<p>A simpler option is to just forget about the existence of <code>p8</code> - <code>p15</code>.</p>",
+        "id": 261022479,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564750
+    },
+    {
+        "content": "<p>that would do for a prototype, yep</p>",
+        "id": 261022508,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636564764
+    },
+    {
+        "content": "<p>next question -- can predicates be spilled relatively cheaply or is that more like a \"materialize the flags by transferring to an int reg\" operation that's costly?</p>",
+        "id": 261022542,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636564785
+    },
+    {
+        "content": "<p>No need to do anything like that.</p>",
+        "id": 261022747,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564855
+    },
+    {
+        "content": "<p>ok, so it sounds like we can just treat this like a separate class; so the hardest part is knowing how wide one needs to spill for vector regs</p>",
+        "id": 261022866,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636564909
+    },
+    {
+        "content": "<p>The only issue is that there aren't any auto-decrementing (or incrementing) addressing modes.</p>",
+        "id": 261022939,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564925
+    },
+    {
+        "content": "<p>Ah, good to know; relevant for prologue code I guess</p>",
+        "id": 261022981,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636564942
+    },
+    {
+        "content": "<p>However, there are instructions that increment or decrement by the size of a scalable vector or predicate register.</p>",
+        "id": 261023107,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636564994
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"421408\">@Sam Parker</span> so it sounds like the simplest design for a prototype would be (i) one reg class for both Vn and Zn regs, (i) separate reg class for Pn regs, (iii) use the type to know how much of a Vn/Zn reg to spill, as that's reliable <em>for now</em>; and (iv) we can figure out overlapping classes in due time. Sounds reasonable?</p>",
+        "id": 261023120,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636565003
+    },
+    {
+        "content": "<p>Coming back to the predicate registers - one feature that would be nice if the register allocator supports it is if it could \"spill\" a governing predicate register to another predicate register that can't be a governing predicate.</p>",
+        "id": 261023436,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636565138
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span>  Yes, this sounds like the only option really, and not too bad if we have reliable type info. Thanks!</p>",
+        "id": 261023570,
+        "sender_full_name": "Sam Parker",
+        "timestamp": 1636565172
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"300050\">@Anton Kirilov</span> that's an interesting idea, sort of like a multi-tiered spill -- \"this class is best, if not then that class, if not then spill to stack\"</p>",
+        "id": 261023661,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636565210
+    },
+    {
+        "content": "<p>needs some thought :-)</p>",
+        "id": 261023677,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1636565213
+    },
+    {
+        "content": "<p>That's pretty much the use case for the last 8 predicate registers - storage space.</p>",
+        "id": 261023759,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636565241
+    },
+    {
+        "content": "<p>As I said, we could simply forget about their existence in an initial implementation, but then the cost would be potentially more spilling to the stack.</p>",
+        "id": 261023904,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1636565289
+    },
+    {
+        "content": "<p>If we're going to have multi-tiered spilling then something that can be generally helpful is spilling integer registers to FP registers. This is actually recommended by the ARM CPU optimization guides since int &lt;&gt; fp transfers are faster than int &lt;&gt; mem transfers. I believe this is also the case on x86.</p>",
+        "id": 261027930,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1636566866
+    },
+    {
+        "content": "<p>Though I have tried this previously, on older cores, and it didn't help - but doesn't mean we shouldn't try again though.</p>",
+        "id": 261115869,
+        "sender_full_name": "Sam Parker",
+        "timestamp": 1636626575
+    }
+]

@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>So in <a href=\"https://github.com/bytecodealliance/regalloc2/issues/145\">https://github.com/bytecodealliance/regalloc2/issues/145</a> , we see that RA2 will give the error TooManyLiveRegs when all registers are clobbered and there are non-fixed uses. What this doesn't bring up is the interaction between different register classes.</p>\n<p>If all registers in class <code>Int</code> are clobbered, but there are non-fixed uses in class <code>Vector</code> or <code>Float</code>, we reach the panic at src\\ion\\process.rs:1266:17 claiming \"Could not allocate minimal bundle, but the allocation problem should be possible to solve\". </p>\n<p>A simple example of a pseudo instruction on x87 that would cause this would be something that clobbers all x86 GPRs(RAX-R15) and then has unfixed uses of a float using xmm registers.</p>\n<p>It's not entirely clear to me how this could happen seeing as how the different classes should be entirely disjoint. If someone familiar with RA2 could clue me in then maybe I can take a stab at solving this issue.</p>\n<p>Also, in general I'd like more info as to what this panic means.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/regalloc2/issues/145\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/e5cb03e43a6b40cfd6578fea5a405ea60f333fd0/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f373139336534336666613963393166363762346561383230386234336430656534303863333830306638373062656333333961383064633233323866376636312f62797465636f6465616c6c69616e63652f726567616c6c6f63322f6973737565732f313435&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/regalloc2/issues/145\" title=\"Support instructions that clobber all registers and have non-fixed uses · Issue #145 · bytecodealliance/regalloc2\">Support instructions that clobber all registers and have non-fixed uses · Issue #145 · bytecodealliance/regalloc2</a></div><div class=\"message_embed_description\">There are currently special cases for when an instruction uses a fixed register and clobbers it, but when an instruction uses an unconstrained register and clobbers all registers there is no specia...</div></div></div>",
+        "id": 467651889,
+        "sender_full_name": "Leaves",
+        "timestamp": 1725480921
+    },
+    {
+        "content": "<p>That whole clump of logic is attempting to help early-out the fuzzer when it generates an impossible problem. However, in general, if you have too many live registers and after splitting into minimal pieces we still can't fit, that's still a user error.</p>\n<p>In other words, don't read too much into exactly what the failure mode is: it's still an invalid input to have all regs clobbered <em>and</em> some of those regs required</p>",
+        "id": 467654424,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1725481836
+    },
+    {
+        "content": "<p>if you're saying that all regs occupied in on class causes a panic when attempting to allocate another class -- that's surprising, and I'd love a root-cause analysis and fix.</p>",
+        "id": 467654538,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1725481885
+    },
+    {
+        "content": "<p>(in general my advice is the same as before: any use of RA2 that is unlike Cranelift's use is at best unsupported, so the level of help here is mostly going to be \"you're on your own, happy to review PRs\", also because our time is extremely limited, sorry)</p>",
+        "id": 467654697,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1725481927
+    },
+    {
+        "content": "<p>A bit more context just in case something jumps out. I have an instruction that is equivalent to a parallel move of the 8 byte value in the lower 8 bytes an XMM register into all 15 available GPRs(15 because RSP is not included). There are 16 XMMs available for allocation in the <code>RegClass::Float</code> class and 15 GPRs available for allocation in <code>RegClass::Int</code></p>\n<p>There are a total of 16 operands, the latter 15 of which completely exhaust and clobber all of the <code>RegClass::Int</code> space.<br>\n<code>Operand 1</code>: RegClass::Float, OperandConstraint::Reg, EarlyUse<br>\n<code>Operands 2-16</code>: RegClass::Int, OperandConstraint::FixedReg(GPR), LateDef</p>\n<p>A function with a single basic block containing only this instruction and a RET causes the panic to be reached, and I am perplexed as to why.</p>",
+        "id": 467656162,
+        "sender_full_name": "Leaves",
+        "timestamp": 1725482505
+    },
+    {
+        "content": "<p>Not sure, sorry, and unable to dedicate the time to debug. If you work it out, happy to take a PR</p>",
+        "id": 467656406,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1725482611
+    },
+    {
+        "content": "<p>As long as nothing immediately jumps out at you as to why, I will go dig deep into it. <span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span></p>",
+        "id": 467656545,
+        "sender_full_name": "Leaves",
+        "timestamp": 1725482667
+    },
+    {
+        "content": "<p>In the process of working on this, I've discovered other reasons this panic occurs.</p>\n<p>If there are reused operands, all early uses will have their positions set to after the instruction. However, if the early use is fixed, and there is a fixed late def or clobber of the same register, this panic is triggered.</p>\n<p>I'm in the process of only shifting early uses fixed reg uses positions to \"after\" the instruction if there is not a clobber or late fixed def of the same preg.</p>",
+        "id": 468044143,
+        "sender_full_name": "Leaves",
+        "timestamp": 1725591877
+    },
+    {
+        "content": "<p>my thought process is:</p>\n<ul>\n<li>since there is already a late def or clobber of the preg, the reuse operand won't allocate it.</li>\n<li>the shift of the fixed early use to the late(after) position is creating an unsatisfiable constraint unnecessarily.</li>\n</ul>",
+        "id": 468044615,
+        "sender_full_name": "Leaves",
+        "timestamp": 1725592046
+    },
+    {
+        "content": "<p>submitted this.<br>\n<a href=\"https://github.com/bytecodealliance/regalloc2/pull/190\">https://github.com/bytecodealliance/regalloc2/pull/190</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/regalloc2/pull/190\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/a8d437bd46df336109d191ca9c874805530b768e/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f336137613235366561363933373062356235376166646230643239363036306436633131393662663331633831636161333536643165323138613062306234372f62797465636f6465616c6c69616e63652f726567616c6c6f63322f70756c6c2f313930&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/regalloc2/pull/190\" title=\"Stop moving Early FixedReg Use operands in certain conditions when Reuse operands are present. by Iizerd · Pull Request #190 · bytecodealliance/regalloc2\">Stop moving Early FixedReg Use operands in certain conditions when Reuse operands are present. by Iizerd · Pull Request #190 · bytecodealliance/regalloc2</a></div><div class=\"message_embed_description\">One of the reasons for the panic at here is that Early FixedReg Uses are having their position updated to Late when there is already a Late FixedReg Def or clobber of the fixed PReg. This fixes tha...</div></div></div>",
+        "id": 468270516,
+        "sender_full_name": "Leaves",
+        "timestamp": 1725649703
+    }
+]

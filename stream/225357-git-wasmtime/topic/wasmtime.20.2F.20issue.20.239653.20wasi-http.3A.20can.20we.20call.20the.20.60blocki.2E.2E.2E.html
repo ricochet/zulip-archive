@@ -1,0 +1,418 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #9653 wasi-http: can we call the `blocki... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239653.20wasi-http.3A.20can.20we.20call.20the.20.60blocki.2E.2E.2E.html">wasmtime / issue #9653 wasi-http: can we call the `blocki...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="483858967"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239653%20wasi-http%3A%20can%20we%20call%20the%20%60blocki.../near/483858967" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239653.20wasi-http.3A.20can.20we.20call.20the.20.60blocki.2E.2E.2E.html#483858967">(Nov 22 2024 at 08:28)</a>:</h4>
+<p>iawia002 opened <a href="https://github.com/bytecodealliance/wasmtime/issues/9653">issue #9653</a>:</p>
+<blockquote>
+<p>My scenario is simple: I want to send a request with a large body, but the <code>blocking_write_and_flush</code> method can only write 4096 bytes at a time. Naturally, I decided to call this method multiple times to write the entire body:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="n">req</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">OutgoingRequest</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="o">..</span><span class="p">.);</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="n">outgoing_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">req</span><span class="p">.</span><span class="n">body</span><span class="p">().</span><span class="n">unwarp</span><span class="p">();</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">request_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_body</span><span class="p">.</span><span class="n">write</span><span class="p">().</span><span class="n">unwarp</span><span class="p">();</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">buf</span><span class="p">.</span><span class="n">chunks</span><span class="p">(</span><span class="mi">4096</span><span class="p">);</span>
+<span class="k">for</span><span class="w"> </span><span class="n">chunk</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">request_body</span><span class="p">.</span><span class="n">blocking_write_and_flush</span><span class="p">(</span><span class="n">chunk</span><span class="p">).</span><span class="n">expect</span><span class="p">(</span><span class="s">"writing response"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="n">OutgoingBody</span><span class="p">::</span><span class="n">finish</span><span class="p">(</span><span class="n">outgoing_body</span><span class="p">,</span><span class="w"> </span><span class="nb">None</span><span class="p">).</span><span class="n">unwarp</span><span class="p">();</span>
+</code></pre></div>
+<p>However, I found that the program gets stuck forever on the second call to <code>blocking_write_and_flush</code>. After debugging, I found that it actually gets stuck during the <code>ready</code> check in the second call:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/5af89308dc0229ca404cd7000eec694201022e2d/crates/wasi-http/src/body.rs#L662-L669">https://github.com/bytecodealliance/wasmtime/blob/5af89308dc0229ca404cd7000eec694201022e2d/crates/wasi-http/src/body.rs#L662-L669</a></p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/5af89308dc0229ca404cd7000eec694201022e2d/crates/wasi-http/src/body.rs#L472">https://github.com/bytecodealliance/wasmtime/blob/5af89308dc0229ca404cd7000eec694201022e2d/crates/wasi-http/src/body.rs#L472</a></p>
+<p>At this point, the writer has no capacity left, but my writing process hasn't finished, so the reader hasn't started consuming the data (?).</p>
+<p>For my issue, I could stop using this method and instead combine <code>check-write</code>, <code>subscribe</code>, <code>write</code>, and <code>flush</code> manually to solve it. However, I'm curious whether we are inclined to allow or not allow this behavior. Because the current behavior is strange—the program doesn't report an error, it just hangs indefinitely.</p>
+</blockquote>
+
+
+
+<a name="483948316"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239653%20wasi-http%3A%20can%20we%20call%20the%20%60blocki.../near/483948316" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239653.20wasi-http.3A.20can.20we.20call.20the.20.60blocki.2E.2E.2E.html#483948316">(Nov 22 2024 at 16:36)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/wasmtime/issues/9653#issuecomment-2494174314">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9653">issue #9653</a>:</p>
+<blockquote>
+<p>Your program getting hung forever on the second <code>blocking_write_and_flush</code> is a bug - you should be able to call that as many times as you want, though it may be less efficient than using check-write/write.</p>
+<p>Can you provide a .wasm that reproduces this with the wasmtime cli and we can work on getting it fixed?</p>
+</blockquote>
+
+
+
+<a name="484198340"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239653%20wasi-http%3A%20can%20we%20call%20the%20%60blocki.../near/484198340" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239653.20wasi-http.3A.20can.20we.20call.20the.20.60blocki.2E.2E.2E.html#484198340">(Nov 25 2024 at 02:06)</a>:</h4>
+<p>iawia002 <a href="https://github.com/bytecodealliance/wasmtime/issues/9653#issuecomment-2496527339">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9653">issue #9653</a>:</p>
+<blockquote>
+<blockquote>
+<p>you should be able to call that as many times as you want, though it may be less efficient than using check-write/write.</p>
+</blockquote>
+<p>Agree. Here is a program that reproduces this issue:</p>
+<p><a href="https://github.com/user-attachments/files/17896199/http.wasm.zip">http.wasm.zip</a></p>
+<p>Source code:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">wasi</span><span class="p">::{</span>
+<span class="w">    </span><span class="n">http</span><span class="p">::{</span>
+<span class="w">        </span><span class="n">outgoing_handler</span><span class="p">,</span>
+<span class="w">        </span><span class="n">types</span><span class="p">::{</span><span class="n">Fields</span><span class="p">,</span><span class="w"> </span><span class="n">Method</span><span class="p">,</span><span class="w"> </span><span class="n">OutgoingBody</span><span class="p">,</span><span class="w"> </span><span class="n">RequestOptions</span><span class="p">,</span><span class="w"> </span><span class="n">Scheme</span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="n">io</span><span class="p">::</span><span class="n">streams</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="n">wasi</span><span class="p">::</span><span class="n">cli</span><span class="p">::</span><span class="n">command</span><span class="p">::</span><span class="n">export</span><span class="o">!</span><span class="p">(</span><span class="n">Example</span><span class="p">);</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">Example</span><span class="p">;</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">wasi</span><span class="p">::</span><span class="n">exports</span><span class="p">::</span><span class="n">cli</span><span class="p">::</span><span class="n">run</span><span class="p">::</span><span class="n">Guest</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Example</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">run</span><span class="p">()</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="p">()</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">fields</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Fields</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">outgoing_request</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_handler</span><span class="p">::</span><span class="n">OutgoingRequest</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">fields</span><span class="p">);</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_method</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Method</span><span class="p">::</span><span class="n">Post</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_scheme</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Scheme</span><span class="p">::</span><span class="n">Https</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_authority</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="s">"httpbin.org"</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_path_with_query</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="s">"/post"</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">outgoing_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">body</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="mi">5000</span><span class="p">];</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">request_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_body</span><span class="p">.</span><span class="n">write</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">body</span><span class="p">.</span><span class="n">chunks</span><span class="p">(</span><span class="mi">4096</span><span class="p">);</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">chunk</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">request_body</span>
+<span class="w">                </span><span class="p">.</span><span class="n">blocking_write_and_flush</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span>
+<span class="w">                </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"writing response"</span><span class="p">);</span>
+<span class="w">            </span><span class="fm">println!</span><span class="p">(</span><span class="s">"writing response"</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">request_body</span><span class="p">);</span>
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"finished"</span><span class="p">);</span>
+<span class="w">        </span><span class="n">OutgoingBody</span><span class="p">::</span><span class="n">finish</span><span class="p">(</span><span class="n">outgoing_body</span><span class="p">,</span><span class="w"> </span><span class="nb">None</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">RequestOptions</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">future_response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_handler</span><span class="p">::</span><span class="n">handle</span><span class="p">(</span><span class="n">outgoing_request</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">options</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">incoming_response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">future_response</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">result</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">unwrap</span><span class="p">(),</span>
+<span class="w">            </span><span class="nb">None</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">pollable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">future_response</span><span class="p">.</span><span class="n">subscribe</span><span class="p">();</span>
+<span class="w">                </span><span class="n">pollable</span><span class="p">.</span><span class="n">block</span><span class="p">();</span>
+
+<span class="w">                </span><span class="n">future_response</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">get</span><span class="p">()</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"incoming response available"</span><span class="p">)</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">unwrap</span><span class="p">()</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="p">.</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">future_response</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">incoming_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming_response</span><span class="p">.</span><span class="n">consume</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">incoming_response</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">input_stream</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming_body</span><span class="p">.</span><span class="n">stream</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">input_stream_pollable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input_stream</span><span class="p">.</span><span class="n">subscribe</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Vec</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="k">loop</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">input_stream_pollable</span><span class="p">.</span><span class="n">block</span><span class="p">();</span>
+
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">body_chunk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">input_stream</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="nb">Ok</span><span class="p">(</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">c</span><span class="p">,</span>
+<span class="w">                </span><span class="nb">Err</span><span class="p">(</span><span class="n">streams</span><span class="p">::</span><span class="n">StreamError</span><span class="p">::</span><span class="n">Closed</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">break</span><span class="p">,</span>
+<span class="w">                </span><span class="nb">Err</span><span class="p">(</span><span class="n">e</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="fm">panic!</span><span class="p">(</span><span class="s">"input_stream read failed: {e:?}"</span><span class="p">),</span>
+<span class="w">            </span><span class="p">};</span>
+
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">body_chunk</span><span class="p">.</span><span class="n">is_empty</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">body</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">body_chunk</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"body: {}"</span><span class="p">,</span><span class="w"> </span><span class="nb">String</span><span class="p">::</span><span class="n">from_utf8</span><span class="p">(</span><span class="n">body</span><span class="p">).</span><span class="n">unwrap</span><span class="p">());</span>
+<span class="w">        </span><span class="nb">Ok</span><span class="p">(())</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">$</span><span class="w"> </span><span class="n">wasmtime</span><span class="w"> </span><span class="o">-</span><span class="n">S</span><span class="w"> </span><span class="n">http</span><span class="w"> </span><span class="n">target</span><span class="o">/</span><span class="n">wasm32</span><span class="o">-</span><span class="n">wasip2</span><span class="o">/</span><span class="n">debug</span><span class="o">/</span><span class="n">http</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="n">writing</span><span class="w"> </span><span class="n">response</span><span class="w">  </span><span class="c1">// &lt;- hung forever here</span>
+</code></pre></div>
+<blockquote>
+<p>At this point, the writer has no capacity left, but my writing process hasn't finished, so the reader hasn't started consuming the data (?).</p>
+</blockquote>
+<p>I'm not sure if my assumption is correct. This issue could be easily resolved by using an <code>unbounded_channel</code> or increasing the channel's capacity. If that's the case, I can submit a patch to fix it. However, I'm not certain if this is the most efficient solution.</p>
+</blockquote>
+
+
+
+<a name="484792041"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239653%20wasi-http%3A%20can%20we%20call%20the%20%60blocki.../near/484792041" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239653.20wasi-http.3A.20can.20we.20call.20the.20.60blocki.2E.2E.2E.html#484792041">(Nov 27 2024 at 20:11)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/wasmtime/issues/9653#issuecomment-2504699703">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9653">issue #9653</a>:</p>
+<blockquote>
+<p>Thanks for providing the reproduction. I just spent time looking into this.</p>
+<p>The purpose of the bounds on the OutgoingBody OutputStream writer's buffer size and channel depth is to allow the host to maintain backpressure from the HTTP connection to the wasi stream. Backpressure only works when buffering is finite, so an unbounded_channel would break that. I agree we should go back and make the amount of buffering configurable as you saw from the TODOs removed in #9670.</p>
+<p>However, since buffering will always be finite, raising the bound doesn't resolve the issue with your guest code here, it just lifts the threshold where it hits. Currently, your guest makes the incorrect assumption that the wasi-http implementation will buffer the entire outgoing body prior to sending the request. The wasmtime wasi-http implementation will presently buffer up to 1 chunk of 1MB, but those limits are allowed to vary between implementations (and will more easily, once we land the configurability in #9670). Your guest must tolerate buffering as little as 1 chunk of 4k (the minimum guaranteed by a call to <code>blocking_write_and_flush</code>) before encountering backpressure (where <code>blocking_write_and_flush</code>'s implementation awaits until the stream is ready for more writes).</p>
+<p>However, backpressure cannot be relieved until the request is sent. You should restructure your guest to first send the <code>outgoing-request</code> (which will initiate the HTTP connection and send the method, path and query, and headers) and then start writing to the body stream:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">wasi</span><span class="p">::{</span>
+<span class="w">    </span><span class="n">http</span><span class="p">::{</span>
+<span class="w">        </span><span class="n">outgoing_handler</span><span class="p">,</span>
+<span class="w">        </span><span class="n">types</span><span class="p">::{</span><span class="n">Fields</span><span class="p">,</span><span class="w"> </span><span class="n">Method</span><span class="p">,</span><span class="w"> </span><span class="n">OutgoingBody</span><span class="p">,</span><span class="w"> </span><span class="n">RequestOptions</span><span class="p">,</span><span class="w"> </span><span class="n">Scheme</span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="n">io</span><span class="p">::</span><span class="n">streams</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="n">wasi</span><span class="p">::</span><span class="n">cli</span><span class="p">::</span><span class="n">command</span><span class="p">::</span><span class="n">export</span><span class="o">!</span><span class="p">(</span><span class="n">Example</span><span class="p">);</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">Example</span><span class="p">;</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">wasi</span><span class="p">::</span><span class="n">exports</span><span class="p">::</span><span class="n">cli</span><span class="p">::</span><span class="n">run</span><span class="p">::</span><span class="n">Guest</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Example</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">run</span><span class="p">()</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="p">()</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">fields</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Fields</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">outgoing_request</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_handler</span><span class="p">::</span><span class="n">OutgoingRequest</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">fields</span><span class="p">);</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_method</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Method</span><span class="p">::</span><span class="n">Post</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_scheme</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Scheme</span><span class="p">::</span><span class="n">Https</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_authority</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="s">"httpbin.org"</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_path_with_query</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="s">"/post"</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">outgoing_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">body</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"sending request"</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">RequestOptions</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">future_response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_handler</span><span class="p">::</span><span class="n">handle</span><span class="p">(</span><span class="n">outgoing_request</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">options</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="mi">5000</span><span class="p">];</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">request_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_body</span><span class="p">.</span><span class="n">write</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">body</span><span class="p">.</span><span class="n">chunks</span><span class="p">(</span><span class="mi">4096</span><span class="p">);</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">chunk</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">request_body</span>
+<span class="w">                </span><span class="p">.</span><span class="n">blocking_write_and_flush</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span>
+<span class="w">                </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"writing request body"</span><span class="p">);</span>
+<span class="w">            </span><span class="fm">println!</span><span class="p">(</span><span class="s">"wrote {} of request body"</span><span class="p">,</span><span class="w"> </span><span class="n">chunk</span><span class="p">.</span><span class="n">len</span><span class="p">());</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">request_body</span><span class="p">);</span>
+<span class="w">        </span><span class="n">OutgoingBody</span><span class="p">::</span><span class="n">finish</span><span class="p">(</span><span class="n">outgoing_body</span><span class="p">,</span><span class="w"> </span><span class="nb">None</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"finished with request body"</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">incoming_response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">future_response</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">result</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">unwrap</span><span class="p">(),</span>
+<span class="w">            </span><span class="nb">None</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">pollable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">future_response</span><span class="p">.</span><span class="n">subscribe</span><span class="p">();</span>
+<span class="w">                </span><span class="n">pollable</span><span class="p">.</span><span class="n">block</span><span class="p">();</span>
+
+<span class="w">                </span><span class="n">future_response</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">get</span><span class="p">()</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"incoming response available"</span><span class="p">)</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">unwrap</span><span class="p">()</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="p">.</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">future_response</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">incoming_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming_response</span><span class="p">.</span><span class="n">consume</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">incoming_response</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">input_stream</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming_body</span><span class="p">.</span><span class="n">stream</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">input_stream_pollable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input_stream</span><span class="p">.</span><span class="n">subscribe</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Vec</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="k">loop</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">input_stream_pollable</span><span class="p">.</span><span class="n">block</span><span class="p">();</span>
+
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">body_chunk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">input_stream</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="nb">Ok</span><span class="p">(</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">c</span><span class="p">,</span>
+<span class="w">                </span><span class="nb">Err</span><span class="p">(</span><span class="n">streams</span><span class="p">::</span><span class="n">StreamError</span><span class="p">::</span><span class="n">Closed</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">break</span><span class="p">,</span>
+<span class="w">                </span><span class="nb">Err</span><span class="p">(</span><span class="n">e</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="fm">panic!</span><span class="p">(</span><span class="s">"input_stream read failed: {e:?}"</span><span class="p">),</span>
+<span class="w">            </span><span class="p">};</span>
+
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">body_chunk</span><span class="p">.</span><span class="n">is_empty</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">body</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">body_chunk</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"body: {}"</span><span class="p">,</span><span class="w"> </span><span class="nb">String</span><span class="p">::</span><span class="n">from_utf8</span><span class="p">(</span><span class="n">body</span><span class="p">).</span><span class="n">unwrap</span><span class="p">());</span>
+<span class="w">        </span><span class="nb">Ok</span><span class="p">(())</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
+</code></pre></div>
+<p><div class="codehilite" data-code-language="Bash"><pre><span></span><code>%<span class="w"> </span>wasmtime<span class="w"> </span>run<span class="w"> </span>-Shttp<span class="w"> </span>target/wasm32-wasip2/debug/issue9653.wasm
+sending<span class="w"> </span>request
+wrote<span class="w"> </span><span class="m">4096</span><span class="w"> </span>of<span class="w"> </span>request<span class="w"> </span>body
+wrote<span class="w"> </span><span class="m">904</span><span class="w"> </span>of<span class="w"> </span>request<span class="w"> </span>body
+finished<span class="w"> </span>with<span class="w"> </span>request<span class="w"> </span>body
+body:<span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="s2">"args"</span>:<span class="w"> </span><span class="o">{}</span>,
+<span class="w">  </span><span class="s2">"data"</span>:<span class="w"> </span><span class="s2">"\u0000\u0000\u0000\u0000\u0000\...snipped..."</span>,
+<span class="w">  </span><span class="s2">"files"</span>:<span class="w"> </span><span class="o">{}</span>,
+<span class="w">  </span><span class="s2">"form"</span>:<span class="w"> </span><span class="o">{}</span>,
+<span class="w">  </span><span class="s2">"headers"</span>:<span class="w"> </span><span class="o">{</span>
+<span class="w">    </span><span class="s2">"Host"</span>:<span class="w"> </span><span class="s2">"httpbin.org"</span>,
+<span class="w">    </span><span class="s2">"Transfer-Encoding"</span>:<span class="w"> </span><span class="s2">"chunked"</span>,
+<span class="w">    </span><span class="s2">"X-Amzn-Trace-Id"</span>:<span class="w"> </span><span class="s2">"Root=1-67477cb9-73a49f517d15aafc1afb91e7"</span>
+<span class="w">  </span><span class="o">}</span>,
+<span class="w">  </span><span class="s2">"json"</span>:<span class="w"> </span>null,
+<span class="w">  </span><span class="s2">"origin"</span>:<span class="w"> </span><span class="s2">"98.232.174.29"</span>,
+<span class="w">  </span><span class="s2">"url"</span>:<span class="w"> </span><span class="s2">"https://httpbin.org/post"</span>
+<span class="o">}</span>
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="484793332"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239653%20wasi-http%3A%20can%20we%20call%20the%20%60blocki.../near/484793332" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239653.20wasi-http.3A.20can.20we.20call.20the.20.60blocki.2E.2E.2E.html#484793332">(Nov 27 2024 at 20:22)</a>:</h4>
+<p>pchickey edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/9653#issuecomment-2504699703">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/9653">issue #9653</a>:</p>
+<blockquote>
+<p>Thanks for providing the reproduction. I just spent time looking into this.</p>
+<p>The purpose of the bounds on the OutgoingBody OutputStream writer's buffer size and channel depth is to allow the host to maintain backpressure from the HTTP connection to the wasi stream. Backpressure only works when buffering is finite, so an unbounded_channel would break that. I agree we should go back and make the amount of buffering configurable as you saw from the TODOs removed in #9670.</p>
+<p>However, since buffering will always be finite, raising the bound doesn't resolve the issue with your guest code here, it just lifts the threshold where it hits. Currently, your guest makes the incorrect assumption that the wasi-http implementation will buffer the entire outgoing body prior to sending the request. The wasmtime wasi-http implementation will presently buffer up to 1 chunk of 1MB, but those limits are allowed to vary between implementations (and will more easily, once we land the configurability in #9670). Your guest must tolerate buffering as little as 1 chunk of 4k (the minimum guaranteed by a call to <code>blocking_write_and_flush</code>) before encountering backpressure (where <code>blocking_write_and_flush</code>'s implementation awaits until the stream is ready for more writes).</p>
+<p>However, backpressure cannot be relieved until the request is sent. You should restructure your guest to first send the <code>outgoing-request</code> (which will initiate the HTTP connection and send the method, path and query, and headers) and then start writing to the body stream.</p>
+<p>You can't be blamed from having made this mistake, since none of the docs really cover it (afaik), our own <code>test_programs::http::request</code> contains the exact same bug and just don't exercise large enough bodies to hit it.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">wasi</span><span class="p">::{</span>
+<span class="w">    </span><span class="n">http</span><span class="p">::{</span>
+<span class="w">        </span><span class="n">outgoing_handler</span><span class="p">,</span>
+<span class="w">        </span><span class="n">types</span><span class="p">::{</span><span class="n">Fields</span><span class="p">,</span><span class="w"> </span><span class="n">Method</span><span class="p">,</span><span class="w"> </span><span class="n">OutgoingBody</span><span class="p">,</span><span class="w"> </span><span class="n">RequestOptions</span><span class="p">,</span><span class="w"> </span><span class="n">Scheme</span><span class="p">},</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="n">io</span><span class="p">::</span><span class="n">streams</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="n">wasi</span><span class="p">::</span><span class="n">cli</span><span class="p">::</span><span class="n">command</span><span class="p">::</span><span class="n">export</span><span class="o">!</span><span class="p">(</span><span class="n">Example</span><span class="p">);</span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">Example</span><span class="p">;</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">wasi</span><span class="p">::</span><span class="n">exports</span><span class="p">::</span><span class="n">cli</span><span class="p">::</span><span class="n">run</span><span class="p">::</span><span class="n">Guest</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Example</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">run</span><span class="p">()</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="p">()</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">fields</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Fields</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">outgoing_request</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_handler</span><span class="p">::</span><span class="n">OutgoingRequest</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">fields</span><span class="p">);</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_method</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Method</span><span class="p">::</span><span class="n">Post</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_scheme</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Scheme</span><span class="p">::</span><span class="n">Https</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_authority</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="s">"httpbin.org"</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">set_path_with_query</span><span class="p">(</span><span class="nb">Some</span><span class="p">(</span><span class="s">"/post"</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">outgoing_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_request</span><span class="p">.</span><span class="n">body</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"sending request"</span><span class="p">);</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">RequestOptions</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">future_response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_handler</span><span class="p">::</span><span class="n">handle</span><span class="p">(</span><span class="n">outgoing_request</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">options</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="mi">5000</span><span class="p">];</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">request_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_body</span><span class="p">.</span><span class="n">write</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">body</span><span class="p">.</span><span class="n">chunks</span><span class="p">(</span><span class="mi">4096</span><span class="p">);</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">chunk</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">request_body</span>
+<span class="w">                </span><span class="p">.</span><span class="n">blocking_write_and_flush</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span>
+<span class="w">                </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"writing request body"</span><span class="p">);</span>
+<span class="w">            </span><span class="fm">println!</span><span class="p">(</span><span class="s">"wrote {} of request body"</span><span class="p">,</span><span class="w"> </span><span class="n">chunk</span><span class="p">.</span><span class="n">len</span><span class="p">());</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">request_body</span><span class="p">);</span>
+<span class="w">        </span><span class="n">OutgoingBody</span><span class="p">::</span><span class="n">finish</span><span class="p">(</span><span class="n">outgoing_body</span><span class="p">,</span><span class="w"> </span><span class="nb">None</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"finished with request body"</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">incoming_response</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">future_response</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">result</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">result</span><span class="p">.</span><span class="n">unwrap</span><span class="p">(),</span>
+<span class="w">            </span><span class="nb">None</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">pollable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">future_response</span><span class="p">.</span><span class="n">subscribe</span><span class="p">();</span>
+<span class="w">                </span><span class="n">pollable</span><span class="p">.</span><span class="n">block</span><span class="p">();</span>
+
+<span class="w">                </span><span class="n">future_response</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">get</span><span class="p">()</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">"incoming response available"</span><span class="p">)</span>
+<span class="w">                    </span><span class="p">.</span><span class="n">unwrap</span><span class="p">()</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="p">.</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">future_response</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">incoming_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming_response</span><span class="p">.</span><span class="n">consume</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">        </span><span class="nb">drop</span><span class="p">(</span><span class="n">incoming_response</span><span class="p">);</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">input_stream</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming_body</span><span class="p">.</span><span class="n">stream</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">input_stream_pollable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">input_stream</span><span class="p">.</span><span class="n">subscribe</span><span class="p">();</span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Vec</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="w">        </span><span class="k">loop</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">input_stream_pollable</span><span class="p">.</span><span class="n">block</span><span class="p">();</span>
+
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">body_chunk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">input_stream</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="nb">Ok</span><span class="p">(</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">c</span><span class="p">,</span>
+<span class="w">                </span><span class="nb">Err</span><span class="p">(</span><span class="n">streams</span><span class="p">::</span><span class="n">StreamError</span><span class="p">::</span><span class="n">Closed</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">break</span><span class="p">,</span>
+<span class="w">                </span><span class="nb">Err</span><span class="p">(</span><span class="n">e</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="fm">panic!</span><span class="p">(</span><span class="s">"input_stream read failed: {e:?}"</span><span class="p">),</span>
+<span class="w">            </span><span class="p">};</span>
+
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">body_chunk</span><span class="p">.</span><span class="n">is_empty</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="n">body</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">body_chunk</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"body: {}"</span><span class="p">,</span><span class="w"> </span><span class="nb">String</span><span class="p">::</span><span class="n">from_utf8</span><span class="p">(</span><span class="n">body</span><span class="p">).</span><span class="n">unwrap</span><span class="p">());</span>
+<span class="w">        </span><span class="nb">Ok</span><span class="p">(())</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
+</code></pre></div>
+<p><div class="codehilite" data-code-language="Bash"><pre><span></span><code>%<span class="w"> </span>wasmtime<span class="w"> </span>run<span class="w"> </span>-Shttp<span class="w"> </span>target/wasm32-wasip2/debug/issue9653.wasm
+sending<span class="w"> </span>request
+wrote<span class="w"> </span><span class="m">4096</span><span class="w"> </span>of<span class="w"> </span>request<span class="w"> </span>body
+wrote<span class="w"> </span><span class="m">904</span><span class="w"> </span>of<span class="w"> </span>request<span class="w"> </span>body
+finished<span class="w"> </span>with<span class="w"> </span>request<span class="w"> </span>body
+body:<span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="s2">"args"</span>:<span class="w"> </span><span class="o">{}</span>,
+<span class="w">  </span><span class="s2">"data"</span>:<span class="w"> </span><span class="s2">"\u0000\u0000\u0000\u0000\u0000\...snipped..."</span>,
+<span class="w">  </span><span class="s2">"files"</span>:<span class="w"> </span><span class="o">{}</span>,
+<span class="w">  </span><span class="s2">"form"</span>:<span class="w"> </span><span class="o">{}</span>,
+<span class="w">  </span><span class="s2">"headers"</span>:<span class="w"> </span><span class="o">{</span>
+<span class="w">    </span><span class="s2">"Host"</span>:<span class="w"> </span><span class="s2">"httpbin.org"</span>,
+<span class="w">    </span><span class="s2">"Transfer-Encoding"</span>:<span class="w"> </span><span class="s2">"chunked"</span>,
+<span class="w">    </span><span class="s2">"X-Amzn-Trace-Id"</span>:<span class="w"> </span><span class="s2">"Root=1-67477cb9-73a49f517d15aafc1afb91e7"</span>
+<span class="w">  </span><span class="o">}</span>,
+<span class="w">  </span><span class="s2">"json"</span>:<span class="w"> </span>null,
+<span class="w">  </span><span class="s2">"origin"</span>:<span class="w"> </span><span class="s2">"98.232.174.29"</span>,
+<span class="w">  </span><span class="s2">"url"</span>:<span class="w"> </span><span class="s2">"https://httpbin.org/post"</span>
+<span class="o">}</span>
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="486185533"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%239653%20wasi-http%3A%20can%20we%20call%20the%20%60blocki.../near/486185533" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.239653.20wasi-http.3A.20can.20we.20call.20the.20.60blocki.2E.2E.2E.html#486185533">(Dec 04 2024 at 21:53)</a>:</h4>
+<p>alexcrichton closed <a href="https://github.com/bytecodealliance/wasmtime/issues/9653">issue #9653</a>:</p>
+<blockquote>
+<p>My scenario is simple: I want to send a request with a large body, but the <code>blocking_write_and_flush</code> method can only write 4096 bytes at a time. Naturally, I decided to call this method multiple times to write the entire body:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="n">req</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">OutgoingRequest</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="o">..</span><span class="p">.);</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="n">outgoing_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">req</span><span class="p">.</span><span class="n">body</span><span class="p">().</span><span class="n">unwarp</span><span class="p">();</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">request_body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">outgoing_body</span><span class="p">.</span><span class="n">write</span><span class="p">().</span><span class="n">unwarp</span><span class="p">();</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">buf</span><span class="p">.</span><span class="n">chunks</span><span class="p">(</span><span class="mi">4096</span><span class="p">);</span>
+<span class="k">for</span><span class="w"> </span><span class="n">chunk</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">chunks</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">request_body</span><span class="p">.</span><span class="n">blocking_write_and_flush</span><span class="p">(</span><span class="n">chunk</span><span class="p">).</span><span class="n">expect</span><span class="p">(</span><span class="s">"writing response"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="n">OutgoingBody</span><span class="p">::</span><span class="n">finish</span><span class="p">(</span><span class="n">outgoing_body</span><span class="p">,</span><span class="w"> </span><span class="nb">None</span><span class="p">).</span><span class="n">unwarp</span><span class="p">();</span>
+</code></pre></div>
+<p>However, I found that the program gets stuck forever on the second call to <code>blocking_write_and_flush</code>. After debugging, I found that it actually gets stuck during the <code>ready</code> check in the second call:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/5af89308dc0229ca404cd7000eec694201022e2d/crates/wasi-http/src/body.rs#L662-L669">https://github.com/bytecodealliance/wasmtime/blob/5af89308dc0229ca404cd7000eec694201022e2d/crates/wasi-http/src/body.rs#L662-L669</a></p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/5af89308dc0229ca404cd7000eec694201022e2d/crates/wasi-http/src/body.rs#L472">https://github.com/bytecodealliance/wasmtime/blob/5af89308dc0229ca404cd7000eec694201022e2d/crates/wasi-http/src/body.rs#L472</a></p>
+<p>At this point, the writer has no capacity left, but my writing process hasn't finished, so the reader hasn't started consuming the data (?).</p>
+<p>For my issue, I could stop using this method and instead combine <code>check-write</code>, <code>subscribe</code>, <code>write</code>, and <code>flush</code> manually to solve it. However, I'm curious whether we are inclined to allow or not allow this behavior. Because the current behavior is strange—the program doesn't report an error, it just hangs indefinitely.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

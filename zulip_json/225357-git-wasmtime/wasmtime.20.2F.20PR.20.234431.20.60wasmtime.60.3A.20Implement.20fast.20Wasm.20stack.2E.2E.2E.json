@@ -1,0 +1,1058 @@
+[
+    {
+        "content": "<p>fitzgen opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>:</p>\n<blockquote>\n<p>Why do we want Wasm stack walking to be fast? Because we capture stacks whenever<br>\nthere is a trap and traps actually happen fairly frequently with short-lived<br>\nprograms and WASI's <code>exit</code>.</p>\n<p>Previously, we would rely on generating the system unwind info (e.g.<br>\n<code>.eh_frame</code>) and using the system unwinder (via the <code>backtrace</code>crate) to walk<br>\nthe full stack and filter out any non-Wasm stack frames. This can,<br>\nunfortunately, be slow for two primary reasons:</p>\n<ol>\n<li>\n<p>The system unwinder is doing <code>O(all-kinds-of-frames)</code> work rather than<br>\n<code>O(wasm-frames)</code> work.</p>\n</li>\n<li>\n<p>System unwind info and the system unwinder need to be much more general than<br>\na purpose-built stack walker for Wasm needs to be. It has to handle any kind of<br>\nstack frame that any compiler might emit where as our Wasm frames are emitted by<br>\nCranelift and always have frame pointers. This translates into implementation<br>\ncomplexity and general overhead. There can also be unnecessary-for-our-use-cases<br>\nglobal synchronization and locks involved, further slowing down stack walking in<br>\nthe presence of multiple threads trying to capture stacks in parallel.</p>\n</li>\n</ol>\n<p>This commit introduces a purpose-built stack walker for traversing just our Wasm<br>\nframes. To find all the sequences of Wasm-to-Wasm stack frames, and ignore<br>\nnon-Wasm stack frames, we keep a linked list of <code>(entry stack pointer, exit\nframe pointer)</code> pairs. This linked list is maintained via Wasm-to-host and<br>\nhost-to-Wasm trampolines. Within a sequence of Wasm-to-Wasm calls, we can use<br>\nframe pointers (which Cranelift preserves) to find the next older Wasm frame on<br>\nthe stack, and we keep doing this until we reach the entry stack pointer,<br>\nmeaning that the next older frame will be a host frame.</p>\n<p>The trampolines need to avoid a couple stumbling blocks. First, they need to be<br>\ncompiled ahead of time, since we may not have access to a compiler at<br>\nruntime (e.g. if the <code>cranelift</code> feature is disabled) but still want to be able<br>\nto call functions that have already been compiled and get stack traces for those<br>\nfunctions. Usually this means we would compile the appropriate trampolines<br>\ninside <code>Module::new</code> and the compiled module object would hold the<br>\ntrampolines. However, we <em>also</em> need to support calling host functions that are<br>\nwrapped into <code>wasmtime::Func</code>s and there doesn't exist <em>any</em> ahead-of-time<br>\ncompiled module object to hold the appropriate trampolines:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"c1\">// Define a host function.</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">func_type</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">FuncType</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"fm\">vec!</span><span class=\"p\">[</span><span class=\"n\">wasmtime</span>::<span class=\"n\">ValType</span>::<span class=\"n\">I32</span><span class=\"p\">],</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"fm\">vec!</span><span class=\"p\">[</span><span class=\"n\">wasmtime</span>::<span class=\"n\">ValType</span>::<span class=\"n\">I32</span><span class=\"p\">],</span><span class=\"w\"></span>\n<span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">func</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Func</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">func_type</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">params</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">results</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// ...</span>\n<span class=\"w\">    </span><span class=\"nb\">Ok</span><span class=\"p\">(())</span><span class=\"w\"></span>\n<span class=\"p\">});</span><span class=\"w\"></span>\n\n<span class=\"c1\">// Call that host function.</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">results</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"fm\">vec!</span><span class=\"p\">[</span><span class=\"n\">wasmtime</span>::<span class=\"n\">Val</span>::<span class=\"n\">I32</span><span class=\"p\">(</span><span class=\"mi\">0</span><span class=\"p\">)];</span><span class=\"w\"></span>\n<span class=\"n\">func</span><span class=\"p\">.</span><span class=\"n\">call</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"p\">[</span><span class=\"n\">wasmtime</span>::<span class=\"n\">Val</span>::<span class=\"n\">I32</span><span class=\"p\">(</span><span class=\"mi\">0</span><span class=\"p\">)],</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">results</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Therefore, we define one host-to-Wasm trampoline and one Wasm-to-host trampoline<br>\nin assembly that work for all Wasm and host function signatures. These<br>\ntrampolines are careful to only use volatile registers, avoid touching any<br>\nregister that is an argument in the calling convention ABI, and tail call to the<br>\ntarget callee function. This allows forwarding any set of arguments and any<br>\nreturns to and from the callee, while also allowing us to maintain our linked<br>\nlist of Wasm stack and frame pointers before transferring control to the<br>\ncallee. These trampolines are not used in Wasm-to-Wasm calls, only when crossing<br>\nthe host-Wasm boundary, so they do not impose overhead on regular calls. (And if<br>\nusing one trampoline for all host-Wasm boundary crossing ever breaks branch<br>\nprediction enough in the CPU to become any kind of bottleneck, we can do fun<br>\nthings like have multiple copies of the same trampoline and choose a random copy<br>\nfor each function, sharding the functions across branch predictor entries.)</p>\n<p>Finally, this commit also ends the use of a synthetic <code>Module</code> and allocating a<br>\nstubbed out <code>VMContext</code> for host functions. Instead, we define a<br>\n<code>VMHostFuncContext</code> with its own magic value, similar to <code>VMComponentContext</code>,<br>\nspecifically for host functions.</p>\n<p>&lt;h2&gt;Benchmarks&lt;/h2&gt;</p>\n<p>&lt;h3&gt;Traps and Stack Traces&lt;/h3&gt;</p>\n<p>Large improvements to taking stack traces on traps, ranging from shaving off 64%<br>\nto 99.95% of the time it used to take.</p>\n<p>&lt;details&gt;</p>\n<p><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">multi</span><span class=\"o\">-</span><span class=\"n\">threaded</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"w\">  </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.5686</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.5808</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.5934</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">0.0000</span><span class=\"w\">  </span><span class=\"n\">elem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">0.0000</span><span class=\"w\">  </span><span class=\"n\">elem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">0.0000</span><span class=\"w\">  </span><span class=\"n\">elem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">85.419</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">85.153</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">84.869</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">560.90</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">573.56</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">585.84</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">8</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">8.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">4</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">4.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">4</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">4.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">severe</span><span class=\"w\"></span>\n<span class=\"n\">multi</span><span class=\"o\">-</span><span class=\"n\">threaded</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">1</span><span class=\"w\">  </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.9021</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.9167</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.9322</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">341.04</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">342.86</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">344.58</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">91.455</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">91.294</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">91.096</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">1023.1</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1048.6</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1070.3</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">6</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">6.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">1.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">5</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">5.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">severe</span><span class=\"w\"></span>\n<span class=\"n\">multi</span><span class=\"o\">-</span><span class=\"n\">threaded</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">2</span><span class=\"w\">  </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.9996</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">3.0145</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">3.0295</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">660.18</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">663.47</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">666.76</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">94.040</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">93.910</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">93.762</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">1503.1</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1542.0</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1578.0</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">5.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">5</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">5.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">severe</span><span class=\"w\"></span>\n<span class=\"n\">multi</span><span class=\"o\">-</span><span class=\"n\">threaded</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">4</span><span class=\"w\">  </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">5.5768</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">5.6052</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">5.6364</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">709.68</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">713.63</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">717.25</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">93.193</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">93.121</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">93.052</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">1339.2</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1353.6</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1369.1</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">multi</span><span class=\"o\">-</span><span class=\"n\">threaded</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">8</span><span class=\"w\">  </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">8.6408</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">9.1212</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">9.5438</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">838.24</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">877.08</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">925.84</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">94.754</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">94.473</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">94.202</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">1624.7</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1709.2</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1806.1</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">multi</span><span class=\"o\">-</span><span class=\"n\">threaded</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">16</span><span class=\"w\"> </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">10.152</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">10.840</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">11.545</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">1.3858</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">1.4760</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">1.5761</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">97.042</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">96.823</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">96.577</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">2821.5</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">3048.1</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">3281.1</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">1.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">1.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n\n<span class=\"n\">many</span><span class=\"o\">-</span><span class=\"n\">modules</span><span class=\"o\">-</span><span class=\"n\">registered</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">1</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.6278</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.6361</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.6447</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">378.11</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">379.35</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">380.55</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">85.311</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">85.108</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">84.909</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">562.65</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">571.51</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">580.76</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">9</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">9.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">3.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">6</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">6.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">severe</span><span class=\"w\"></span>\n<span class=\"n\">many</span><span class=\"o\">-</span><span class=\"n\">modules</span><span class=\"o\">-</span><span class=\"n\">registered</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">8</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.6294</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.6460</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.6623</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">3.0049</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">3.0235</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">3.0425</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">85.895</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">85.485</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">85.022</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">567.63</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">588.95</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">608.95</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">8</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">8.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">3.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">5</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">5.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">severe</span><span class=\"w\"></span>\n<span class=\"n\">many</span><span class=\"o\">-</span><span class=\"n\">modules</span><span class=\"o\">-</span><span class=\"n\">registered</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">64</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.6218</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.6329</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.6452</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">24.195</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">24.308</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">24.411</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">93.629</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">93.551</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">93.470</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">1431.4</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1450.6</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">1469.5</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">3.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">3.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n<span class=\"n\">many</span><span class=\"o\">-</span><span class=\"n\">modules</span><span class=\"o\">-</span><span class=\"n\">registered</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">512</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.6569</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.6737</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.6923</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">190.17</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">191.50</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">192.71</span><span class=\"w\"> </span><span class=\"n\">Melem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">99.277</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">99.268</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">99.260</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mi\">13417</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mi\">13566</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mi\">13731</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">4</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">4.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">4</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">4.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n<span class=\"n\">many</span><span class=\"o\">-</span><span class=\"n\">modules</span><span class=\"o\">-</span><span class=\"n\">registered</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">4096</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.7258</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.7390</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.7535</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">1.4876</span><span class=\"w\"> </span><span class=\"n\">Gelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">1.4955</span><span class=\"w\"> </span><span class=\"n\">Gelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">1.5027</span><span class=\"w\"> </span><span class=\"n\">Gelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">99.956</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">99.955</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">99.955</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mi\">221417</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mi\">223380</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mi\">224881</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">2.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">1.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">1.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">severe</span><span class=\"w\"></span>\n\n<span class=\"n\">many</span><span class=\"o\">-</span><span class=\"n\">stack</span><span class=\"o\">-</span><span class=\"n\">frames</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">1</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">1.4658</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">1.4719</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">1.4784</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">676.39</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">679.38</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mf\">682.21</span><span class=\"w\"> </span><span class=\"n\">Kelem</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                 </span><span class=\"n\">change</span>:\n                        <span class=\"nc\">time</span>:   <span class=\"p\">[</span><span class=\"o\">-</span><span class=\"mf\">90.368</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">89.947</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"mf\">89.586</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.00</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"o\">+</span><span class=\"mf\">860.23</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">894.72</span><span class=\"o\">%</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"mf\">938.21</span><span class=\"o\">%</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">Performance</span><span class=\"w\"> </span><span class=\"n\">has</span><span class=\"w\"> </span><span class=\"n\">improved</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">Found</span><span class=\"w\"> </span><span class=\"mi\">8</span><span class=\"w\"> </span><span class=\"n\">outliers</span><span class=\"w\"> </span><span class=\"n\">among</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">measurements</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">8.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">5</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">5.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">mild</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"mf\">3.00</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">high</span><span class=\"w\"> </span><span class=\"n\">severe</span><span class=\"w\"></span>\n<span class=\"n\">many</span><span class=\"o\">-</span><span class=\"n\">stack</span><span class=\"o\">-</span><span class=\"n\">frames</span><span class=\"o\">-</span><span class=\"n\">traps</span><span class=\"o\">/</span><span class=\"mi\">8</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">time</span>:   <span class=\"p\">[</span><span class=\"mf\">2.4772</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.4870</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"w\"> </span><span class=\"mf\">2.4973</span><span class=\"w\"> </span><span class=\"n\">us</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">thrpt</span>:  <span class=\"p\">[</span><span class=\"mf\">3.2034</span><span class=\"w\"></span>\n<span class=\"p\">[</span><span class=\"n\">message</span><span class=\"w\"> </span><span class=\"n\">truncated</span><span class=\"p\">]</span><span class=\"w\"></span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 289241274,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657568893
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1034958126\">PR review</a>.</p>",
+        "id": 289253813,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657575874
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1034958126\">PR review</a>.</p>",
+        "id": 289253814,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657575874
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r918369129\">PR review comment</a>:</p>\n<blockquote>\n<p>I think technically this should be aligned up to the pointer size?</p>\n</blockquote>",
+        "id": 289253815,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657575874
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r918368133\">PR review comment</a>:</p>\n<blockquote>\n<p>It might be worth pointing out that this is 64-bit only</p>\n</blockquote>",
+        "id": 289253816,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657575874
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r918374441\">PR review comment</a>:</p>\n<blockquote>\n<p>You might want to add this constant to the asserts below as well</p>\n</blockquote>",
+        "id": 289253817,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657575874
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r918373695\">PR review comment</a>:</p>\n<blockquote>\n<p>In the end this'll probably want to get folded into <code>get_pc</code> above to avoid duplicating the <code>cfg_if!</code></p>\n</blockquote>",
+        "id": 289253818,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657575874
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r918372816\">PR review comment</a>:</p>\n<blockquote>\n<p>We'll actually need to replace this check with some other boolean in a <code>store</code> since the non-recursive behavior here was necessary to implement the currently desired semantics (stack limit set only once) and we just piggy-backed on the canary being set.</p>\n</blockquote>",
+        "id": 289253820,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657575874
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289265801,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657585413
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289365196,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657649853
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289368822,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657651592
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r920549448\">PR review comment</a>:</p>\n<blockquote>\n<p>Any suggestions of how to implement this check? Do we have anything already that we can piggy back on, the way we did with the stack canary, or do we need a new thing?</p>\n</blockquote>",
+        "id": 289526988,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657749722
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1038030382\">PR review</a>.</p>",
+        "id": 289526992,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657749722
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289530356,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657752072
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289533197,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657754057
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289629829,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657822917
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1039425181\">PR review</a>.</p>",
+        "id": 289643459,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657829621
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r921534308\">PR review comment</a>:</p>\n<blockquote>\n<p>Sorry I meant to answer this earlier and forgot. I think <code>stack_limit</code> could be suitable for this in the <code>VMRuntimeLimits</code>. If it's <code>usize::MAX</code> then it should be reset, otherwise it should be not tampered with.</p>\n</blockquote>",
+        "id": 289643460,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657829621
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289643969,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657829842
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289659412,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657838396
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040162163\">PR review</a>.</p>",
+        "id": 289715246,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040162163\">PR review</a>.</p>",
+        "id": 289715247,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922073698\">PR review comment</a>:</p>\n<blockquote>\n<p>Use either <code>X16</code> or <code>X17</code>, otherwise the code becomes incompatible with BTI.</p>\n</blockquote>",
+        "id": 289715248,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922082048\">PR review comment</a>:</p>\n<blockquote>\n<p>As line 56.</p>\n</blockquote>",
+        "id": 289715249,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922076986\">PR review comment</a>:</p>\n<blockquote>\n<p>As line 73.</p>\n</blockquote>",
+        "id": 289715250,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922081961\">PR review comment</a>:</p>\n<blockquote>\n<p>Similarly to line 56, end with <code>.cfi_endproc</code>.</p>\n</blockquote>",
+        "id": 289715251,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922082452\">PR review comment</a>:</p>\n<blockquote>\n<p>As line 75.</p>\n</blockquote>",
+        "id": 289715252,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922082619\">PR review comment</a>:</p>\n<blockquote>\n<p>As line 56.</p>\n</blockquote>",
+        "id": 289715253,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922082721\">PR review comment</a>:</p>\n<blockquote>\n<p>As line 75.</p>\n</blockquote>",
+        "id": 289715254,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657884904
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040602911\">PR review</a>.</p>",
+        "id": 289757329,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657905874
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922377503\">PR review comment</a>:</p>\n<blockquote>\n<p>All the CFI stuff will be fixed with using the macros in the <code>wasmtime-fibers</code> crate.</p>\n</blockquote>",
+        "id": 289757330,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657905874
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040604473\">PR review</a>.</p>",
+        "id": 289757519,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657905966
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922378610\">PR review comment</a>:</p>\n<blockquote>\n<p>Specifically for the tail call, or only use these two registers in the whole trampoline? The first is very doable, the second a bit harder.</p>\n</blockquote>",
+        "id": 289757520,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657905966
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040606416\">PR review</a>.</p>",
+        "id": 289757699,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657906081
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922379969\">PR review comment</a>:</p>\n<blockquote>\n<p>FWIW, you didn't leave a comment on line 56 so I'm not totally sure what you are referring to here. Given the context of the other comment referencing line 56, I assume this has to do with CFI pragmas? These will be handled once I start using the <code>wasmtime-fibers</code> crate's macros.</p>\n</blockquote>",
+        "id": 289757700,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657906081
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040609999\">PR review</a>.</p>",
+        "id": 289758168,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657906295
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922382469\">PR review comment</a>:</p>\n<blockquote>\n<p>Just the tail call - the indirect branch is what would cause an issue.</p>\n</blockquote>",
+        "id": 289758169,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657906295
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289762089,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657908186
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040640953\">PR review</a>.</p>",
+        "id": 289762257,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657908264
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922404964\">PR review comment</a>:</p>\n<blockquote>\n<p>Please, start this function with:</p>\n<p><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">.</span><span class=\"n\">cfi_startproc</span><span class=\"w\"></span>\n<span class=\"n\">hint</span><span class=\"w\"> </span>#<span class=\"mi\">34</span><span class=\"w\"> </span><span class=\"c1\">// bti c</span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 289762258,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657908264
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040640953\">PR review</a>.</p>",
+        "id": 289762259,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657908264
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r922405630\">PR review comment</a>:</p>\n<blockquote>\n<p>Sorry, I must have accidentally deleted it; I have added it now.</p>\n</blockquote>",
+        "id": 289762365,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657908316
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1040643034\">PR review</a>.</p>",
+        "id": 289762366,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657908316
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 289774602,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1657914422
+    },
+    {
+        "content": "<p>pepyakin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1043077511\">PR review</a>.</p>",
+        "id": 290135374,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658252471
+    },
+    {
+        "content": "<p>pepyakin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r924245710\">PR review comment</a>:</p>\n<blockquote>\n<p>The signature seems to be <code>[] → []</code> now</p>\n</blockquote>",
+        "id": 290135375,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658252471
+    },
+    {
+        "content": "<p>pepyakin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1043077511\">PR review</a>.</p>",
+        "id": 290135376,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658252471
+    },
+    {
+        "content": "<p>pepyakin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r924804070\">PR review comment</a>:</p>\n<blockquote>\n<p>(In advance I want to apologize if this is not the right place to ask this)</p>\n<p>I was working on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4466\">this</a>, and there I was relying on the ability to dump the value of a pinned register (r15 on x86_64) to <code>VMRuntimeLimits</code> when leaving the wasm code. I'm not sure how to do the same with the tail call though. </p>\n<p>Do you have any recommendations about that? Should I just introduce my own set of trampolines?</p>\n<p>Thanks</p>\n</blockquote>",
+        "id": 290136831,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658253171
+    },
+    {
+        "content": "<p>pepyakin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1043861803\">PR review</a>.</p>",
+        "id": 290136832,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658253172
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290167510,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268407
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> has marked <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> as ready for review.</p>",
+        "id": 290167532,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268420
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/alexcrichton\">alexcrichton</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a>.</p>",
+        "id": 290167550,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268427
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/akirilov-arm\">akirilov-arm</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a>.</p>",
+        "id": 290167557,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268433
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290167770,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268589
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1044135797\">PR review</a>.</p>",
+        "id": 290167782,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268595
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r924996181\">PR review comment</a>:</p>\n<blockquote>\n<p>Good eye! Fixed.</p>\n</blockquote>",
+        "id": 290167783,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268595
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1044137428\">PR review</a>.</p>",
+        "id": 290168001,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268734
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r924997482\">PR review comment</a>:</p>\n<blockquote>\n<p>I think you can do that in these existing trampolines. Depending on the overhead, we might do it unconditionally, even if slacked fuel wasn't enabled, or we might have a different version of the Wasm-to-host trampoline for when that feature is enabled (although this risks combinatorial blow up if we have to keep adding more trampolines for more features).</p>\n</blockquote>",
+        "id": 290168002,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658268734
+    },
+    {
+        "content": "<p>pepyakin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1045049551\">PR review</a>.</p>",
+        "id": 290235649,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658324383
+    },
+    {
+        "content": "<p>pepyakin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925620493\">PR review comment</a>:</p>\n<blockquote>\n<p>Yeah, that was my first impression as well, but later I realized that the r15, the fuel counter, has to be dumped after the wasm returns. The tail call makes the wasm return directly to the host, skipping the trampoline on the exit path.</p>\n<p>If we replaced the <code>jmp</code> with a call, we would be able to place the r15 dumping code after the call, but as you mention, that would mess up stack arguments.<br>\n</p>\n</blockquote>",
+        "id": 290235650,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658324384
+    },
+    {
+        "content": "<p>pepyakin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1045055165\">PR review</a>.</p>",
+        "id": 290236074,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658324580
+    },
+    {
+        "content": "<p>pepyakin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925624322\">PR review comment</a>:</p>\n<blockquote>\n<p>Now, giving it a little thought, it is also unclear what \"my own set of trampolines\" would do, since they will have to deal with the same problem: call the wasm callee with the arguments that were passed by the host caller.</p>\n<p>Perhaps something along the lines of would work:</p>\n<p>In the trampoline, stash the original return address (pointing to the host) somewhere and replace it with another new address. That new address would point to a \"trampoline continuation\". That continuation would dump r15 into vmctx, unstash the original return address and then return.</p>\n<p>There has to be a better way though...</p>\n</blockquote>",
+        "id": 290236076,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658324581
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1045188875\">PR review</a>.</p>",
+        "id": 290249875,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1045188875\">PR review</a>.</p>",
+        "id": 290249876,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925717382\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this be expanded with a little bit about how we do stack walking today? Mostly just mentioning that frame pointers are required in wasm code and we use custom asm trampolines when entering and exiting wasm to ensure we record the boundaries of contiguous wasm stacks.</p>\n</blockquote>",
+        "id": 290249877,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925719479\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this grow some docs to explain which trampoline sets these fields and why they're expected to be valid here?</p>\n</blockquote>",
+        "id": 290249878,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925715742\">PR review comment</a>:</p>\n<blockquote>\n<p>On second thought, do we actually need this file at all? The <code>VMOffsets</code> stuff is only related to \"the compiler needs to know about offsets for the target\" but I don't think any compilation we do actually modfiies a <code>VMHostFuncContext</code> at all, right? We could change the test assertions for the offsets to using the real structs I think?</p>\n</blockquote>",
+        "id": 290249879,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925720143\">PR review comment</a>:</p>\n<blockquote>\n<p>I forget why this condition is necessary now, could you add some docs to this?</p>\n</blockquote>",
+        "id": 290249880,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925721354\">PR review comment</a>:</p>\n<blockquote>\n<p>Perhaps actually remove the condition here so other platforms can add conditions as appropriate? (if they don't already fall back to this case)</p>\n</blockquote>",
+        "id": 290249881,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925722673\">PR review comment</a>:</p>\n<blockquote>\n<p>I mentioned this before, but personally I think it would be best to cut down on the <code>cfg_if!</code> here. I'd rather not have a duplicated set within each function. Could this instead move to the architecture-specific modules in the <code>wasmtime-runtime</code> crate?</p>\n</blockquote>",
+        "id": 290249882,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925725376\">PR review comment</a>:</p>\n<blockquote>\n<p>A note to fill out this TODO before landing</p>\n</blockquote>",
+        "id": 290249883,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925718754\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this grow some documentation to explain what <code>initial_pc_and_fp</code> are?</p>\n</blockquote>",
+        "id": 290249884,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925725795\">PR review comment</a>:</p>\n<blockquote>\n<p>Perhaps delegate to <code>set_callee</code> above?</p>\n</blockquote>",
+        "id": 290249885,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925731830\">PR review comment</a>:</p>\n<blockquote>\n<p>note to fill this out a bit more</p>\n</blockquote>",
+        "id": 290249886,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925731485\">PR review comment</a>:</p>\n<blockquote>\n<p>Do you think it's worth going ahead and adding one of these assembly trampolines for all libcalls? Otherwise we could run the risk of if a gc happens during an otherwise-unrelated libcall that could incorrectly generate a backtrace I think?</p>\n<p>Also do you think there's a way for us to guarantee that the asm wrapper is used once-per-libcall? Otherwise we might accidentally forget to use this macro.</p>\n</blockquote>",
+        "id": 290249887,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925732612\">PR review comment</a>:</p>\n<blockquote>\n<p>Could you add some notes to the docs here about the unsafety and how <code>T</code> must be carefully selected?</p>\n</blockquote>",
+        "id": 290249888,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925733831\">PR review comment</a>:</p>\n<blockquote>\n<p>I think this may actually be able to be <code>bti c</code> instead of <code>hint #34</code> since I presume LLVM's internal assembler is a bit more modern than random ancient binutils assemblers.</p>\n</blockquote>",
+        "id": 290249889,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330458
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925739178\">PR review comment</a>:</p>\n<blockquote>\n<p>We should probably ping Chris or some embark folks to double-check that this PR passes tests on macOS when CI is otherwise green here and ready to go to double-check this.</p>\n</blockquote>",
+        "id": 290249890,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330459
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925734257\">PR review comment</a>:</p>\n<blockquote>\n<p>I think we've resolved this \"TODO\" </p>\n</blockquote>",
+        "id": 290249891,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330459
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925737928\">PR review comment</a>:</p>\n<blockquote>\n<p>Could you add some words to why this is done?</p>\n</blockquote>",
+        "id": 290249892,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330459
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925741286\">PR review comment</a>:</p>\n<blockquote>\n<p>bump here on the TODO (and the note I had below about reusing the stack limit as the \"canary\" here)</p>\n</blockquote>",
+        "id": 290249893,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330459
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925723653\">PR review comment</a>:</p>\n<blockquote>\n<p>Also, for each of these small helpers, could you add some architecture-specific documentation as to why the function body is the way it is?</p>\n</blockquote>",
+        "id": 290249894,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658330459
+    },
+    {
+        "content": "<p>pepyakin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1045216660\">PR review</a>.</p>",
+        "id": 290258047,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658333542
+    },
+    {
+        "content": "<p>pepyakin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925789537\">PR review comment</a>:</p>\n<blockquote>\n<p>Is this still needed or is it a leftover?</p>\n</blockquote>",
+        "id": 290258048,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658333542
+    },
+    {
+        "content": "<p>pepyakin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925736356\">PR review comment</a>:</p>\n<blockquote>\n<p>Do you think this could use the same test as for <code>wasm_to_host_trampoline_offsets_tests</code>, just for documentation purposes?</p>\n</blockquote>",
+        "id": 290258049,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658333542
+    },
+    {
+        "content": "<p>pepyakin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r925804464\">PR review comment</a>:</p>\n<blockquote>\n<p>FWIW, it does not compile on my machine:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">error</span><span class=\"p\">[</span><span class=\"n\">E0609</span><span class=\"p\">]</span>: <span class=\"nc\">no</span><span class=\"w\"> </span><span class=\"n\">field</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__opaque_fp</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"n\">on</span><span class=\"w\"> </span><span class=\"k\">type</span> <span class=\"err\">`</span><span class=\"n\">__darwin_arm_thread_state64</span><span class=\"err\">`</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"o\">-</span>-&gt; <span class=\"nc\">crates</span><span class=\"o\">/</span><span class=\"n\">runtime</span><span class=\"o\">/</span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">traphandlers</span><span class=\"o\">/</span><span class=\"n\">unix</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">223</span>:<span class=\"mi\">40</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\"></span>\n<span class=\"mi\">223</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"w\">                 </span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"n\">cx</span><span class=\"p\">.</span><span class=\"n\">uc_mcontext</span><span class=\"p\">).</span><span class=\"n\">__ss</span><span class=\"p\">.</span><span class=\"n\">__opaque_fp</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\">                                        </span><span class=\"o\">^^^^^^^^^^^</span><span class=\"w\"> </span><span class=\"n\">unknown</span><span class=\"w\"> </span><span class=\"n\">field</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">note</span>: <span class=\"nc\">available</span><span class=\"w\"> </span><span class=\"n\">fields</span><span class=\"w\"> </span><span class=\"n\">are</span>: <span class=\"err\">`</span><span class=\"n\">__x</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__fp</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__lr</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__sp</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__pc</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"n\">and</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"n\">others</span><span class=\"w\"></span>\n</code></pre></div>\n<p>if changed to <code>__fp</code> I am getting linking errors related to libcalls</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">  </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">note</span>: <span class=\"nc\">Undefined</span><span class=\"w\"> </span><span class=\"n\">symbols</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">architecture</span><span class=\"w\"> </span><span class=\"n\">arm64</span>:\n            <span class=\"s\">\"__wasmtime_out_of_gas\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_out_of_gas</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_out_of_gas</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">h82a1f6dfe40ded68</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_out_of_gas</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_memory_atomic_wait64\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_memory_atomic_wait64</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">___wasmtime_memory_atomic_wait64</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_memory_atomic_wait64</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">h0572dbcd971fc0ae</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_table_copy\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_table_copy</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_table_copy</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">h8a12719fb9aadf1b</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_table_copy</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_memory_atomic_notify\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_memory_atomic_notify</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_memory_atomic_notify</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">h6e6f4ca809ea38f9</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_memory_atomic_notify</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_memory_init\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_memory_init</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_memory_init</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">hda18b620453f6e32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_memory_init</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_memory_fill\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_memory_fill</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_memory_fill</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">h16f10cadc9476e42</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_memory_fill</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_memory_atomic_wait32\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_memory_atomic_wait32</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_memory_atomic_wait32</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">h560d4d674b202c95</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_memory_atomic_wait32</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_table_init\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_table_init</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_table_init</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">he5e1a78b56db45b4</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_table_init</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_table_fill\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_table_fill</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_table_fill</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">hf8b7ce102ac3de7a</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_table_fill</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_memory_copy\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_memory_copy</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">___wasmtime_memory_copy</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_memory_copy</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">h89a592f83dabef04</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_table_grow\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_table_grow</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_table_grow</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">hdaa1831af98473b5</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_table_grow</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_new_epoch\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_new_epoch</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_new_epoch</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">h1a92330ea38f0813</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_new_epoch</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"__wasmtime_memory32_grow_impl\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">referenced</span><span class=\"w\"> </span><span class=\"n\">from</span>:\n                <span class=\"nc\">_memory32_grow</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">libwasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"n\">rlib</span><span class=\"p\">(</span><span class=\"n\">wasmtime_runtime</span><span class=\"o\">-</span><span class=\"n\">dbb96764d3b18906</span><span class=\"p\">.</span><span class=\"mi\">44</span><span class=\"n\">jpaurkbhy60k2w</span><span class=\"p\">.</span><span class=\"n\">rcgu</span><span class=\"p\">.</span><span class=\"n\">o</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">               </span><span class=\"p\">(</span><span class=\"n\">maybe</span><span class=\"w\"> </span><span class=\"n\">you</span><span class=\"w\"> </span><span class=\"n\">meant</span>: <span class=\"nc\">wasmtime_runtime</span>::<span class=\"n\">libcalls</span>::<span class=\"n\">__wasmtime_memory32_grow_impl</span>::<span class=\"n\">_</span><span class=\"cp\">$u7b$$u7b$closure$u7d$$u7d$</span>::<span class=\"n\">hd067c3bee9e773e8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">___wasmtime_memory32_grow_impl</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">          </span><span class=\"n\">ld</span>: <span class=\"nc\">symbol</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">not</span><span class=\"w\"> </span><span class=\"n\">found</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">architecture</span><span class=\"w\"> </span><span class=\"n\">arm64</span><span class=\"w\"></span>\n<span class=\"w\">          </span><span class=\"n\">clang</span>: <span class=\"nc\">error</span>: <span class=\"nc\">linker</span><span class=\"w\"> </span><span class=\"n\">command</span><span class=\"w\"> </span><span class=\"n\">failed</span><span class=\"w\"> </span><span class=\"n\">with</span><span class=\"w\"> </span><span class=\"n\">exit</span><span class=\"w\"> </span><span class=\"n\">code</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"k\">use</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">v</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">see</span><span class=\"w\"> </span><span class=\"n\">invocation</span><span class=\"p\">)</span><span class=\"w\"></span>\n</code></pre></div>\n<p>If I build without <code>posix-signals-on-macos</code> I'd get this:</p>\n<p><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">error</span><span class=\"p\">[</span><span class=\"n\">E0308</span><span class=\"p\">]</span>: <span class=\"nc\">mismatched</span><span class=\"w\"> </span><span class=\"n\">types</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"o\">-</span>-&gt; <span class=\"nc\">crates</span><span class=\"o\">/</span><span class=\"n\">runtime</span><span class=\"o\">/</span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">traphandlers</span><span class=\"o\">/</span><span class=\"n\">macos</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">388</span>:<span class=\"mi\">33</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\"></span>\n<span class=\"mi\">388</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"w\">         </span><span class=\"n\">state</span><span class=\"p\">.</span><span class=\"n\">capture_backtrace</span><span class=\"p\">(</span><span class=\"n\">wasm_pc</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\">                                 </span><span class=\"o\">^^^^^^^</span><span class=\"w\"> </span><span class=\"n\">expected</span><span class=\"w\"> </span><span class=\"k\">enum</span> <span class=\"err\">`</span><span class=\"n\">std</span>::<span class=\"n\">option</span>::<span class=\"nb\">Option</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">found</span><span class=\"w\"> </span><span class=\"o\">*-</span><span class=\"n\">ptr</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">note</span>:     <span class=\"nc\">expected</span><span class=\"w\"> </span><span class=\"k\">enum</span> <span class=\"err\">`</span><span class=\"n\">std</span>::<span class=\"n\">option</span>::<span class=\"nb\">Option</span><span class=\"o\">&lt;</span><span class=\"p\">(</span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">)</span><span class=\"o\">&gt;</span><span class=\"err\">`</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">found</span><span class=\"w\"> </span><span class=\"n\">raw</span><span class=\"w\"> </span><span class=\"n\">pointer</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"err\">`</span><span class=\"w\"></span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 290258050,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658333542
+    },
+    {
+        "content": "<p>pepyakin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1045216660\">PR review</a>.</p>",
+        "id": 290258051,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658333542
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290284274,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658344411
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290284590,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658344545
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290408303,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658424856
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290409830,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658425637
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290413520,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658427438
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290418045,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658429506
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047003116\">PR review</a>.</p>",
+        "id": 290418442,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658429675
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927008740\">PR review comment</a>:</p>\n<blockquote>\n<p>Hi @uweigand, would you mind suggesting wording for some comments for these functions similar to those in the <code>x86_64.rs</code> file just below? I'm not familiar enough to add the docs that Alex requested in review myself.</p>\n</blockquote>",
+        "id": 290418444,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658429675
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047003573\">PR review</a>.</p>",
+        "id": 290418521,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658429699
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927009057\">PR review comment</a>:</p>\n<blockquote>\n<p>Hi @akirilov-arm, would you mind suggesting wording for some comments for these functions similar to those in the <code>x86_64.rs</code> file just below? I'm not familiar enough to add the docs that Alex requested in review myself. Thanks!</p>\n</blockquote>",
+        "id": 290418522,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658429699
+    },
+    {
+        "content": "<p>fitzgen edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927008740\">PR review comment</a>.</p>",
+        "id": 290418582,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658429710
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047005438\">PR review</a>.</p>",
+        "id": 290418853,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658429802
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927010402\">PR review comment</a>:</p>\n<blockquote>\n<p>Split everything out into modules, but haven't added non-x64 docs yet (pinged folks for help with that).</p>\n</blockquote>",
+        "id": 290418854,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658429802
+    },
+    {
+        "content": "<p>uweigand created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927014005\">PR review comment</a>:</p>\n<blockquote>\n<p>get_next_older_pc_from_fp:</p>\n<blockquote>\n<p>The next older PC can be found in register %r14 at function entry, which was saved into slot 14 of the register save area pointed to by 'FP' (the backchain pointer).</p>\n</blockquote>\n<p>get_next_older_fp_from_fp:</p>\n<blockquote>\n<p>The next older 'FP' (backchain pointer) was saved in the slot pointed to by the current 'FP'.</p>\n</blockquote>\n<p>reached_entry_sp:</p>\n<blockquote>\n<p>The 'FP' (backchain pointer) holds the value of the stack pointer at function entry. If this equals the value the stack pointer had when we first entered a Wasm function, we are done.<br>\n</p>\n</blockquote>\n</blockquote>",
+        "id": 290419540,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658430086
+    },
+    {
+        "content": "<p>uweigand submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047010551\">PR review</a>.</p>",
+        "id": 290419541,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658430086
+    },
+    {
+        "content": "<p>uweigand submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047013229\">PR review</a>.</p>",
+        "id": 290419879,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658430242
+    },
+    {
+        "content": "<p>uweigand created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927015904\">PR review comment</a>:</p>\n<blockquote>\n<p>Not much to say about the stack alignment except that the ABI guarantees 8-byte alignment at all times, and we cannot in general expect anything more.</p>\n</blockquote>",
+        "id": 290419898,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658430242
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290424050,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658432348
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047053940\">PR review</a>.</p>",
+        "id": 290424282,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658432473
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927042383\">PR review comment</a>:</p>\n<blockquote>\n<p>Thanks!</p>\n</blockquote>",
+        "id": 290424283,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658432473
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290435505,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658438391
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047153071\">PR review</a>.</p>",
+        "id": 290435688,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658438477
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927112725\">PR review comment</a>:</p>\n<blockquote>\n<p>We generally write failing test cases to <code>test.wa{t,sm}</code> for fuzz tests and smoke tests like this so it is easier to debug. They are only written if the test fails, so won't otherwise spew stuff to the file system during normal operation.</p>\n</blockquote>",
+        "id": 290435690,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658438477
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927113203\">PR review comment</a>:</p>\n<blockquote>\n<p>I intentionally chose to have two tests so that if they evolve in different directions in the future we can update each respective test and not accidentally leave one trampoline's offsets untested.</p>\n</blockquote>",
+        "id": 290435790,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658438526
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047153815\">PR review</a>.</p>",
+        "id": 290435791,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658438526
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927585678\">PR review comment</a>:</p>\n<blockquote>\n<p>Technically there is no alignment requirement for the frame pointer - in fact, if my reading of the AAPCS64 is correct (<code>The location of the frame record within a stack frame is not specified.</code>), then it could even be completely unaligned (or at the very least aligned on 8 bytes)! However, it is probably still useful to leave this check as is.</p>\n</blockquote>",
+        "id": 290496898,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658491514
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047808619\">PR review</a>.</p>",
+        "id": 290496899,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658491514
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047809775\">PR review</a>.</p>",
+        "id": 290497007,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658491583
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927586445\">PR review comment</a>:</p>\n<blockquote>\n<p>I don't there is any need for a comment here - the assertion says everything that needs to be stated.</p>\n</blockquote>",
+        "id": 290497009,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658491583
+    },
+    {
+        "content": "<p>akirilov-arm edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927586445\">PR review comment</a>.</p>",
+        "id": 290497029,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658491599
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927620199\">PR review comment</a>:</p>\n<blockquote>\n<p>Here is a direct quote from <a href=\"https://github.com/ARM-software/abi-aa/blob/2022Q1/aapcs64/aapcs64.rst#the-frame-pointer\">section 6.2.3</a> of the Procedure Call Standard for the Arm® 64-bit Architecture (AAPCS64):</p>\n<blockquote>\n<p>Conforming code shall construct a linked list of stack-frames. Each frame shall link to the frame of its caller by means of a frame record of two 64-bit values on the stack (independent of the data model). The frame record for the innermost frame (belonging to the most recent routine invocation) shall be pointed to by the frame pointer register (FP). The lowest addressed double-word shall point to the previous frame record and the highest addressed double-word shall contain the value passed in LR on entry to the current function. If code uses the pointer signing extension to sign return addresses, the value in LR must be signed before storing it in the frame record. The end of the frame record chain is indicated by the address zero in the address for the previous frame. The location of the frame record within a stack frame is not specified.</p>\n</blockquote>\n<p>It can be trimmed to:</p>\n<blockquote>\n<p>Each frame shall link to the frame of its caller by means of a frame record of two 64-bit values on the stack [...] The frame record for the innermost frame [...] shall be pointed to by the frame pointer register (FP). The lowest addressed double-word shall point to the previous frame record and the highest addressed double-word shall contain the value passed in LR on entry to the current function.</p>\n</blockquote>\n<p>I think it covers both this function and <code>get_next_older_fp_from_fp()</code>.</p>\n</blockquote>",
+        "id": 290501613,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658494254
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047858710\">PR review</a>.</p>",
+        "id": 290501614,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658494254
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1047895575\">PR review</a>.</p>",
+        "id": 290504883,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658496031
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927645349\">PR review comment</a>:</p>\n<blockquote>\n<p>Maybe add a comment stating that we do not support big-endian AArch64 (also on line 46)?</p>\n</blockquote>",
+        "id": 290504884,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658496031
+    },
+    {
+        "content": "<p>akirilov-arm edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r927586445\">PR review comment</a>.</p>",
+        "id": 290507891,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658497725
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290830221,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658790225
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290832725,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658792077
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1050913218\">PR review</a>.</p>",
+        "id": 290885123,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658839328
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r929915996\">PR review comment</a>:</p>\n<blockquote>\n<p>I added comments for each function.</p>\n</blockquote>",
+        "id": 290885124,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658839328
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1051271669\">PR review</a>.</p>",
+        "id": 290917168,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658852068
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r930167682\">PR review comment</a>:</p>\n<blockquote>\n<p>Thanks, I saw, just haven't gotten around to adding them yet. Appreciated!</p>\n</blockquote>",
+        "id": 290917169,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658852068
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290925919,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658855700
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290930527,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658857539
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 290939991,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658861776
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/alexcrichton\">alexcrichton</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a>.</p>",
+        "id": 290954035,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658868485
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931125713\">PR review comment</a>:</p>\n<blockquote>\n<p>This condition feels a bit funny to me so I'm wondering if we can add more strict assertions around this perhaps. The bug with components is that the pc/fp aren't set here on exit back into the host, and I was hoping that an assertion would trip somewhere in this code to indicate such.</p>\n<p>I know that we have a -1 sentinel to get encoded for a host-&gt;host call but otherwise I think we should always have this set and we can assert as much? (or... something like that)</p>\n</blockquote>",
+        "id": 291054391,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931180599\">PR review comment</a>:</p>\n<blockquote>\n<p>Is this still necessary with the <code>.iter()</code> method below?</p>\n</blockquote>",
+        "id": 291054392,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931130808\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this assert that the <code>fp</code> has some relation to <code>first_wasm_sp</code>? (e.g. one of the <code>arch::*</code>-specific functions I think should return <code>true</code>?</p>\n</blockquote>",
+        "id": 291054393,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931178266\">PR review comment</a>:</p>\n<blockquote>\n<p>Personally I feel that this macro is still too complicated for its own good, but I sent you <a href=\"https://github.com/fitzgen/wasmtime/pull/7\">https://github.com/fitzgen/wasmtime/pull/7</a> which is what I was thinking of how to simplify it.</p>\n</blockquote>",
+        "id": 291054394,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052597859\">PR review</a>.</p>",
+        "id": 291054395,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052597859\">PR review</a>.</p>",
+        "id": 291054396,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931181703\">PR review comment</a>:</p>\n<blockquote>\n<p>Is this still necessary? Ideally this'd stay private to this module to avoid having to reason about the rest of the crate</p>\n</blockquote>",
+        "id": 291054397,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931189585\">PR review comment</a>:</p>\n<blockquote>\n<p>Could this use <code>VMOpaqueContext::from_vm_host_func_context</code>?</p>\n</blockquote>",
+        "id": 291054398,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931192518\">PR review comment</a>:</p>\n<blockquote>\n<p>To clarify, is this something you plan to take on or is this something I should plan to look into?</p>\n</blockquote>",
+        "id": 291054399,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931185683\">PR review comment</a>:</p>\n<blockquote>\n<p>This was marked as resolved, but inside the resolved comment is an indication that this isn't the right name?</p>\n<p>Locally I get:</p>\n<p><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">$</span><span class=\"w\"> </span><span class=\"n\">AR</span><span class=\"o\">=</span><span class=\"kc\">true</span><span class=\"w\"> </span><span class=\"n\">CC</span><span class=\"o\">=</span><span class=\"kc\">true</span><span class=\"w\"> </span><span class=\"n\">cargo</span><span class=\"w\"> </span><span class=\"n\">check</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">target</span><span class=\"w\"> </span><span class=\"n\">aarch64</span><span class=\"o\">-</span><span class=\"n\">apple</span><span class=\"o\">-</span><span class=\"n\">darwin</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span><span class=\"o\">-</span><span class=\"n\">runtime</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">features</span><span class=\"w\"> </span><span class=\"n\">posix</span><span class=\"o\">-</span><span class=\"n\">signals</span><span class=\"o\">-</span><span class=\"n\">on</span><span class=\"o\">-</span><span class=\"n\">macos</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">Checking</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span><span class=\"o\">-</span><span class=\"n\">runtime</span><span class=\"w\"> </span><span class=\"n\">v0</span><span class=\"p\">.</span><span class=\"mf\">40.0</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">/</span><span class=\"n\">home</span><span class=\"o\">/</span><span class=\"n\">acrichto</span><span class=\"o\">/</span><span class=\"n\">code</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"o\">/</span><span class=\"n\">crates</span><span class=\"o\">/</span><span class=\"n\">runtime</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"n\">error</span><span class=\"p\">[</span><span class=\"n\">E0609</span><span class=\"p\">]</span>: <span class=\"nc\">no</span><span class=\"w\"> </span><span class=\"n\">field</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__opaque_fp</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"n\">on</span><span class=\"w\"> </span><span class=\"k\">type</span> <span class=\"err\">`</span><span class=\"n\">__darwin_arm_thread_state64</span><span class=\"err\">`</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"o\">-</span>-&gt; <span class=\"nc\">crates</span><span class=\"o\">/</span><span class=\"n\">runtime</span><span class=\"o\">/</span><span class=\"n\">src</span><span class=\"o\">/</span><span class=\"n\">traphandlers</span><span class=\"o\">/</span><span class=\"n\">unix</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">223</span>:<span class=\"mi\">40</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\"></span>\n<span class=\"mi\">223</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"w\">                 </span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"n\">cx</span><span class=\"p\">.</span><span class=\"n\">uc_mcontext</span><span class=\"p\">).</span><span class=\"n\">__ss</span><span class=\"p\">.</span><span class=\"n\">__opaque_fp</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\">                                        </span><span class=\"o\">^^^^^^^^^^^</span><span class=\"w\"> </span><span class=\"n\">unknown</span><span class=\"w\"> </span><span class=\"n\">field</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">note</span>: <span class=\"nc\">available</span><span class=\"w\"> </span><span class=\"n\">fields</span><span class=\"w\"> </span><span class=\"n\">are</span>: <span class=\"err\">`</span><span class=\"n\">__x</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__fp</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__lr</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__sp</span><span class=\"err\">`</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">__pc</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"n\">and</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"n\">others</span><span class=\"w\"></span>\n\n<span class=\"n\">For</span><span class=\"w\"> </span><span class=\"n\">more</span><span class=\"w\"> </span><span class=\"n\">information</span><span class=\"w\"> </span><span class=\"n\">about</span><span class=\"w\"> </span><span class=\"n\">this</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kr\">try</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">rustc</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">explain</span><span class=\"w\"> </span><span class=\"n\">E0609</span><span class=\"err\">`</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"n\">error</span>: <span class=\"nc\">could</span><span class=\"w\"> </span><span class=\"n\">not</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">wasmtime</span><span class=\"o\">-</span><span class=\"n\">runtime</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"n\">due</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"n\">previous</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"></span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 291054400,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935079
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931129194\">PR review comment</a>:</p>\n<blockquote>\n<p>This also of relates to the <code>if state.old_last_wasm_exit_pc == 0 {</code> below in the <code>for state in state.iter()</code> loop. Mostly I'm just curious if you can add some extra degree of assertions about perhaps some other fields or something like that.</p>\n<p>Is it possible to assert <code>pc != 0</code> here? Or otherwise make this conditional on the entry sp where if the entry sp is -1 then that's a host-&gt;host <code>CallThreadState</code> which has no frames, but otherwise some wasm should have been executed to yield frames.</p>\n</blockquote>",
+        "id": 291054402,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658935080
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291058856,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658936871
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052745307\">PR review</a>.</p>",
+        "id": 291058996,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658936923
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931228801\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah seems something got lost in a rebase.</p>\n</blockquote>",
+        "id": 291058997,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658936923
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052747447\">PR review</a>.</p>",
+        "id": 291059220,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658937009
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931230355\">PR review comment</a>:</p>\n<blockquote>\n<p>I can look into the cranelift side of things but will probably need to ask you lots of questions about the component trampolines themselves.</p>\n</blockquote>",
+        "id": 291059221,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658937009
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931238621\">PR review comment</a>:</p>\n<blockquote>\n<p>The <code>backtrace</code> module has two calls to <code>tls::with(...)</code>. I guess we could do <code>pub(super::backtrace)</code> or whatever the syntax is (I think I've only ever used <code>pub(crate)</code> and <code>pub(super)</code> before). Or we could make the <code>backtrace</code> module a submodule of <code>traphandlers</code>.</p>\n</blockquote>",
+        "id": 291060236,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658937460
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052758659\">PR review</a>.</p>",
+        "id": 291060238,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658937460
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052761382\">PR review</a>.</p>",
+        "id": 291060470,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658937568
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931240571\">PR review comment</a>:</p>\n<blockquote>\n<p>It is used in a debug assertion inside <code>Backtrace::trace_with_trap_state</code>. Maybe I will make the <code>backtrace</code> module a submodule of <code>traphandlers</code>, since it is the only thing that wants access to these otherwise-private fields.</p>\n</blockquote>",
+        "id": 291060471,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658937568
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931251895\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah ok, no need to do <code>pub(super::backtrace)</code>, but your other suggestion of moving <code>backtrace</code> as a submodule sounds reasonable to me.</p>\n</blockquote>",
+        "id": 291070410,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658938221
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052777550\">PR review</a>.</p>",
+        "id": 291070412,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658938222
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052779353\">PR review</a>.</p>",
+        "id": 291070589,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658938301
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931253141\">PR review comment</a>:</p>\n<blockquote>\n<p>Ok sounds good to me. Given cranelift \"intrinsics\" for getting the fp/return-pc I think it'll be relatively easy to fold in the necessary support into the component trampolines.</p>\n</blockquote>",
+        "id": 291070590,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658938301
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052884620\">PR review</a>.</p>",
+        "id": 291082084,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658943259
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052884620\">PR review</a>.</p>",
+        "id": 291082085,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658943259
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931328251\">PR review comment</a>:</p>\n<blockquote>\n<p>One small detail - <code>word</code> is a loaded term in the Arm architecture, and in this context certainly wrong, since it means 32 bits (the AAPCS64 also provides the same definition in section 5.1); up to you whether you use the architecture-neutral <code>64 bits</code> or the correct <code>double-word</code>.</p>\n</blockquote>",
+        "id": 291082086,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658943259
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931328401\">PR review comment</a>:</p>\n<blockquote>\n<p>Ditto.</p>\n</blockquote>",
+        "id": 291082088,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658943259
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052889935\">PR review</a>.</p>",
+        "id": 291082762,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658943488
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931331816\">PR review comment</a>:</p>\n<blockquote>\n<p>FWIW these terms are loaded in x86-land as well: \"word\" means 16 bits (still to this day, e.g. with a <code>.word</code> directive in GNU as assembler), \"double word\" or \"dword\" means 32 bits, and \"quad word\" or \"qword\" means 64 bits. These names appear at least in assembly but also e.g. in Windows APIs, and differ between architectures as we see here, and so I try to avoid them altogether and just say \"64 bits\" / \"u64\" / \"8 bytes above FP\" / ... as appropriate for context.</p>\n</blockquote>",
+        "id": 291082763,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658943488
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931337348\">PR review comment</a>:</p>\n<blockquote>\n<p>Personally I am fine with using the loaded terms in bits of code that are obviously architecture-specific such as this file, but have no preference otherwise, other than using the correct term, of course. Note that we are providing a direct quote from the AAPCS64 that uses both kinds of terms.</p>\n</blockquote>",
+        "id": 291083641,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658943876
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1052897622\">PR review</a>.</p>",
+        "id": 291083642,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658943876
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1053010632\">PR review</a>.</p>",
+        "id": 291089136,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658946159
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#discussion_r931421586\">PR review comment</a>:</p>\n<blockquote>\n<p>I don't think so? Because the host has no guarantees of preserving frame pointers and the FP is the host's FP in this situation, so I don't think we can assert any sort of relation here.</p>\n</blockquote>",
+        "id": 291089137,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658946159
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291096215,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658948825
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431#pullrequestreview-1053178854\">PR review</a>.</p>",
+        "id": 291104835,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658953221
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291113541,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658957701
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291121827,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658962957
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291127943,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1658968317
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291214781,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659024297
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291218071,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659025851
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291223958,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659028530
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a> from <code>fast-stack-walking</code> to <code>main</code>.</p>",
+        "id": 291258070,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659045767
+    },
+    {
+        "content": "<p>fitzgen merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4431\">PR #4431</a>.</p>",
+        "id": 291262417,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659048376
+    }
+]

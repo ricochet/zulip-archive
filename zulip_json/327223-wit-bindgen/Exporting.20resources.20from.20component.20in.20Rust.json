@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>Hi.  I'm trying to understand how to create a component which exports a resource in Rust.  I may have misunderstandings at every stage, getting confused between guest/host, etc.!</p>\n<p>Anyway, from this WIT:</p>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>package component:zipreader;\n\ninterface zip {\n    enum zip-error {\n        unknown\n    }\n    resource zipfile {\n        list-files: func() -&gt; list&lt;string&gt;;\n    }\n}\n\nworld zipread {\n    use zip.{zip-error, zipfile};\n\n    export zip;\n    export open: func(path: string) -&gt; result&lt;zipfile, zip-error&gt;;\n}\n</code></pre></div>\n<p>and using wit-bindgen as:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code>::<span class=\"n\">wit_bindgen</span>::<span class=\"n\">generate</span><span class=\"o\">!</span><span class=\"p\">({</span>\n<span class=\"w\">    </span><span class=\"n\">exports</span>: <span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"n\">world</span>: <span class=\"nc\">ZipWorld</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"s\">\"component:zipreader/zip/zipfile\"</span>: <span class=\"nc\">MyZipfile</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"p\">},</span>\n<span class=\"p\">});</span>\n</code></pre></div>\n<p>The generated <code>World</code> trait is:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">trait</span><span class=\"w\"> </span><span class=\"n\">Guest</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">open</span><span class=\"p\">(</span><span class=\"n\">path</span>: <span class=\"nc\">wit_bindgen</span>::<span class=\"n\">rt</span>::<span class=\"n\">string</span>::<span class=\"nb\">String</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nb\">Result</span><span class=\"o\">&lt;</span><span class=\"n\">Zipfile</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ZipError</span><span class=\"o\">&gt;</span><span class=\"p\">;</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>The <code>open</code> method needs to return a <code>component::zipreader::zip::Zipfile</code>, which is a generated type containing a <code>handle: Resource&lt;Zipfile&gt;</code>.  How are you meant to turn an instance of the actual type (<code>MyZipfile</code> in this example) into the generated type?  It seems like something similar to the wasmtime <code>ResourceTable</code> would fit the bill (or, for my purposes, a <code>Vec&lt;MyZipfile&gt;</code> would be fine) to get an id - but there's nowhere to store that as the <code>open</code> doesn't take any <code>self</code> type.  What am I missing?</p>",
+        "id": 424127338,
+        "sender_full_name": "Chris Emerson/jugglerchris",
+        "timestamp": 1709248957
+    },
+    {
+        "content": "<p>I believe if you follow the various type aliases you should be able to do <code>Resource::new(MyZipFile::new(...))</code>, although I agree it's a bit confusing.</p>\n<p>If you'd like I just published wit-bindgen 0.20.0 today which I think might simplify this a bit, the <code>exports</code> field is removed and the compiler error messages and documentation should be a bit clearer about how to implement this. For example <code>Zipfile</code>, a generated type, will have a function <code>Zipfile::new</code>.</p>\n<p>The 0.20.0 docs have some more documentation so there's <a href=\"https://docs.rs/wit-bindgen/latest/wit_bindgen/examples/_4_exported_resources/index.html\">an example of bindings for an exported resource</a> which generates <a href=\"https://docs.rs/wit-bindgen/latest/wit_bindgen/examples/_4_exported_resources/exports/example/exported_resources/logging/struct.Logger.html\">this API</a> which should give you a <code>::new</code> method where you'll implemente <code>GuestZipfile</code> for your <code>MyZipfile</code> type.</p>",
+        "id": 424127919,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1709249243
+    },
+    {
+        "content": "<p>Thanks.</p>",
+        "id": 424129085,
+        "sender_full_name": "Chris Emerson/jugglerchris",
+        "timestamp": 1709249791
+    },
+    {
+        "content": "<p>There is a Zipfile::new, but it's on <code>exports::component::zipreader::zip::Zipfile</code>, not <code>component::zipreader::zip::Zipfile</code> which is a different type and is the one being returned from <code>Guest::open</code>.</p>",
+        "id": 424129196,
+        "sender_full_name": "Chris Emerson/jugglerchris",
+        "timestamp": 1709249874
+    },
+    {
+        "content": "<p>I think, anyway - I'm browsing the output from <code>cargo expand</code>.</p>",
+        "id": 424129326,
+        "sender_full_name": "Chris Emerson/jugglerchris",
+        "timestamp": 1709249934
+    },
+    {
+        "content": "<p>aha I think you'll want to reorganize slightly actually</p>",
+        "id": 424129497,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1709250013
+    },
+    {
+        "content": "<p>this is subtle, but the <code>use</code> statement in your <code>world</code> is actually importing a different copy of hte <code>zip</code> interface than the one you're exporting</p>",
+        "id": 424129529,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1709250029
+    },
+    {
+        "content": "<p>so the <code>open</code> function is actually referring to a totally different <code>zipfile</code> type than the one that you have <code>export</code>f or</p>",
+        "id": 424129557,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1709250046
+    },
+    {
+        "content": "<p>You can read a bit more about this issue at <a href=\"https://github.com/WebAssembly/component-model/pull/308\">https://github.com/WebAssembly/component-model/pull/308</a>, but more-or-less I'd recommend moving the <code>open</code> method to the <code>zip</code> interface</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/component-model/pull/308\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/01ed5e4650e17ca0b11f677d14e4cb58fad24277\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f373432626666366462396135363937643431363637636332663034383030366130653836663832646165643836656564623363336565643139376464356461302f576562417373656d626c792f636f6d706f6e656e742d6d6f64656c2f70756c6c2f333038)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/component-model/pull/308\" title=\"Split 'use' inside worlds into 'use import' and 'use export' by lukewagner · Pull Request #308 · WebAssembly/component-model\">Split 'use' inside worlds into 'use import' and 'use export' by lukewagner · Pull Request #308 · WebAssembly/component-model</a></div><div class=\"message_embed_description\">This PR proposes to change how use works inside WIT worlds, based on some initial discussion in wit-bindgen/#822.\nCurrently, use can be used with the same syntax in both interfaces and worlds.  For...</div></div></div>",
+        "id": 424129609,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1709250082
+    },
+    {
+        "content": "<p>I'll look at that and look more tomorrow.  Thanks for the quick responses!</p>",
+        "id": 424129735,
+        "sender_full_name": "Chris Emerson/jugglerchris",
+        "timestamp": 1709250139
+    },
+    {
+        "content": "<p>Ok, so just to check my understanding: currently, WIT doesn't support exporting a function from a world, which returns a resource from an exported interface.  This will eventually be possible (and is possible in the component model).</p>",
+        "id": 424185707,
+        "sender_full_name": "Chris Emerson/jugglerchris",
+        "timestamp": 1709283758
+    },
+    {
+        "content": "<p>Correct!</p>",
+        "id": 424273501,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1709308436
+    }
+]

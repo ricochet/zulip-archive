@@ -1,0 +1,365 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #5141 Several questions about using Cran... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html">wasmtime / issue #5141 Several questions about using Cran...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="306459486"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306459486" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306459486">(Oct 27 2022 at 14:16)</a>:</h4>
+<p>YorickPeterse opened <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>I'm looking into using Cranelift as a backend for <a href="https://inko-lang.org/">a programming language that I'm working on</a>. Other options I have been looking into are compiling to C or using LLVM, but both come with their own set of trade-offs I'm not a fan of. For example, LLVM is generally quite slow, while C compilers tend to not give you enough control (i.e. they may reorder things unless you carefully insert compiler barriers). Cranelift is promising because of the amount of control it gives, and because it's written in Rust.</p>
+<p>Unfortunately, the Cranelift documentation is limited, to a point where I'm overwhelmed/confused about where to even start. In this issue I'll be asking several questions to hopefully clear this up. If there's a better place for asking long-form questions like this, please let me know <span aria-label="smiley" class="emoji emoji-1f603" role="img" title="smiley">:smiley:</span> </p>
+<p>To set the stage: Inko is a language similar to Go/Erlang in that it has lightweight processes, and these can suspend at more or less any place (technically these spots are known, e.g. when performing IO, but to the user it may as well be "anywhere"). This means I need to be able to maintain and swap the stacks, like stackful coroutines. I also need to be able to grow the stack, and maybe shrink it (though figuring out _when_ to do that is really tricky). Bare-metal performance is not a main goal, rather I want something that compiles fast and performs better than a well optimised interpreter (without a JIT), something I think one should be able to achieve with Cranelift.</p>
+<p>Which brings me to the questions I have, in no particular order:</p>
+<ol>
+<li>
+<p>Cranelift offers no way of injecting assembly directly into the IR. Instead it seems you have to define a C/assembly function then bind to that. Is Cranelift able to jump to a naked function defined in C and exposed using <code>#[no_mangle]</code> and <code>extern "C"</code>? The idea here is to make these stack fiddling routines naked functions so they don't introduce extra assembly overhead, and to give you full control. By jumping to them directly they essentially act as assembly macros, avoiding the function call overhead.</p>
+</li>
+<li>
+<p>Defining function names in Cranelift is a bit confusing. <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/enum.UserFuncName.html"><code>UserFuncName</code></a> basically takes two arbitrary <code>u32</code> values, and it's not clear what you'd use those for. Then there's <a href="https://docs.rs/cranelift-module/latest/cranelift_module/trait.Module.html#tymethod.declare_function"><code>Module.declare_function</code></a> which takes a <code>&amp;str</code>, and looking at some existing Cranelift projects this seems to be what they use. So which one should I use if I want to expose my function names (potentially mangled)?</p>
+</li>
+<li>
+<p>EBBs take variables as arguments, but it's not clear how you'd determine what variables to pass down to sub blocks. For example, if I have a graph where blocks <code>A</code> and <code>B</code> both jump to <code>C</code>, and <code>C</code> depends on a result produced by these blocks, how would I know what variable to pass? My own IR is already a graph but not in SSA, thus blocks can just use variables defined in some earlier block. My graph does ensure that in the above case the blocks <code>A</code> and <code>B</code> write to any variable needed by <code>C</code> where its value can differ per branch. </p>
+</li>
+<li>
+<p>How would one associate debugger information with their generated code? For example, I would like for a debugger to know about my source code, line numbers, etc. The Cranelift API doesn't seem to offer anything to do things like "map these instructions to lines X, Y, Z in the source code". Do I have to fiddle with the likes of e.g. gimli (and whatever the equivalent is for Windows)?</p>
+</li>
+<li>
+<p>Does Cranelift have any routines for detecting integer overflows? Instructions such as <code>iadd</code> seem to wrap around on overflow, so detecting it manually is doable if needed; I just don't want to reinvent this if already provided by Cranelift.</p>
+</li>
+<li>
+<p>Cranelift seems to have this notion of heaps for functions, and the ability to restrict functions to a certain portion of the heap. For my language there are no such restrictions (i.e. processes don't use fixed size heaps. How would I express this in Cranelift?</p>
+</li>
+<li>
+<p>Related to that, I'm seeing various hints about Cranelift performing heap bounds checking in various places. It's not clear to me if this would be needed in my case, and if not if there's a way of opting out (i.e. I don't want redundant heap bounds checking in my generated code). Is there more information on this somewhere?</p>
+</li>
+<li>
+<p>Related to swapping the stacks: if I insert an assembly routine in a function prologue (i.e. the function just starts with a call/jump to such a routine), is there a way to guarantee Cranelift won't move/inject anything before the call/jump? The assembly that might be needed for the system's calling convention should be fine as I can just add some padding to my stacks to account for that, but I don't want Cranelift to think my routine has no side effects and what not and just move it elsewhere.</p>
+</li>
+</ol>
+<p>Thanks for answering any of these questions, and again let me know if it's better to post this elsewhere! <span aria-label="smiley" class="emoji emoji-1f603" role="img" title="smiley">:smiley:</span> </p>
+</blockquote>
+
+
+
+<a name="306464214"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306464214" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306464214">(Oct 27 2022 at 14:41)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293630383">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<blockquote>
+<ol>
+<li>Cranelift offers no way of injecting assembly directly into the IR. Instead it seems you have to define a C/assembly function then bind to that. Is Cranelift able to jump to a naked function defined in C and exposed using #[no_mangle] and extern "C"? The idea here is to make these stack fiddling routines naked functions so they don't introduce extra assembly overhead, and to give you full control. By jumping to them directly they essentially act as assembly macros, avoiding the function call overhead.</li>
+</ol>
+</blockquote>
+<p>Yes, you can jump to functions defined in C.</p>
+<blockquote>
+<ol start="2">
+<li>Defining function names in Cranelift is a bit confusing. <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/enum.UserFuncName.html">UserFuncName</a> basically takes two arbitrary u32 values, and it's not clear what you'd use those for. Then there's <a href="https://docs.rs/cranelift-module/latest/cranelift_module/trait.Module.html#tymethod.declare_function">Module.declare_function</a> which takes a &amp;str, and looking at some existing Cranelift projects this seems to be what they use. So which one should I use if I want to expose my function names (potentially mangled)?</li>
+</ol>
+</blockquote>
+<p>You should probably be using <code>Module::declare_function</code>. <code>UserFuncName</code> is for when you are avoiding cranelift-jit and cranelift-object, but instead write your own code to do whatever you want with individual functions compiled by Cranelift.</p>
+<blockquote>
+<ol start="3">
+<li>EBBs take variables as arguments, but it's not clear how you'd determine what variables to pass down to sub blocks. For example, if I have a graph where blocks A and B both jump to C, and C depends on a result produced by these blocks, how would I know what variable to pass? My own IR is already a graph but not in SSA, thus blocks can just use variables defined in some earlier block. My graph does ensure that in the above case the blocks A and B write to any variable needed by C where its value can differ per branch.</li>
+</ol>
+</blockquote>
+<p>You can use the cranelift-frontend crate to generate SSA form on the fly.</p>
+<blockquote>
+<ol start="4">
+<li>How would one associate debugger information with their generated code? For example, I would like for a debugger to know about my source code, line numbers, etc. The Cranelift API doesn't seem to offer anything to do things like "map these instructions to lines X, Y, Z in the source code". Do I have to fiddle with the likes of e.g. gimli (and whatever the equivalent is for Windows)?</li>
+</ol>
+</blockquote>
+<p>For line info if you use cranelift-frontend you can use set_srcloc with a unique value for every source location. You can then map the SourceLoc you passed in back to the source locations after compilation and use gimli to produce the line tables. See for example <a href="https://github.com/bjorn3/rustc_codegen_cranelift/tree/master/src/debuginfo">https://github.com/bjorn3/rustc_codegen_cranelift/tree/master/src/debuginfo</a>. As for getting debuginfo for local variables there is technically support for it, but not very good.</p>
+<blockquote>
+<ol start="5">
+<li>Does Cranelift have any routines for detecting integer overflows? Instructions such as iadd seem to wrap around on overflow, so detecting it manually is doable if needed; I just don't want to reinvent this if already provided by Cranelift.</li>
+</ol>
+</blockquote>
+<p>You probably have to detect it manually for now. There are instructions like iadd_cout, but they are not supported for all integer sizes on all backends. I would like to see it implemented universally myself.</p>
+<blockquote>
+<ol start="6">
+<li>Cranelift seems to have this notion of heaps for functions, and the ability to restrict functions to a certain portion of the heap. For my language there are no such restrictions (i.e. processes don't use fixed size heaps. How would I express this in Cranelift?</li>
+</ol>
+</blockquote>
+<p>These heaps are mostly for use in the translation from wasm to clif ir. You don't have to use them. The load and store instructions can access the entire address space just fine.</p>
+<blockquote>
+<ol start="7">
+<li>Related to swapping the stacks: if I insert an assembly routine in a function prologue (i.e. the function just starts with a call/jump to such a routine), is there a way to guarantee Cranelift won't move/inject anything before the call/jump? The assembly that might be needed for the system's calling convention should be fine as I can just add some padding to my stacks to account for that, but I don't want Cranelift to think my routine has no side effects and what not and just move it elsewhere.</li>
+</ol>
+</blockquote>
+<p>No, Cranelift will always put a prologue first before doing anything. One option I guess would be to insert raw bytes representing the call before the function. You can use <code>context.compile()</code>, get the compiled code and relocations, insert your custom prologue and then call <code>module.define_function_bytes</code> instead of <code>module.define_function</code>.</p>
+<blockquote>
+<p>and again let me know if it's better to post this elsewhere! <span aria-label="smiley" class="emoji emoji-1f603" role="img" title="smiley">:smiley:</span></p>
+</blockquote>
+<p><a href="#narrow/stream/217117-cranelift">https://bytecodealliance.zulipchat.com/#narrow/stream/217117-cranelift</a> might be a better place.</p>
+</blockquote>
+
+
+
+<a name="306470466"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306470466" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306470466">(Oct 27 2022 at 15:08)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293674186">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>Hi @YorickPeterse -- thanks for the questions and interest! Apologies for the state of our documentation: we need to do an update pass, and probably develop more tutorial-like material, but we haven't had the time to do that. In any case, we're happy to answer questions here (or on our <a href="https://bytecodealliance.zulipchat.com/">Zulip</a> in the Cranelift stream), so please keep them coming if you have any more.</p>
+<p>(On preview, I see that bjorn3 has answered a bunch so I'll just add to some of them here)</p>
+<blockquote>
+<ol>
+<li>Cranelift offers no way of injecting assembly directly into the IR. Instead it seems you have to define a C/assembly function then bind to that. Is Cranelift able to jump to a naked function defined in C and exposed using <code>#[no_mangle]</code> and <code>extern "C"</code>? The idea here is to make these stack fiddling routines naked functions so they don't introduce extra assembly overhead, and to give you full control. By jumping to them directly they essentially act as assembly macros, avoiding the function call overhead.</li>
+</ol>
+</blockquote>
+<p>We currently don't have a way of injecting assembly at all -- #1041 goes over some of the reasons why. Basically, while it seems conceptually simple ("just emit the assembly I give you!"), it actually is enormously complex for all the reasons listed there (see especially <a href="https://github.com/bytecodealliance/wasmtime/issues/1041#issuecomment-531574394">this comment</a>).</p>
+<p>When you say "jump to a function", not directly; we can <em>call</em> one though, which is actually probably what you'd want. (Otherwise, how does this snippet know where to jump back to?) Perhaps you were thinking the jump would somehow inline the snippet (we don't have this)?</p>
+<p>Popping up a level (in the X-Y problem sense): the goal here is stack-switching and/or segmented stacks, goroutine-style, no? If so, I'll say that we've had good luck in Wasmtime (built on top of Cranelift) doing fiber-style stack switching for async function calls, and that didn't need anything special in Cranelift. (At a yield point in the runtime when called from Cranelift-generated code, call the "switch back to host stack" helper; it pushes registers, switches SP, and returns on the other stack.) We also have explicit support in Cranelft for stack bounds checks. Combining the two, I could see a small modification to the Cranelift prologue generator that would say "if limit reached, call this runtime function" and that function would essentially allocate a new stack, switch to it, place a little trampoline on the stack to return back to the previous segment on return, and then jump back to the return address in the function that hit the limit. I'd be happy to help design this feature if you're interested.</p>
+<blockquote>
+<ol start="5">
+<li>Does Cranelift have any routines for detecting integer overflows? Instructions such as <code>iadd</code> seem to wrap around on overflow, so detecting it manually is doable if needed; I just don't want to reinvent this if already provided by Cranelift.</li>
+</ol>
+</blockquote>
+<p>In general, no; we just added some opcodes to help us with lowering Wasm heap checks, but for maximal flexibility I'd suggest inserting checks with explicit IR. We have a set of trap instructions you can use for this: <code>icmp</code> to compare, <code>trapnz</code> on the result.</p>
+<blockquote>
+<ol start="8">
+<li>Related to swapping the stacks: if I insert an assembly routine in a function prologue (i.e. the function just starts with a call/jump to such a routine), is there a way to guarantee Cranelift won't move/inject anything before the call/jump? The assembly that might be needed for the system's calling convention should be fine as I can just add some padding to my stacks to account for that, but I don't want Cranelift to think my routine has no side effects and what not and just move it elsewhere.</li>
+</ol>
+</blockquote>
+<p>This gets back to the inline-assembly question (see above); prologues (and epilogues) in particular are even more special because the compiler generates them to set up its stack frame in a careful way, so even if you could insert instructions somehow, we'd prefer that not to be the case (it would create a brittle coupling between our stackframe and prologue design and your inserted code). We actually had a version of this problem earlier with Cranelift's embedding in SpiderMonkey -- we had a mode to generate code without pro/epilogues and the embedder built them and glued things together, but it was not maintainable.</p>
+<p>In general I like the philosophy of adding useful primitives/building blocks so that they come into the world of the compiler IR/settings and we can understand the interactions with the rest of our codegen. So, as above, I think we can design something for the "new stack segment if hit limit" case.<br>
+</p>
+</blockquote>
+
+
+
+<a name="306470559"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306470559" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306470559">(Oct 27 2022 at 15:08)</a>:</h4>
+<p>cfallin edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293674186">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>Hi @YorickPeterse -- thanks for the questions and interest! Apologies for the state of our documentation: we need to do an update pass, and probably develop more tutorial-like material, but we haven't had the time to do that. In any case, we're happy to answer questions here (or on our <a href="https://bytecodealliance.zulipchat.com/">Zulip</a> in the Cranelift stream), so please keep them coming if you have any more.</p>
+<p>(On preview, I see that bjorn3 has answered a bunch so I'll just add to some of my thoughts here)</p>
+<blockquote>
+<ol>
+<li>Cranelift offers no way of injecting assembly directly into the IR. Instead it seems you have to define a C/assembly function then bind to that. Is Cranelift able to jump to a naked function defined in C and exposed using <code>#[no_mangle]</code> and <code>extern "C"</code>? The idea here is to make these stack fiddling routines naked functions so they don't introduce extra assembly overhead, and to give you full control. By jumping to them directly they essentially act as assembly macros, avoiding the function call overhead.</li>
+</ol>
+</blockquote>
+<p>We currently don't have a way of injecting assembly at all -- #1041 goes over some of the reasons why. Basically, while it seems conceptually simple ("just emit the assembly I give you!"), it actually is enormously complex for all the reasons listed there (see especially <a href="https://github.com/bytecodealliance/wasmtime/issues/1041#issuecomment-531574394">this comment</a>).</p>
+<p>When you say "jump to a function", not directly; we can <em>call</em> one though, which is actually probably what you'd want. (Otherwise, how does this snippet know where to jump back to?) Perhaps you were thinking the jump would somehow inline the snippet (we don't have this)?</p>
+<p>Popping up a level (in the X-Y problem sense): the goal here is stack-switching and/or segmented stacks, goroutine-style, no? If so, I'll say that we've had good luck in Wasmtime (built on top of Cranelift) doing fiber-style stack switching for async function calls, and that didn't need anything special in Cranelift. (At a yield point in the runtime when called from Cranelift-generated code, call the "switch back to host stack" helper; it pushes registers, switches SP, and returns on the other stack.) We also have explicit support in Cranelft for stack bounds checks. Combining the two, I could see a small modification to the Cranelift prologue generator that would say "if limit reached, call this runtime function" and that function would essentially allocate a new stack, switch to it, place a little trampoline on the stack to return back to the previous segment on return, and then jump back to the return address in the function that hit the limit. I'd be happy to help design this feature if you're interested.</p>
+<blockquote>
+<ol start="5">
+<li>Does Cranelift have any routines for detecting integer overflows? Instructions such as <code>iadd</code> seem to wrap around on overflow, so detecting it manually is doable if needed; I just don't want to reinvent this if already provided by Cranelift.</li>
+</ol>
+</blockquote>
+<p>In general, no; we just added some opcodes to help us with lowering Wasm heap checks, but for maximal flexibility I'd suggest inserting checks with explicit IR. We have a set of trap instructions you can use for this: <code>icmp</code> to compare, <code>trapnz</code> on the result.</p>
+<blockquote>
+<ol start="8">
+<li>Related to swapping the stacks: if I insert an assembly routine in a function prologue (i.e. the function just starts with a call/jump to such a routine), is there a way to guarantee Cranelift won't move/inject anything before the call/jump? The assembly that might be needed for the system's calling convention should be fine as I can just add some padding to my stacks to account for that, but I don't want Cranelift to think my routine has no side effects and what not and just move it elsewhere.</li>
+</ol>
+</blockquote>
+<p>This gets back to the inline-assembly question (see above); prologues (and epilogues) in particular are even more special because the compiler generates them to set up its stack frame in a careful way, so even if you could insert instructions somehow, we'd prefer that not to be the case (it would create a brittle coupling between our stackframe and prologue design and your inserted code). We actually had a version of this problem earlier with Cranelift's embedding in SpiderMonkey -- we had a mode to generate code without pro/epilogues and the embedder built them and glued things together, but it was not maintainable.</p>
+<p>In general I like the philosophy of adding useful primitives/building blocks so that they come into the world of the compiler IR/settings and we can understand the interactions with the rest of our codegen. So, as above, I think we can design something for the "new stack segment if hit limit" case.<br>
+</p>
+</blockquote>
+
+
+
+<a name="306470650"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306470650" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306470650">(Oct 27 2022 at 15:09)</a>:</h4>
+<p>YorickPeterse <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293676154">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>@bjorn3 Thanks for the answers so far!</p>
+<blockquote>
+<p>Yes, you can jump to functions defined in C.</p>
+</blockquote>
+<p>In the documentation of cranelift_codegen the closest I could find is <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/trait.InstBuilder.html#method.jump">https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/trait.InstBuilder.html#method.jump</a>, but this jumps to a block and not a random memory address. Should I perhaps look in a different crate for this?</p>
+<blockquote>
+<p>You can use the cranelift-frontend crate to generate SSA form on the fly.</p>
+</blockquote>
+<p>Looking at the example on <a href="https://docs.rs/cranelift-frontend/latest/cranelift_frontend/#example">https://docs.rs/cranelift-frontend/latest/cranelift_frontend/#example</a>, it seems to use jumps but leaves out the arguments. Am I correct in thinking that if you use <code>use_var()</code> in a sub block, Cranelift automatically passes its input as an argument when jumping to said block? That is, if you have a graph like this:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">A</span><span class="w">    </span><span class="n">assign</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mi">42</span><span class="w"></span>
+<span class="o">|</span><span class="w"></span>
+<span class="o">+--------</span>-&gt;<span class="o">---------</span>-&gt; <span class="nc">C</span><span class="w"> </span><span class="k">use</span><span class="p">(</span><span class="n">a</span><span class="p">)</span><span class="w"></span>
+<span class="o">|</span><span class="w"></span>
+<span class="n">B</span><span class="w">    </span><span class="n">assign</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mi">50</span><span class="w"></span>
+</code></pre></div>
+<p>Does Cranelift construct the graph such that it passes <code>a</code> in blocks A and B as an argument to block C, such that <code>a</code> in C is whatever value was produced in the branch leading up to it? Or do I have to explicitly set <code>a</code> in A/B as an argument for the jump(s) to C?</p>
+<blockquote>
+<p>No, Cranelift will always put a prologue first before doing anything. One option I guess would be to insert raw bytes representing the call before the function. You can use context.compile(), get the compiled code and relocations, insert your custom prologue and then call module.define_function_bytes instead of module.define_function.</p>
+</blockquote>
+<p>I suspect this would probably get a bit tricky, and maybe break across versions. If I just insert a function call as the first instruction after the prologue, is there anything I can do to prevent Cranelift from moving it around, i.e. is there something like a compiler barrier? If so I think that should be good enough.</p>
+<blockquote>
+<p><a href="#narrow/stream/217117-cranelift">https://bytecodealliance.zulipchat.com/#narrow/stream/217117-cranelift</a> might be a better place.</p>
+</blockquote>
+<p>I thought about the Zulip, but it's too easy to lose track of things in a chat channel unfortunately. But if desired I can ask things over there instead <span aria-label="smiley" class="emoji emoji-1f603" role="img" title="smiley">:smiley:</span> </p>
+</blockquote>
+
+
+
+<a name="306471311"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306471311" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306471311">(Oct 27 2022 at 15:11)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293683113">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<blockquote>
+<p>Looking at the example on <a href="https://docs.rs/cranelift-frontend/latest/cranelift_frontend/#example">https://docs.rs/cranelift-frontend/latest/cranelift_frontend/#example</a>, it seems to use jumps but leaves out the arguments. Am I correct in thinking that if you use use_var() in a sub block, Cranelift automatically passes its input as an argument when jumping to said block?</p>
+</blockquote>
+<p>Correct. Cranelift-frontend automatically appends basic block arguments as necessary to handle SSA form.</p>
+</blockquote>
+
+
+
+<a name="306477895"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306477895" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306477895">(Oct 27 2022 at 15:41)</a>:</h4>
+<p>YorickPeterse <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293725669">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>@cfallin</p>
+<blockquote>
+<p>We currently don't have a way of injecting assembly at all -- #1041 goes over some of the reasons why. Basically, while it seems conceptually simple ("just emit the assembly I give you!"), it actually is enormously complex for all the reasons listed there (see especially this comment).</p>
+</blockquote>
+<p>I had indeed seen the issue, and I figured it wouldn't be as easy as just dumping assembly in the middle of the IR <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+<blockquote>
+<p>When you say "jump to a function", not directly; we can call one though, which is actually probably what you'd want. (Otherwise, how does this snippet know where to jump back to?) Perhaps you were thinking the jump would somehow inline the snippet (we don't have this)?</p>
+</blockquote>
+<p>Ah yeah good point, I forgot about actually having to jump back; heh.</p>
+<p>Either way, the function call cost isn't really something to worry about so calling a helper function should be fine.</p>
+<blockquote>
+<p>Popping up a level (in the X-Y problem sense): the goal here is stack-switching and/or segmented stacks, goroutine-style, no?</p>
+</blockquote>
+<p>Pretty much. I was planning on taking the approach outlined in <a href="https://graphitemaster.github.io/fibers/">https://graphitemaster.github.io/fibers/</a> where I'd just define a bunch of routines in assembly (instead of using setjmp/longjmp), then call those in the appropriate places.</p>
+<blockquote>
+<p>Combining the two, I could see a small modification to the Cranelift prologue generator that would say "if limit reached, call this runtime function" and that function would essentially allocate a new stack, switch to it, place a little trampoline on the stack to return back to the previous segment on return, and then jump back to the return address in the function that hit the limit. I'd be happy to help design this feature if you're interested.</p>
+</blockquote>
+<p>I can see this being useful, though I currently don't know enough about Cranelift or how exactly I would implement the routine in a cross-platform way. I think it would probably be best to first implement this in my language, then maybe come back to Cranelift to see how/if it makes sense for it to provide a generalised solution.</p>
+</blockquote>
+
+
+
+<a name="306480426"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306480426" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306480426">(Oct 27 2022 at 15:53)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293740859">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>For segmented stacks following the same abi as <a href="https://gcc.gnu.org/wiki/SplitStacks">https://gcc.gnu.org/wiki/SplitStacks</a> may work. LLVM also implements this and Rust itself used to use it back when it still used green threads.</p>
+</blockquote>
+
+
+
+<a name="306487767"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306487767" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306487767">(Oct 27 2022 at 16:27)</a>:</h4>
+<p>YorickPeterse <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293781779">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>@bjorn3 @cfallin Thanks for the info! I'll move this to Zulip and close the issue <span aria-label="smiley" class="emoji emoji-1f603" role="img" title="smiley">:smiley:</span> </p>
+</blockquote>
+
+
+
+<a name="306487770"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306487770" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306487770">(Oct 27 2022 at 16:27)</a>:</h4>
+<p>YorickPeterse closed <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>I'm looking into using Cranelift as a backend for <a href="https://inko-lang.org/">a programming language that I'm working on</a>. Other options I have been looking into are compiling to C or using LLVM, but both come with their own set of trade-offs I'm not a fan of. For example, LLVM is generally quite slow, while C compilers tend to not give you enough control (i.e. they may reorder things unless you carefully insert compiler barriers). Cranelift is promising because of the amount of control it gives, and because it's written in Rust.</p>
+<p>Unfortunately, the Cranelift documentation is limited, to a point where I'm overwhelmed/confused about where to even start. In this issue I'll be asking several questions to hopefully clear this up. If there's a better place for asking long-form questions like this, please let me know <span aria-label="smiley" class="emoji emoji-1f603" role="img" title="smiley">:smiley:</span> </p>
+<p>To set the stage: Inko is a language similar to Go/Erlang in that it has lightweight processes, and these can suspend at more or less any place (technically these spots are known, e.g. when performing IO, but to the user it may as well be "anywhere"). This means I need to be able to maintain and swap the stacks, like stackful coroutines. I also need to be able to grow the stack, and maybe shrink it (though figuring out _when_ to do that is really tricky). Bare-metal performance is not a main goal, rather I want something that compiles fast and performs better than a well optimised interpreter (without a JIT), something I think one should be able to achieve with Cranelift.</p>
+<p>Which brings me to the questions I have, in no particular order:</p>
+<ol>
+<li>
+<p>Cranelift offers no way of injecting assembly directly into the IR. Instead it seems you have to define a C/assembly function then bind to that. Is Cranelift able to jump to a naked function defined in C and exposed using <code>#[no_mangle]</code> and <code>extern "C"</code>? The idea here is to make these stack fiddling routines naked functions so they don't introduce extra assembly overhead, and to give you full control. By jumping to them directly they essentially act as assembly macros, avoiding the function call overhead.</p>
+</li>
+<li>
+<p>Defining function names in Cranelift is a bit confusing. <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/enum.UserFuncName.html"><code>UserFuncName</code></a> basically takes two arbitrary <code>u32</code> values, and it's not clear what you'd use those for. Then there's <a href="https://docs.rs/cranelift-module/latest/cranelift_module/trait.Module.html#tymethod.declare_function"><code>Module.declare_function</code></a> which takes a <code>&amp;str</code>, and looking at some existing Cranelift projects this seems to be what they use. So which one should I use if I want to expose my function names (potentially mangled)?</p>
+</li>
+<li>
+<p>EBBs take variables as arguments, but it's not clear how you'd determine what variables to pass down to sub blocks. For example, if I have a graph where blocks <code>A</code> and <code>B</code> both jump to <code>C</code>, and <code>C</code> depends on a result produced by these blocks, how would I know what variable to pass? My own IR is already a graph but not in SSA, thus blocks can just use variables defined in some earlier block. My graph does ensure that in the above case the blocks <code>A</code> and <code>B</code> write to any variable needed by <code>C</code> where its value can differ per branch. </p>
+</li>
+<li>
+<p>How would one associate debugger information with their generated code? For example, I would like for a debugger to know about my source code, line numbers, etc. The Cranelift API doesn't seem to offer anything to do things like "map these instructions to lines X, Y, Z in the source code". Do I have to fiddle with the likes of e.g. gimli (and whatever the equivalent is for Windows)?</p>
+</li>
+<li>
+<p>Does Cranelift have any routines for detecting integer overflows? Instructions such as <code>iadd</code> seem to wrap around on overflow, so detecting it manually is doable if needed; I just don't want to reinvent this if already provided by Cranelift.</p>
+</li>
+<li>
+<p>Cranelift seems to have this notion of heaps for functions, and the ability to restrict functions to a certain portion of the heap. For my language there are no such restrictions (i.e. processes don't use fixed size heaps. How would I express this in Cranelift?</p>
+</li>
+<li>
+<p>Related to that, I'm seeing various hints about Cranelift performing heap bounds checking in various places. It's not clear to me if this would be needed in my case, and if not if there's a way of opting out (i.e. I don't want redundant heap bounds checking in my generated code). Is there more information on this somewhere?</p>
+</li>
+<li>
+<p>Related to swapping the stacks: if I insert an assembly routine in a function prologue (i.e. the function just starts with a call/jump to such a routine), is there a way to guarantee Cranelift won't move/inject anything before the call/jump? The assembly that might be needed for the system's calling convention should be fine as I can just add some padding to my stacks to account for that, but I don't want Cranelift to think my routine has no side effects and what not and just move it elsewhere.</p>
+</li>
+</ol>
+<p>Thanks for answering any of these questions, and again let me know if it's better to post this elsewhere! <span aria-label="smiley" class="emoji emoji-1f603" role="img" title="smiley">:smiley:</span> </p>
+</blockquote>
+
+
+
+<a name="306495684"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306495684" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306495684">(Oct 27 2022 at 17:03)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293820586">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>As other folks have said, welcome! Although Cranelift is co-developed with Wasmtime which gives Wasmtime a little bit of a privileged position, we explicitly want to support projects like yours. So we're excited to hear from you!</p>
+<p>I especially want to emphasize that we're open to making changes to Cranelift to support new use cases. We have to balance that against making sure we have the resources for ongoing maintenance of every change we merge. But if you find that it's impossible to do something you need using Cranelift, just keep in mind that fixing Cranelift is an option.</p>
+<blockquote>
+<blockquote>
+<p>Looking at the example on <a href="https://docs.rs/cranelift-frontend/latest/cranelift_frontend/#example">https://docs.rs/cranelift-frontend/latest/cranelift_frontend/#example</a>, it seems to use jumps but leaves out the arguments. Am I correct in thinking that if you use use_var() in a sub block, Cranelift automatically passes its input as an argument when jumping to said block?</p>
+</blockquote>
+<p>Correct. Cranelift-frontend automatically appends basic block arguments as necessary to handle SSA form.</p>
+</blockquote>
+<p>To clarify, "as necessary" is doing double-duty here. Cranelift allows you to use a value in one block that was defined in another block, as long as the definition dominates the use. So <code>cranelift-frontend</code> will avoid adding a block parameter if there's exactly one definition of the variable that reaches the use. You shouldn't have to think about that as long as you use <code>cranelift-frontend</code> but it's good to be aware of if you're reading the generated Cranelift IR.</p>
+<blockquote>
+<p>If I just insert a function call as the first instruction after the prologue, is there anything I can do to prevent Cranelift from moving it around[...]?</p>
+</blockquote>
+<p>I believe, and @cfallin can correct me if I'm wrong, that currently 1) Cranelift won't move side-effecting instructions, and 2) it treats all function calls as side-effecting. It may move pure instructions past effectful ones, but I think it'll never move a pure instruction any _earlier_ in the function. So I think the current state is that if a function call is the first instruction, it will still be the first instruction after all optimizations, and only the prologue will precede it in the final machine code.</p>
+<p>Whether you can rely on that behavior in the future is another question, of course.</p>
+<p>I don't entirely understand what you're trying to do, but I'm curious whether the <code>get_stack_pointer</code> instruction added in #4573 helps your use case at all, and we can always talk about adding more instructions if we have a good motivating use case for them. Since there's ongoing work in the WebAssembly standards world on proposals for stack-switching, it could even be that Wasmtime is going to need something similar to whatever you're looking for. If there are two projects both looking for the same features from Cranelift, then that's especially strong motivation to come up with a good design.</p>
+</blockquote>
+
+
+
+<a name="306522143"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306522143" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306522143">(Oct 27 2022 at 19:25)</a>:</h4>
+<p>YorickPeterse <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293966595">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<p>@jameysharp Thanks for the reply! </p>
+<blockquote>
+<p>I don't entirely understand what you're trying to do, but I'm curious whether the get_stack_pointer instruction added in <a href="https://github.com/bytecodealliance/wasmtime/pull/4573">https://github.com/bytecodealliance/wasmtime/pull/4573</a> helps your use case at all, and we can always talk about adding more instructions if we have a good motivating use case for them.</p>
+</blockquote>
+<p>Essentially I'd need routines for the following:</p>
+<ol>
+<li>Allocating memory that can be used as stack memory. This is out of the scope of Cranelift I think, and OS/calling convention specific (i.e. Windows of course does things its own way compared to everybody else). This I'd implement in my Rust based runtime library, using the appropriate OS functions.</li>
+<li>A routine that takes a pointer to such a chunk of memory, and turns it into the current OS thread's stack memory. I think this involves mostly changing the stack pointer to point to this chunk of memory.</li>
+<li>A routine for writing all registers to a buffer, using the steps described in <a href="https://graphitemaster.github.io/fibers/#getting-the-context">https://graphitemaster.github.io/fibers/#getting-the-context</a>. For this I'd use an assembly function, or maybe a naked Rust function with inline assembly; I haven't decided yet. This being provided in a reusable manner is something I could see being useful, but I'm not sure it would fit within the scope of Cranelift.</li>
+<li>A routine that takes the current stack pointer and stores it somewhere, so that we can restore this stack later on. </li>
+</ol>
+<p>This is basically what <a href="https://graphitemaster.github.io/fibers/#user-space-context-switching">https://graphitemaster.github.io/fibers/#user-space-context-switching</a> discusses, but in Rust/Cranelift instead of C.</p>
+</blockquote>
+
+
+
+<a name="306523661"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306523661" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306523661">(Oct 27 2022 at 19:34)</a>:</h4>
+<p>YorickPeterse <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293975490">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<blockquote>
+<p>A routine for writing all registers to a buffer, using the steps described in <a href="https://graphitemaster.github.io/fibers/#getting-the-context">https://graphitemaster.github.io/fibers/#getting-the-context</a>.</p>
+</blockquote>
+<p>On second though, if Cranelift were to provide this it would be able to only save the registers actually in use at that point, rather that pessimistically having to assume any of them may be used, and thus having to save all of them. </p>
+<p>The inverse would also be true: if we have known wake-up points, Cranelift would know which registers are in use afterwards, and only restore those. This may be less useful though, as based on the register allocator and the code that follows it might just be easier to restore all of them.</p>
+</blockquote>
+
+
+
+<a name="306524087"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%235141%20Several%20questions%20about%20using%20Cran.../near/306524087" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.235141.20Several.20questions.20about.20using.20Cran.2E.2E.2E.html#306524087">(Oct 27 2022 at 19:36)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/5141#issuecomment-1293977851">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/5141">issue #5141</a>:</p>
+<blockquote>
+<blockquote>
+<p>On second though, if Cranelift were to provide this it would be able to only save the registers actually in use at that point, rather that pessimistically having to assume any of them may be used, and thus having to save all of them.</p>
+</blockquote>
+<p>That linked code only saves callee saved registers which have to be saved anyway for ABI reasons.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

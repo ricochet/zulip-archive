@@ -1,0 +1,506 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #4155 Incremental compilation cache in C... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html">wasmtime / issue #4155 Incremental compilation cache in C...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="282524636"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282524636" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282524636">(May 16 2022 at 16:55)</a>:</h4>
+<p>bnjbvr opened <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>Allow Wasmtime/Cranelift to store compiled artifacts of single functions in a global cache, and when trying to compile a function with the same IR, reload the compiled artifact from the cache instead of recompiling it from scratch.</p>
+<h4>Benefit</h4>
+<ul>
+<li>Speed up recompilation of wasm modules that have already been compiled once, but for which only a very small subset of code changed. Quite impactful for hot-reload use cases and incremental workflows, in particular.</li>
+<li>Speed up compilation of wasm modules sharing lots of inner code, creating a global compilation cache (e.g. when reusing the same libraries in different modules, it's possible the lib code may be present and the same in all the modules).</li>
+</ul>
+<h4>Implementation</h4>
+<ul>
+<li>Since this will require moar dependencies in Cranelift (namely <code>serde</code> and <code>bincode</code>) and some users might not need the compilation cache, I plan to implement this behind a Cargo feature (and behind a dynamic runtime config in Cranelift too, to enable/disable without having to recompile it all).</li>
+<li>In Cranelift, simple memoization strategy when compiling:<ul>
+<li>Use the function's _meaningful_ CLIF as the input (cache key).</li>
+<li>Use the <code>MachCompileResult</code> as the output (cache value)</li>
+</ul>
+</li>
+</ul>
+<p>To make this really efficient, the caching system should be resilient to _non-meaningful_ changes in the function's input. For instance, it should be independent of the source locations, but also to adding/removing functions (which would shift function references indices, and thus cause mostly only cache misses). This may involve relocations or other fixups to make this work, just after reloading from the cache.</p>
+<p>I also want to make sure that we don't accidentally miss a new field in the <code>ir::Function</code> being meaningful in the cache key, so here I think of using a mix of strategies:</p>
+<ul>
+<li>static typing, i.e. use new "cacheable" types for <code>MachCompileResult</code> and its fields, that require explicit conversion from/to the non-cacheable types. So when we developers add new fields to <code>MachCompileResult</code> we think about their being needed in the key or not.</li>
+<li>fuzzing. Credit goes to @cfallin for the idea: generate a random CLIF/wasm function F, compile it with the incremental compilation cache, slightly alter the function to obtain another function F", recompile it; if the cache keys for F and F" are the same, compare compiling F" from scratch with the result of loading from the cache + applying the fixups: the results should be exactly the same.</li>
+</ul>
+<p>(more implementations strategies / design choices below)</p>
+<ul>
+<li>
+<p>The caching mechanism should also check the compilation configuration (for which target are we compiling, with which cranelift compile flags).</p>
+<ul>
+<li>I hoped to be able to reuse wasmtime-cache's mechanism in there, but most of the metadata doesn't apply cleanly when translated to Cranelift. So I am planning to either split the metadata struct in the bits that apply to Cranelift and those that don't, or to create a new similar data structure.</li>
+</ul>
+</li>
+<li>
+<p>Provide a way to configure how to store/retrieve the cached bytes (basically a key/value store for which keys and values are <code>Vec&lt;u8&gt;</code> or similar). That allows user to implement their cache policy on top of that, and use different backing storage (in memory, on disk), etc.</p>
+<ul>
+<li>Wasmtime would expose a new public API to make this configurable, when enabling the incremental compilation cache. (It could be in the same public API that allows to enable the cache at all, in fact.)</li>
+<li>Is that fine to use a Rust trait here, or will it cause hardships for the C bindings?</li>
+</ul>
+</li>
+</ul>
+<h4>Alternatives</h4>
+<ul>
+<li>Speed up compilation in general using algorithmic/micro-architectural/memory optimizations, which is a fine but orthogonal goal.</li>
+<li>Have a compilation cache at the wasm level (that is, use the wasm function as the input). Probably a bit simpler, but would not benefit non-wasmtime consumers like cg_clif (... which may not need it, because it might benefit from rustc's incremental compilation framework, likely?)</li>
+<li>[OTHER SMART ALTERNATIVES GO HERE]</li>
+</ul>
+</blockquote>
+
+
+
+<a name="282524637"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282524637" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282524637">(May 16 2022 at 16:55)</a>:</h4>
+<p>bnjbvr labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>Allow Wasmtime/Cranelift to store compiled artifacts of single functions in a global cache, and when trying to compile a function with the same IR, reload the compiled artifact from the cache instead of recompiling it from scratch.</p>
+<h4>Benefit</h4>
+<ul>
+<li>Speed up recompilation of wasm modules that have already been compiled once, but for which only a very small subset of code changed. Quite impactful for hot-reload use cases and incremental workflows, in particular.</li>
+<li>Speed up compilation of wasm modules sharing lots of inner code, creating a global compilation cache (e.g. when reusing the same libraries in different modules, it's possible the lib code may be present and the same in all the modules).</li>
+</ul>
+<h4>Implementation</h4>
+<ul>
+<li>Since this will require moar dependencies in Cranelift (namely <code>serde</code> and <code>bincode</code>) and some users might not need the compilation cache, I plan to implement this behind a Cargo feature (and behind a dynamic runtime config in Cranelift too, to enable/disable without having to recompile it all).</li>
+<li>In Cranelift, simple memoization strategy when compiling:<ul>
+<li>Use the function's _meaningful_ CLIF as the input (cache key).</li>
+<li>Use the <code>MachCompileResult</code> as the output (cache value)</li>
+</ul>
+</li>
+</ul>
+<p>To make this really efficient, the caching system should be resilient to _non-meaningful_ changes in the function's input. For instance, it should be independent of the source locations, but also to adding/removing functions (which would shift function references indices, and thus cause mostly only cache misses). This may involve relocations or other fixups to make this work, just after reloading from the cache.</p>
+<p>I also want to make sure that we don't accidentally miss a new field in the <code>ir::Function</code> being meaningful in the cache key, so here I think of using a mix of strategies:</p>
+<ul>
+<li>static typing, i.e. use new "cacheable" types for <code>MachCompileResult</code> and its fields, that require explicit conversion from/to the non-cacheable types. So when we developers add new fields to <code>MachCompileResult</code> we think about their being needed in the key or not.</li>
+<li>fuzzing. Credit goes to @cfallin for the idea: generate a random CLIF/wasm function F, compile it with the incremental compilation cache, slightly alter the function to obtain another function F", recompile it; if the cache keys for F and F" are the same, compare compiling F" from scratch with the result of loading from the cache + applying the fixups: the results should be exactly the same.</li>
+</ul>
+<p>(more implementations strategies / design choices below)</p>
+<ul>
+<li>
+<p>The caching mechanism should also check the compilation configuration (for which target are we compiling, with which cranelift compile flags).</p>
+<ul>
+<li>I hoped to be able to reuse wasmtime-cache's mechanism in there, but most of the metadata doesn't apply cleanly when translated to Cranelift. So I am planning to either split the metadata struct in the bits that apply to Cranelift and those that don't, or to create a new similar data structure.</li>
+</ul>
+</li>
+<li>
+<p>Provide a way to configure how to store/retrieve the cached bytes (basically a key/value store for which keys and values are <code>Vec&lt;u8&gt;</code> or similar). That allows user to implement their cache policy on top of that, and use different backing storage (in memory, on disk), etc.</p>
+<ul>
+<li>Wasmtime would expose a new public API to make this configurable, when enabling the incremental compilation cache. (It could be in the same public API that allows to enable the cache at all, in fact.)</li>
+<li>Is that fine to use a Rust trait here, or will it cause hardships for the C bindings?</li>
+</ul>
+</li>
+</ul>
+<h4>Alternatives</h4>
+<ul>
+<li>Speed up compilation in general using algorithmic/micro-architectural/memory optimizations, which is a fine but orthogonal goal.</li>
+<li>Have a compilation cache at the wasm level (that is, use the wasm function as the input). Probably a bit simpler, but would not benefit non-wasmtime consumers like cg_clif (... which may not need it, because it might benefit from rustc's incremental compilation framework, likely?)</li>
+<li>[OTHER SMART ALTERNATIVES GO HERE]</li>
+</ul>
+</blockquote>
+
+
+
+<a name="282524639"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282524639" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282524639">(May 16 2022 at 16:55)</a>:</h4>
+<p>bnjbvr labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>Allow Wasmtime/Cranelift to store compiled artifacts of single functions in a global cache, and when trying to compile a function with the same IR, reload the compiled artifact from the cache instead of recompiling it from scratch.</p>
+<h4>Benefit</h4>
+<ul>
+<li>Speed up recompilation of wasm modules that have already been compiled once, but for which only a very small subset of code changed. Quite impactful for hot-reload use cases and incremental workflows, in particular.</li>
+<li>Speed up compilation of wasm modules sharing lots of inner code, creating a global compilation cache (e.g. when reusing the same libraries in different modules, it's possible the lib code may be present and the same in all the modules).</li>
+</ul>
+<h4>Implementation</h4>
+<ul>
+<li>Since this will require moar dependencies in Cranelift (namely <code>serde</code> and <code>bincode</code>) and some users might not need the compilation cache, I plan to implement this behind a Cargo feature (and behind a dynamic runtime config in Cranelift too, to enable/disable without having to recompile it all).</li>
+<li>In Cranelift, simple memoization strategy when compiling:<ul>
+<li>Use the function's _meaningful_ CLIF as the input (cache key).</li>
+<li>Use the <code>MachCompileResult</code> as the output (cache value)</li>
+</ul>
+</li>
+</ul>
+<p>To make this really efficient, the caching system should be resilient to _non-meaningful_ changes in the function's input. For instance, it should be independent of the source locations, but also to adding/removing functions (which would shift function references indices, and thus cause mostly only cache misses). This may involve relocations or other fixups to make this work, just after reloading from the cache.</p>
+<p>I also want to make sure that we don't accidentally miss a new field in the <code>ir::Function</code> being meaningful in the cache key, so here I think of using a mix of strategies:</p>
+<ul>
+<li>static typing, i.e. use new "cacheable" types for <code>MachCompileResult</code> and its fields, that require explicit conversion from/to the non-cacheable types. So when we developers add new fields to <code>MachCompileResult</code> we think about their being needed in the key or not.</li>
+<li>fuzzing. Credit goes to @cfallin for the idea: generate a random CLIF/wasm function F, compile it with the incremental compilation cache, slightly alter the function to obtain another function F", recompile it; if the cache keys for F and F" are the same, compare compiling F" from scratch with the result of loading from the cache + applying the fixups: the results should be exactly the same.</li>
+</ul>
+<p>(more implementations strategies / design choices below)</p>
+<ul>
+<li>
+<p>The caching mechanism should also check the compilation configuration (for which target are we compiling, with which cranelift compile flags).</p>
+<ul>
+<li>I hoped to be able to reuse wasmtime-cache's mechanism in there, but most of the metadata doesn't apply cleanly when translated to Cranelift. So I am planning to either split the metadata struct in the bits that apply to Cranelift and those that don't, or to create a new similar data structure.</li>
+</ul>
+</li>
+<li>
+<p>Provide a way to configure how to store/retrieve the cached bytes (basically a key/value store for which keys and values are <code>Vec&lt;u8&gt;</code> or similar). That allows user to implement their cache policy on top of that, and use different backing storage (in memory, on disk), etc.</p>
+<ul>
+<li>Wasmtime would expose a new public API to make this configurable, when enabling the incremental compilation cache. (It could be in the same public API that allows to enable the cache at all, in fact.)</li>
+<li>Is that fine to use a Rust trait here, or will it cause hardships for the C bindings?</li>
+</ul>
+</li>
+</ul>
+<h4>Alternatives</h4>
+<ul>
+<li>Speed up compilation in general using algorithmic/micro-architectural/memory optimizations, which is a fine but orthogonal goal.</li>
+<li>Have a compilation cache at the wasm level (that is, use the wasm function as the input). Probably a bit simpler, but would not benefit non-wasmtime consumers like cg_clif (... which may not need it, because it might benefit from rustc's incremental compilation framework, likely?)</li>
+<li>[OTHER SMART ALTERNATIVES GO HERE]</li>
+</ul>
+</blockquote>
+
+
+
+<a name="282524655"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282524655" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282524655">(May 16 2022 at 16:55)</a>:</h4>
+<p>bnjbvr assigned <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a> (assigned to bnjbvr):</p>
+<blockquote>
+<h4>Feature</h4>
+<p>Allow Wasmtime/Cranelift to store compiled artifacts of single functions in a global cache, and when trying to compile a function with the same IR, reload the compiled artifact from the cache instead of recompiling it from scratch.</p>
+<h4>Benefit</h4>
+<ul>
+<li>Speed up recompilation of wasm modules that have already been compiled once, but for which only a very small subset of code changed. Quite impactful for hot-reload use cases and incremental workflows, in particular.</li>
+<li>Speed up compilation of wasm modules sharing lots of inner code, creating a global compilation cache (e.g. when reusing the same libraries in different modules, it's possible the lib code may be present and the same in all the modules).</li>
+</ul>
+<h4>Implementation</h4>
+<ul>
+<li>Since this will require moar dependencies in Cranelift (namely <code>serde</code> and <code>bincode</code>) and some users might not need the compilation cache, I plan to implement this behind a Cargo feature (and behind a dynamic runtime config in Cranelift too, to enable/disable without having to recompile it all).</li>
+<li>In Cranelift, simple memoization strategy when compiling:<ul>
+<li>Use the function's _meaningful_ CLIF as the input (cache key).</li>
+<li>Use the <code>MachCompileResult</code> as the output (cache value)</li>
+</ul>
+</li>
+</ul>
+<p>To make this really efficient, the caching system should be resilient to _non-meaningful_ changes in the function's input. For instance, it should be independent of the source locations, but also to adding/removing functions (which would shift function references indices, and thus cause mostly only cache misses). This may involve relocations or other fixups to make this work, just after reloading from the cache.</p>
+<p>I also want to make sure that we don't accidentally miss a new field in the <code>ir::Function</code> being meaningful in the cache key, so here I think of using a mix of strategies:</p>
+<ul>
+<li>static typing, i.e. use new "cacheable" types for <code>MachCompileResult</code> and its fields, that require explicit conversion from/to the non-cacheable types. So when we developers add new fields to <code>MachCompileResult</code> we think about their being needed in the key or not.</li>
+<li>fuzzing. Credit goes to @cfallin for the idea: generate a random CLIF/wasm function F, compile it with the incremental compilation cache, slightly alter the function to obtain another function F", recompile it; if the cache keys for F and F" are the same, compare compiling F" from scratch with the result of loading from the cache + applying the fixups: the results should be exactly the same.</li>
+</ul>
+<p>(more implementations strategies / design choices below)</p>
+<ul>
+<li>
+<p>The caching mechanism should also check the compilation configuration (for which target are we compiling, with which cranelift compile flags).</p>
+<ul>
+<li>I hoped to be able to reuse wasmtime-cache's mechanism in there, but most of the metadata doesn't apply cleanly when translated to Cranelift. So I am planning to either split the metadata struct in the bits that apply to Cranelift and those that don't, or to create a new similar data structure.</li>
+</ul>
+</li>
+<li>
+<p>Provide a way to configure how to store/retrieve the cached bytes (basically a key/value store for which keys and values are <code>Vec&lt;u8&gt;</code> or similar). That allows user to implement their cache policy on top of that, and use different backing storage (in memory, on disk), etc.</p>
+<ul>
+<li>Wasmtime would expose a new public API to make this configurable, when enabling the incremental compilation cache. (It could be in the same public API that allows to enable the cache at all, in fact.)</li>
+<li>Is that fine to use a Rust trait here, or will it cause hardships for the C bindings?</li>
+</ul>
+</li>
+</ul>
+<h4>Alternatives</h4>
+<ul>
+<li>Speed up compilation in general using algorithmic/micro-architectural/memory optimizations, which is a fine but orthogonal goal.</li>
+<li>Have a compilation cache at the wasm level (that is, use the wasm function as the input). Probably a bit simpler, but would not benefit non-wasmtime consumers like cg_clif (... which may not need it, because it might benefit from rustc's incremental compilation framework, likely?)</li>
+<li>[OTHER SMART ALTERNATIVES GO HERE]</li>
+</ul>
+</blockquote>
+
+
+
+<a name="282524945"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282524945" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282524945">(May 16 2022 at 16:57)</a>:</h4>
+<p>bnjbvr <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1127910732">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>I should add: I've started working on this. I already have something that works for the simplest case, that is, changing a single statement in the source code and recompiling only recompiles the one function that changed. I'm now looking into making it resilient when adding/removing functions internally-defined in the same wasm module (viz. not imported functions yet).</p>
+</blockquote>
+
+
+
+<a name="282529063"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282529063" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282529063">(May 16 2022 at 17:10)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1127923178">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>Can you hash the entirety of <code>Function</code> as cache key and instead ensure that the <code>Function</code> only changes when there are meaningful changes to the input wasm? For example you could renumber all <code>FuncRef</code> starting from 0 in a deterministic way. So for example a function calling functions 5 and 3 could get <code>FuncRef(0)</code> and <code>FuncRef(1)</code> to reference functions 5 and 3 respectively. If a new function shifts said functions to offset 6 and 4, you would still get <code>FuncRef(0)</code> and <code>FuncRef(1)</code>, but a different mapping table. This should even be resilient against a completely different function with the same signature being called as the <code>FuncRef</code>'s wouldn't change. For <code>VMContext</code> offsets you could introduce a new <code>GlobalValueData</code> variant containing a constant allowing relocating of <code>VMContext</code> offsets after compilation. For source locations you could tell cranelift-codegen the source locations relative to the start of the function and then add the function offset when actually using them.</p>
+<p>Also I think this caching implementation can be kept in a separate crate. There is already a cranelift-codegen feature to enable serde serialization and deserialization of <code>Function</code>, which should be enough.</p>
+<blockquote>
+<p>Probably a bit simpler, but would not benefit non-wasmtime consumers like cg_clif (... which may not need it, because it might benefit from rustc's incremental compilation framework, likely?)</p>
+</blockquote>
+<p>Cg_clif benefits from rustc's incremental compilation framework, but that one only works at the level of codegen units for codegen which is less fine grained than individual functions.</p>
+</blockquote>
+
+
+
+<a name="282529590"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282529590" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282529590">(May 16 2022 at 17:14)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1127927295">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>Thanks for writing all of this up, @bnjbvr! I am very excited to see how this works out, and early results already show that it should be a huge improvement for users with tight edit-compile-reload loops.</p>
+<p>Two things I wanted to add:</p>
+<ol>
+<li>
+<p>A little more detail on the "relocations" idea that we came up with, both to document it here and to see if others can think of related ideas or any issues. The basic idea is that parts of <em>input</em> (CLIF) to Cranelift may vary slightly in unimportant ways when other parts of a Wasm module are changed. These are "renumbering" kinds of problems: the shape of the CLIF is the same, but particular values change.</p>
+<p>Two particular examples are: <code>SourceLoc</code>s (e.g. all the source code for the slightly-edited input Wasm module shifts down by one line) and offsets in Wasmtime's <code>vmctx</code> struct at which imported function structs are loaded (e.g. adding an import shifts all of these after the import down by 16 bytes).</p>
+<p>The basic idea is to make these constants "symbolic" somehow and feed them into the code as fixups after the point at which it's cached. (We called them "relocations" in our discussion but actually I like something like "constant parameters" a bit better now...) Inserting concrete values for constant parameters may involve fixups in the <code>MachCompileResult</code>'s metadata (e.g. for line-number info) but also maybe in the machine code itself (e.g. a constant offset for a load).</p>
+<p>The latter case makes things interesting too: e.g. a load may go out-of-range (for example with the 12-bit offset for a reg+imm addressing mode on AArch64). In this case I think we can say that parameter insertion may "fail", and we just fall back to a compilation from scratch. So adding imports might hit a cliff at some point at which all the generated code needs to start using a more verbose access sequence to a huge <code>vmctx</code>, but that's OK.</p>
+</li>
+<li>
+<p>Regarding the caching API itself: I think I might actually slightly prefer an "inverted control" scheme here where the embedder controls all access to the KV store, rather than try to reuse something from Wasmtime. In particular, if the CLIF lets us get a "cache key", and if the compiler context exposes the two-step process "compile to cacheable object" and "finalize cacheable object given concrete params/actual CLIF/..." then one could write a wrapper around this that does the right thing with a KV store, but it's more flexible.</p>
+<p>The specific reason I favor this is that it keeps Cranelift agnostic to any notions of storage or IO; a compiler really should live as much as possible in the "pure function from data to data" space. And there may be other ways a user would want to use this functionality than we initially imagine and bake into a KV-store trait. Two particular cases that are hard are the C API, as you mention; but also e.g. async (what if the KV store is async? Do large parts of Cranelift become async too?).</p>
+</li>
+</ol>
+</blockquote>
+
+
+
+<a name="282529630"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282529630" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282529630">(May 16 2022 at 17:14)</a>:</h4>
+<p>cfallin edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1127927295">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>Thanks for writing all of this up, @bnjbvr! I am very excited to see how this works out, and early results already show that it should be a huge improvement for users with tight edit-compile-reload loops.</p>
+<p>Two things I wanted to add:</p>
+<ol>
+<li>
+<p>A little more detail on the "relocations" idea that we came up with, both to document it here and to see if others can think of related ideas or any issues. The basic idea is that parts of <em>input</em> (CLIF) to Cranelift may vary slightly in unimportant ways when other parts of a Wasm module are changed. These are "renumbering" kinds of problems: the shape of the CLIF is the same, but particular values change.</p>
+<p>Two particular examples are: <code>SourceLoc</code>s (e.g. all the source code for the slightly-edited input Wasm module shifts down by one line) and offsets in Wasmtime's <code>vmctx</code> struct at which imported function structs are loaded (e.g. adding an import shifts all of these after the import down by 16 bytes).</p>
+<p>The basic idea is to make these constants "symbolic" somehow and feed them into the code as fixups after the point at which it's cached. (We called them "relocations" in our discussion but actually I like something like "constant parameters" a bit better now...) Inserting concrete values for constant parameters may involve fixups in the <code>MachCompileResult</code>'s metadata (e.g. for line-number info) but also maybe in the machine code itself (e.g. a constant offset for a load).</p>
+<p>The latter case makes things interesting too: e.g. a load may go out-of-range (for example with the 12-bit offset for a reg+imm addressing mode on AArch64). In this case I think we can say that parameter insertion may "fail", and we just fall back to a compilation from scratch. So adding imports might hit a cliff at some point at which all the generated code needs to start using a more verbose access sequence to a huge <code>vmctx</code>, but that's OK.</p>
+</li>
+<li>
+<p>Regarding the caching API itself: I think I might actually slightly prefer an "inverted control" scheme here where the embedder controls all access to the KV store, rather than try to reuse something from Wasmtime. In particular, if the CLIF lets us get a "cache key", and if the compiler context exposes the two-step process "compile to cacheable object" and "finalize cacheable object given concrete params/actual CLIF/..." then one could write a wrapper around this that does the right thing with a KV store, but it's more flexible.</p>
+<p>The specific reason I favor this is that it keeps Cranelift agnostic to any notions of storage or IO; a compiler really should live as much as possible in the "pure function from data to data" space. And there may be other ways a user would want to use this functionality than we initially imagine and bake into a KV-store trait. Two particular cases that are hard are the C API, as you mention; but also e.g. async (what if the KV store is async? Do large parts of Cranelift become async too?).</p>
+</li>
+</ol>
+</blockquote>
+
+
+
+<a name="282535772"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282535772" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282535772">(May 16 2022 at 17:56)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1127968756">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>From an internal design perspective I would recommend following <a href="https://github.com/bytecodealliance/wasmtime/blob/edf07a8da64f9bbfecccca9faf1577735d2181c6/crates/cache/src/lib.rs#L61-L79">what <code>wasmtime-cache</code> is already doing</a> which is to have a function that looks like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">get_data_raw</span><span class="o">&lt;</span><span class="n">T</span><span class="p">,</span><span class="w"> </span><span class="n">U</span><span class="p">,</span><span class="w"> </span><span class="n">E</span><span class="o">&gt;</span><span class="p">(</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">state</span>: <span class="kp">&amp;</span><span class="nc">T</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// NOTE: These are function pointers instead of closures so that they</span>
+<span class="w">        </span><span class="c1">// don't accidentally close over something not accounted in the cache.</span>
+<span class="w">        </span><span class="n">compute</span>: <span class="nc">fn</span><span class="p">(</span><span class="o">&amp;</span><span class="n">T</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Result</span><span class="o">&lt;</span><span class="n">U</span><span class="p">,</span><span class="w"> </span><span class="n">E</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">serialize</span>: <span class="nc">fn</span><span class="p">(</span><span class="o">&amp;</span><span class="n">T</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">U</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">deserialize</span>: <span class="nc">fn</span><span class="p">(</span><span class="o">&amp;</span><span class="n">T</span><span class="p">,</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Option</span><span class="o">&lt;</span><span class="n">U</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Result</span><span class="o">&lt;</span><span class="n">U</span><span class="p">,</span><span class="w"> </span><span class="n">E</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="k">where</span><span class="w"></span>
+<span class="w">        </span><span class="n">T</span>: <span class="nc">Hash</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// ...</span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>Here <code>state</code> is explicitly <code>Hash</code> to generate a sha or something like that and the <code>compute</code>, <code>serialize</code>, and <code>deserialize</code> functions are all explicitly function pointers that cannot close over state. This means that the computation of <code>U</code>, the memoization of the <code>compute</code> computation over <code>T</code>, is guaranteed to reasonably be a function of <code>T</code>. </p>
+<p>Ideally the <code>wasmtime-cache</code> bits could either be reused for this or somehow refactored to not duplicate this. Historically I have found that stale caches, especially with incremental compilation, are so difficult to debug and diagnose that getting the interface right so that it's practically never broken is extremely important.</p>
+</blockquote>
+
+
+
+<a name="282655453"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282655453" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282655453">(May 17 2022 at 15:12)</a>:</h4>
+<p>bnjbvr <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1128994790">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>(Will use ICC for incremental compilation cache from now on :))</p>
+<blockquote>
+<p>Can you hash the entirety of Function as cache key and instead ensure that the Function only changes when there are meaningful changes to the input wasm? For example you could renumber all FuncRef starting from 0 in a deterministic way. So for example a function calling functions 5 and 3 could get FuncRef(0) and FuncRef(1) to reference functions 5 and 3 respectively. If a new function shifts said functions to offset 6 and 4, you would still get FuncRef(0) and FuncRef(1), but a different mapping table. This should even be resilient against a completely different function with the same signature being called as the FuncRef's wouldn't change. For VMContext offsets you could introduce a new GlobalValueData variant containing a constant allowing relocating of VMContext offsets after compilation. For source locations you could tell cranelift-codegen the source locations relative to the start of the function and then add the function offset when actually using them.</p>
+</blockquote>
+<p>I think that's a fine idea, but I wonder if this wouldn't bias the code towards the incremental cache a bit too much, making it non "zero-cost" for users who disabled the incremental compilation cache (ICC) feature? Say, when it comes to source locations, this means that first we'd transform all source locations into relative (from start) ones, then if the ICC isn't used, re-transform them back later into absolute source locations (for the <code>MachReloc</code>s to be correct) -- or carry different meanings for these fields whether the ICC is enabled or not. This back-and-forth wouldn't add any value to users not using the ICC, so I tend to slightly prefer the opposite choice which is to have bespoke "mirror" data structures for the compilation cache (which could contain plain references to <code>Function</code>'s fields, when they don't need any change, and only introduce new ones when they do need internal changes).</p>
+<p>The strategies you mention here can still be used, though. In fact the relative-from-start source location was what I implemented for that specific problem indeed, and I had a similar idea of a scheme for function refs.</p>
+<blockquote>
+<p>Also I think this caching implementation can be kept in a separate crate. There is already a cranelift-codegen feature to enable serde serialization and deserialization of Function, which should be enough.</p>
+</blockquote>
+<p>That would be really nice if it could be a separate crate, yet I am unclear if it's doable because currently the ICC uses lots of cranelift-codegen internals. Will keep this in mind, and we can reconsider this later when closer to the "final" design and implementation.</p>
+</blockquote>
+
+
+
+<a name="282663003"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282663003" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282663003">(May 17 2022 at 15:59)</a>:</h4>
+<p>bnjbvr <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1129046723">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>@alexcrichton @cfallin I am trying to consolidate the two design suggestions, so rephrasing to make sure I've understood clearly:</p>
+<ul>
+<li>Alex is proposing to reuse the backing storage that's used for Wasmtime caching of modules, since there's already a nice API that handles that, with safety backed in the function signature and generics.<ul>
+<li>If I have understood clearly: this is something I would like to avoid, since our use case implies having control over the storage itself, and not reuse the on-disk cache directory that wasmtime uses. (In fact, we're not using wasmtime-cache because of that need for control over the backing storage for the cache.) Also, I think that the <code>compute</code> in this case would be one of the methods exposed in <code>cranelift_codegen</code> and proposed by Chris, so it wouldn't really need to be provided by a wasmtime user, then, right?</li>
+</ul>
+</li>
+<li>Chris is proposing that cranelift-codegen exposes 2 methods: one to perform the compile step with constants, and then another one to finish the compilation by fixing up the constants.<ul>
+<li>This makes sense to me, and indeed makes it possible to have all sorts of IO providers on top of that. Then from looking at the callers of <code>cranelift_codegen::compile</code>, I think that we'd need a way to specify _another_ <code>wasmtime_environ::compilation::Compiler</code> impl in <code>Module::build_artifacts</code>, so we can use the ICC methods provided by <code>cranelift-codegen</code> there. Am I understanding this correctly? If so, would refactoring the <code>Engine</code>'s code to use a <code>Box&lt;dyn Compiler&gt;</code> instead of the concrete <code>wasmtime_environ::Compiler</code> impl make sense, as well as providing a public API to set a <code>dyn Compiler</code> impl that should be used at runtime? (If not, I'm happy to chat on Zulip!)</li>
+</ul>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="282664383"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282664383" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282664383">(May 17 2022 at 16:06)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1129054588">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>To clarify I'm talking more about methods of caching moreso than using specific code exactly as-is without any modifications. The strategy used by <code>wasmtime-cache</code> I feel is pretty solid and we should be quite deliberate about migrating away from that if we do.</p>
+<p>I do think it would be a not-great state to be in to have two caching systems at the end of this, so I think in the long run we don't want two entirely separate systems for caching things that know nothing of each other. In the short-to-mid term though it's fine to develop whatever and refactor things later to share more code.</p>
+</blockquote>
+
+
+
+<a name="282666782"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282666782" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282666782">(May 17 2022 at 16:22)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1129070569">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<blockquote>
+<p>Say, when it comes to source locations, this means that first we'd transform all source locations into relative (from start) ones, then if the ICC isn't used, re-transform them back later into absolute source locations (for the MachRelocs to be correct)</p>
+</blockquote>
+<p>We already need transforming between the output format of cranelift and the serialized format of wasmtime. It is just a cheap addition which can be folded into this transformation. Basically just add the addition here: <a href="https://github.com/bytecodealliance/wasmtime/blob/cb13175c429d6b3e63c8122ce6427b4529a2873d/crates/cranelift/src/compiler.rs#L652">https://github.com/bytecodealliance/wasmtime/blob/cb13175c429d6b3e63c8122ce6427b4529a2873d/crates/cranelift/src/compiler.rs#L652</a></p>
+<blockquote>
+<p>so I tend to slightly prefer the opposite choice which is to have bespoke "mirror" data structures for the compilation cache (which could contain plain references to Function's fields, when they don't need any change, and only introduce new ones when they do need internal changes).</p>
+</blockquote>
+<p>That would make the incremental compilation cache depend on the original version of the function, right? I'm afraid that would turn hard to debug bugs like is normally the case for incremental compilation related bugs into straight up nightmares.</p>
+</blockquote>
+
+
+
+<a name="282674386"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282674386" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282674386">(May 17 2022 at 17:10)</a>:</h4>
+<p>bnjbvr <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1129115344">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<blockquote>
+<p>It is just a cheap addition which can be folded into this transformation. Basically just add the addition here: </p>
+</blockquote>
+<p>I guess it's not "just" that :-). In practice every transitive field that contains a <code>SourceLoc</code> in <code>MachCompileResult</code> should get the same treatment, so that also means tweaking <code>mach_reloc_to_reloc</code>, <code>mach_trap_to_trap</code>, etc. That also means moving the responsibility of doing those fixups from Cranelift to the consumer of the compiled artifact, when the initial intent was to make it as easy as possible for every Cranelift user to have something that works out of the box without requiring them to do extra work. (This argument has limited applicability as the two main users are wasmtime and cg_clif, but still hold in theory at least.)</p>
+<p>I do hear your concerns about running into incremental compilation related bugs, though, which would be mitigated by the mix of static typing sanity + fuzzing; any other idea to make it more robust is appreciated here too.</p>
+</blockquote>
+
+
+
+<a name="282675034"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282675034" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282675034">(May 17 2022 at 17:14)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1129119145">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>To unify things a bit: I think that we could, and probably should, use the same caching mechanism for both the Wasmtime module-level cache and any Cranelift function-level cache. I was mainly concerned above about flexibility (unsure with a synchronous API like wasmtime-cache: how would one use an async external storage provider, e.g. a key-value store across a network?).</p>
+<p>I agree with @alexcrichton that we should design to make it impossible to get cache keys wrong. To that end if we have a "put together the pieces yourself" option, I think that we can still make it completely safe by storing the expected CLIF hash in the cached value as well, and checking that on return. In essence the interface that I think provides maximum flexibility is something like:</p>
+<ul>
+<li><code>Context::compile_to_cacheable() -&gt; (CacheKey, Vec&lt;u8&gt;)</code>: from a Cranelift function, get bytes and a cache key</li>
+<li><code>Context::get_expected_cache_key() -&gt; CacheKey</code>: from a Cranelift function, get the cache key for the cached compilation result we need, if any</li>
+<li><code>Context::compile_maybe_with_cache(bytes: Option&lt;&amp;[u8]&gt;) -&gt; MachCompileResult</code>: from a Cranelift function, compile to machine code. If the given bytes are a valid compilation result from <code>compile_to_cacheable()</code> <em>with a matching hash to what's embedded in the bytes</em>, then use them; otherwise fall back to from-scratch compilation. Also fall back to from-scratch if cached result isn't usable due to e.g. an offset going out-of-bounds with vmctx shifts.</li>
+</ul>
+<p>This is fully "dynamically safe" in that the cached data is only used if the cache key matches, and the cache key production is internal to Cranelift and opaque to outside. We can then use the type-safety ideas that Ben mentions (wrapper types on fields) to make that CacheKey correct.</p>
+<p>This together with the fuzzing to verify correctness of incremental compilation I <em>suspect</em> is enough, and this whole approach grants the flexibility that Ben's case needs.</p>
+<p>Then tying this back to Wasmtime: <code>wasmtime-cache</code> could potentially <em>use</em> these building blocks to cache functions as well as whole modules; or an advanced user of Cranelift could use them directly. Thoughts?</p>
+</blockquote>
+
+
+
+<a name="282675117"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/282675117" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#282675117">(May 17 2022 at 17:15)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1129119600">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<blockquote>
+<p>I guess it's not "just" that :-). In practice every transitive field that contains a SourceLoc in MachCompileResult should get the same treatment, so that also means tweaking mach_reloc_to_reloc, mach_trap_to_trap, etc. </p>
+</blockquote>
+<p>mach_reloc_to_reloc ignores srcloc and so does mach_trap_to_trap. collect_address_maps seems to be the only that actually reads srcloc.</p>
+</blockquote>
+
+
+
+<a name="283320199"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/283320199" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#283320199">(May 23 2022 at 13:41)</a>:</h4>
+<p>bnjbvr <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1134695184">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<blockquote>
+<p>mach_reloc_to_reloc ignores srcloc and so does mach_trap_to_trap. collect_address_maps seems to be the only that actually reads srcloc.</p>
+</blockquote>
+<p>Indeed, I even started a patch to remove those as they're really unused in the code base,... and then I recalled that Spidermonkey would use those (if it integrated with the new backend). Anyhow, I don't still think it would make for a good API to request <em>any</em> cranelift embedder to do this kind of transform themselves, when it can just be done in Cranelift directly, so I'm going to stick with my plan (which is more aligned with what Chris suggests too), incorporating the good ideas from yours :)</p>
+</blockquote>
+
+
+
+<a name="283321792"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/283321792" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#283321792">(May 23 2022 at 13:54)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1134709525">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<blockquote>
+<p>Indeed, I even started a patch to remove those as they're really unused in the code base,... and then I recalled that Spidermonkey would use those (if it integrated with the new backend).</p>
+</blockquote>
+<p>mach_reloc_to_reloc and friends are in wasmtime-cranelift so spidermonkey can't use them even if it wanted to. They are the translation between Cranelift's representation and Wasmtime's serializable representation of the compilation results.</p>
+</blockquote>
+
+
+
+<a name="283322173"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/283322173" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#283322173">(May 23 2022 at 13:56)</a>:</h4>
+<p>bnjbvr <a href="https://github.com/bytecodealliance/wasmtime/issues/4155#issuecomment-1134712339">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a>:</p>
+<blockquote>
+<p>I was talking about the <code>srcloc</code> fields in <code>MachTrap</code> et al. In fact I've received confirmation from the Spidermonkey folks that they might not need it, so will open a PR to remove these, as an incremental step towards this.</p>
+<p>(Sorry all for the noise caused by this sidetracked discussion, and @bjorn3 happy to follow up in Zulip if you'd like to chat more about this.)</p>
+</blockquote>
+
+
+
+<a name="293151207"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234155%20Incremental%20compilation%20cache%20in%20C.../near/293151207" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234155.20Incremental.20compilation.20cache.20in.20C.2E.2E.2E.html#293151207">(Aug 12 2022 at 16:47)</a>:</h4>
+<p>bnjbvr closed <a href="https://github.com/bytecodealliance/wasmtime/issues/4155">issue #4155</a> (assigned to bnjbvr):</p>
+<blockquote>
+<h4>Feature</h4>
+<p>Allow Wasmtime/Cranelift to store compiled artifacts of single functions in a global cache, and when trying to compile a function with the same IR, reload the compiled artifact from the cache instead of recompiling it from scratch.</p>
+<h4>Benefit</h4>
+<ul>
+<li>Speed up recompilation of wasm modules that have already been compiled once, but for which only a very small subset of code changed. Quite impactful for hot-reload use cases and incremental workflows, in particular.</li>
+<li>Speed up compilation of wasm modules sharing lots of inner code, creating a global compilation cache (e.g. when reusing the same libraries in different modules, it's possible the lib code may be present and the same in all the modules).</li>
+</ul>
+<h4>Implementation</h4>
+<ul>
+<li>Since this will require moar dependencies in Cranelift (namely <code>serde</code> and <code>bincode</code>) and some users might not need the compilation cache, I plan to implement this behind a Cargo feature (and behind a dynamic runtime config in Cranelift too, to enable/disable without having to recompile it all).</li>
+<li>In Cranelift, simple memoization strategy when compiling:<ul>
+<li>Use the function's _meaningful_ CLIF as the input (cache key).</li>
+<li>Use the <code>MachCompileResult</code> as the output (cache value)</li>
+</ul>
+</li>
+</ul>
+<p>To make this really efficient, the caching system should be resilient to _non-meaningful_ changes in the function's input. For instance, it should be independent of the source locations, but also to adding/removing functions (which would shift function references indices, and thus cause mostly only cache misses). This may involve relocations or other fixups to make this work, just after reloading from the cache.</p>
+<p>I also want to make sure that we don't accidentally miss a new field in the <code>ir::Function</code> being meaningful in the cache key, so here I think of using a mix of strategies:</p>
+<ul>
+<li>static typing, i.e. use new "cacheable" types for <code>MachCompileResult</code> and its fields, that require explicit conversion from/to the non-cacheable types. So when we developers add new fields to <code>MachCompileResult</code> we think about their being needed in the key or not.</li>
+<li>fuzzing. Credit goes to @cfallin for the idea: generate a random CLIF/wasm function F, compile it with the incremental compilation cache, slightly alter the function to obtain another function F", recompile it; if the cache keys for F and F" are the same, compare compiling F" from scratch with the result of loading from the cache + applying the fixups: the results should be exactly the same.</li>
+</ul>
+<p>(more implementations strategies / design choices below)</p>
+<ul>
+<li>
+<p>The caching mechanism should also check the compilation configuration (for which target are we compiling, with which cranelift compile flags).</p>
+<ul>
+<li>I hoped to be able to reuse wasmtime-cache's mechanism in there, but most of the metadata doesn't apply cleanly when translated to Cranelift. So I am planning to either split the metadata struct in the bits that apply to Cranelift and those that don't, or to create a new similar data structure.</li>
+</ul>
+</li>
+<li>
+<p>Provide a way to configure how to store/retrieve the cached bytes (basically a key/value store for which keys and values are <code>Vec&lt;u8&gt;</code> or similar). That allows user to implement their cache policy on top of that, and use different backing storage (in memory, on disk), etc.</p>
+<ul>
+<li>Wasmtime would expose a new public API to make this configurable, when enabling the incremental compilation cache. (It could be in the same public API that allows to enable the cache at all, in fact.)</li>
+<li>Is that fine to use a Rust trait here, or will it cause hardships for the C bindings?</li>
+</ul>
+</li>
+</ul>
+<h4>Alternatives</h4>
+<ul>
+<li>Speed up compilation in general using algorithmic/micro-architectural/memory optimizations, which is a fine but orthogonal goal.</li>
+<li>Have a compilation cache at the wasm level (that is, use the wasm function as the input). Probably a bit simpler, but would not benefit non-wasmtime consumers like cg_clif (... which may not need it, because it might benefit from rustc's incremental compilation framework, likely?)</li>
+<li>[OTHER SMART ALTERNATIVES GO HERE]</li>
+</ul>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

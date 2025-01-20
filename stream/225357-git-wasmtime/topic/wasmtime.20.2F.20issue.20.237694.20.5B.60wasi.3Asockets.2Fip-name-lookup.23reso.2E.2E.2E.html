@@ -1,0 +1,117 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #7694 [`wasi:sockets/ip-name-lookup#reso... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237694.20.5B.60wasi.3Asockets.2Fip-name-lookup.23reso.2E.2E.2E.html">wasmtime / issue #7694 [`wasi:sockets/ip-name-lookup#reso...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="408219636"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237694%20%5B%60wasi%3Asockets/ip-name-lookup%23reso.../near/408219636" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237694.20.5B.60wasi.3Asockets.2Fip-name-lookup.23reso.2E.2E.2E.html#408219636">(Dec 15 2023 at 16:36)</a>:</h4>
+<p>rylev opened <a href="https://github.com/bytecodealliance/wasmtime/issues/7694">issue #7694</a>:</p>
+<blockquote>
+<p>My use case is essentially to allow any socket operation as long as the IP addressed used for that operation was resolved in the last call to <code>wasi:sockets/ip-name-lookup#resolve_addresses</code>. </p>
+<p>Given the changes in <a href="https://github.com/bytecodealliance/wasmtime/pull/7662">https://github.com/bytecodealliance/wasmtime/pull/7662</a> this would stand to reason that somehow I need the ability to have a list of resolved names to IP addresses in the closure passed to <code>socket_addr_check</code>. </p>
+<p>This could be accomplished in several ways:</p>
+<ol>
+<li>Wasmtime passes such a list directly as an argument to the <code>SocketAddrCheck</code> closure.</li>
+<li>Wasmtime gives a way for the embedder to query what the list is at any time.</li>
+<li>Wasmtime allows the embedder to hook into DNS resolution and be called back with any (name, resolved IP address) pairs </li>
+<li>Other ways?</li>
+</ol>
+<p>I think I might lean towards option 3. Perhaps this callback could be in the form <code>Fn(&amp;str, IpAddress) -&gt; Result&lt;(), ErrorCode&gt;</code> which would be called anytime <code>resolve_next_address</code> is about to return a <code>Ok(Some(addr))</code> to the guest. This would allow the embedder to do the following things:</p>
+<ul>
+<li>Observe DNS resolution as it happens (needed to unlock my use case)</li>
+<li>Change resolution so that a name resolves to a different set of IP addresses </li>
+<li>Return an <code>ErrorCode</code> error from <code>resolve_next_address</code></li>
+</ul>
+<p>If we can agree on an approach, I'm happy to do the implementation.</p>
+</blockquote>
+
+
+
+<a name="408240135"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237694%20%5B%60wasi%3Asockets/ip-name-lookup%23reso.../near/408240135" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237694.20.5B.60wasi.3Asockets.2Fip-name-lookup.23reso.2E.2E.2E.html#408240135">(Dec 15 2023 at 18:57)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/7694#issuecomment-1858351478">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7694">issue #7694</a>:</p>
+<blockquote>
+<p>I think this issue definitely makes sense, and this got me thinking a bit too. Reading over this issue and focusing solely on its text I'd also lean towards option 3 you've proposed but that quickly runs into another issue I think. The base problem is that Rust doesn't do well when building up a callback-style API with multiple callbacks.  For example the "this got resolved" callback is distinct from the "is this socket address valid" callback. These two callbacks don't share state meaning that you'd have to use <code>Rc</code>/<code>Arc</code>. With mutability you're forced to also use <code>RefCell</code>/<code>Mutex</code>. Given that these are used in a <code>Send</code>/<code>Sync</code> context, that's requiring <code>Arc&lt;Mutex&lt;...&gt;&gt;</code> which isn't great because there's no actual multithreading going on here.</p>
+<p>Given that problem it's prompted me to step back a bit. We solved this in Wasmtime for host functions by passing <code>&amp;mut T</code> (effectively) to all host functions. That's not possible here though because a <code>T</code> in <code>Store&lt;T&gt;</code> isn't availble from <code>WasiCtx</code>. This means that I don't think there's an easy solution to this problem.</p>
+<p>So that leads me to a few possible alternatives:</p>
+<ol>
+<li>Implement (3) as is, use <code>Arc&lt;Mutex&lt;_&gt;&gt;</code>, be a little sad on the inside but things are working.</li>
+<li>Add a type parameter to <code>WasiCtx</code>, such as <code>WasiCtx&lt;U&gt;</code>. Pass <code>&amp;mut U</code> to the callbacks configured on <code>WasiCtx</code> to have "shared state".</li>
+<li>Add a trait object instead to <code>WasiCtx</code>, something like <code>Box&lt;dyn WasiCustomBehavior&gt;</code>. Move these callbacks to trait methods on <code>WasiCustomBehavior</code> and then the shared state is <code>&amp;mut self</code>.</li>
+</ol>
+<p>My personal preference given those options would be to remove <code>socket_addr_check</code> and instead have something like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">impl</span><span class="w"> </span><span class="n">WasiCtxBuilder</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">socket_config</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">config</span>: <span class="nc">impl</span><span class="w"> </span><span class="n">WasiSocketConfig</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="bp">Self</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">WasiSocketConfig</span>: <span class="nb">Send</span> <span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="o">'</span><span class="nb">static</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">socket_addr_check</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">addr</span>: <span class="kp">&amp;</span><span class="nc">SocketAddr</span><span class="p">,</span><span class="w"> </span><span class="n">use_</span>: <span class="nc">SocketAddrUse</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">resolved_addr</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">name</span>: <span class="kp">&amp;</span><span class="kt">str</span><span class="p">,</span><span class="w"> </span><span class="n">addr</span>: <span class="kp">&amp;</span><span class="nc">IpAddr</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="c1">// or bikeshed this signature</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>This trajectory of design however feels like it gets a bit silly taken to the limit though. For example we've already got traits representing address lookup, they're just generated by <code>wit-bindgen</code>. Technically there's nothing stopping you from having a non-<code>wasmtime-wasi</code>-based implementation and using <code>add_to_linker</code> yourself. Adding a second <code>WasiSocketConfig</code> is a whole extra trait on top of this preexisting trait. At that point why limit it to sockets? Why not put all of <code>WasiCtxBuilder</code> behind a trait effectively? For example <code>WasiCtxBuilder</code> could be a builder-style version of creating a context that implements a new <code>Wasi</code> trait, and all <code>add_to_linker</code> is defined in terms of <code>T: Wasi</code>. That way embeddings could have a custom <code>T: Wasi</code> and run with that.</p>
+<hr>
+<p>Ok that's a lot of thoughts, not all of which you necessarily asked for on this issue. I think though what I might recommend for the near-term is something like:</p>
+<ul>
+<li>No changes to <code>wasmtime-wasi</code></li>
+<li>Your embedding would <code>add_to_linker</code> for the <code>ip-name-lookup</code> interfaces and hook into the results there</li>
+<li>State would be shared with <code>socket_addr_check</code> with an <code>Arc&lt;Mutex&lt;_&gt;&gt;</code></li>
+</ul>
+<p>That should all work today as-is, albeit not in a pretty fashion. </p>
+<p>Looking more towards the future I think I'd personally prefer to consider a <code>trait Wasi { ... }</code> style approach. All the existing implementations would be defined for <code>T: Wasi</code> rather than just <code>WasiCtx</code> and that way we could decorate as many callbacks and hooks as we want on <code>trait Wasi</code> and have them "easily configurable" for embeddings.</p>
+</blockquote>
+
+
+
+<a name="408446302"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237694%20%5B%60wasi%3Asockets/ip-name-lookup%23reso.../near/408446302" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237694.20.5B.60wasi.3Asockets.2Fip-name-lookup.23reso.2E.2E.2E.html#408446302">(Dec 17 2023 at 14:33)</a>:</h4>
+<p>badeend <a href="https://github.com/bytecodealliance/wasmtime/issues/7694#issuecomment-1859189459">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7694">issue #7694</a>:</p>
+<blockquote>
+<p>Hi @rylev . I raised a <a href="https://github.com/bytecodealliance/wasmtime/issues/7681">similar issue</a> 4 days ago. Specifically the "Domain-based policy strategy" section from that issue.</p>
+<p>Just wanted to make sure we're not about to do duplicate work.<br>
+</p>
+</blockquote>
+
+
+
+<a name="408451393"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237694%20%5B%60wasi%3Asockets/ip-name-lookup%23reso.../near/408451393" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237694.20.5B.60wasi.3Asockets.2Fip-name-lookup.23reso.2E.2E.2E.html#408451393">(Dec 17 2023 at 15:45)</a>:</h4>
+<p>badeend <a href="https://github.com/bytecodealliance/wasmtime/issues/7694#issuecomment-1859206473">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7694">issue #7694</a>:</p>
+<blockquote>
+<p>@alexcrichton Option 4(?):</p>
+<p>Create a specialized <code>Wasi***View</code> per package/interface and place the extension points on that. Similar to <code>WasiHttpView</code>. No <code>Box</code>es or <code>Mutex</code>es required.</p>
+<p>Example for TCP:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">WasiTcpView</span>: <span class="nc">WasiView</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">check_allowed_tcp</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">std</span>::<span class="n">io</span>::<span class="nb">Result</span><span class="o">&lt;</span><span class="p">()</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nb">Err</span><span class="p">(</span><span class="n">Errno</span>::<span class="n">ACCESS</span><span class="p">.</span><span class="n">into</span><span class="p">())</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">check_tcp_addr</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">addr</span>: <span class="kp">&amp;</span><span class="nc">SocketAddr</span><span class="p">,</span><span class="w"> </span><span class="n">reason</span>: <span class="nc">SocketAddrUse</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">std</span>::<span class="n">io</span>::<span class="nb">Result</span><span class="o">&lt;</span><span class="p">()</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nb">Err</span><span class="p">(</span><span class="n">Errno</span>::<span class="n">ACCESS</span><span class="p">.</span><span class="n">into</span><span class="p">())</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><div class="codehilite" data-code-language="Diff"><pre><span></span><code><span class="gd">- impl&lt;T: WasiView&gt; crate::preview2::host::tcp::tcp::HostTcpSocket for T {</span>
+<span class="gi">+ impl&lt;T: WasiTcpView&gt; crate::preview2::host::tcp::tcp::HostTcpSocket for T {</span>
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="408469481"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237694%20%5B%60wasi%3Asockets/ip-name-lookup%23reso.../near/408469481" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237694.20.5B.60wasi.3Asockets.2Fip-name-lookup.23reso.2E.2E.2E.html#408469481">(Dec 17 2023 at 18:42)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/7694#issuecomment-1859248132">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7694">issue #7694</a>:</p>
+<blockquote>
+<p>That's probably the best out of all ideas I think actually!</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

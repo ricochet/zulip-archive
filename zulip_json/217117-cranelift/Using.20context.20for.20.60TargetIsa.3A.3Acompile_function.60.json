@@ -1,0 +1,548 @@
+[
+    {
+        "content": "<p>Hello there,</p>\n<p>I was wondering why <code>TargetIsa::compile_function</code> does not take a context argument? There are already more frontend-facing APIs that use context with reusable allocations to optimize compilation, from looking into what happens inside each Isa lowering stage, there are many places where resources can be reused.</p>\n<p>My guess is that it's because <code>TargetIsa</code> is immutable but this is not a difficult problem to work around. The backend context can look something like this: </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span><span class=\"w\"> </span><span class=\"nc\">IsaCtx</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"c1\">// can be smallvec</span>\n<span class=\"w\">    </span><span class=\"n\">ctxs</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nb\">Vec</span><span class=\"o\">&lt;</span><span class=\"nb\">Box</span><span class=\"o\">&lt;</span><span class=\"k\">dyn</span><span class=\"w\"> </span><span class=\"n\">std</span><span class=\"p\">::</span><span class=\"n\">any</span><span class=\"p\">::</span><span class=\"n\">Any</span><span class=\"o\">&gt;&gt;</span><span class=\"p\">,</span>\n<span class=\"p\">}</span>\n\n<span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">IsaCtx</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"c1\">// this is easier to use since you don't need to worry about passing context to wrong isa</span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span><span class=\"w\"> </span><span class=\"nf\">get_ctx</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"nb\">static</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">or_insert</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">-&gt;</span><span class=\"w\"> </span><span class=\"nc\">T</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">-&gt;</span><span class=\"w\"> </span><span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"c1\">// rust is stpd and does not let me use find_map</span>\n<span class=\"w\">        </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">ctxs</span><span class=\"p\">.</span><span class=\"n\">iter_mut</span><span class=\"p\">().</span><span class=\"n\">position</span><span class=\"p\">(</span><span class=\"o\">|</span><span class=\"n\">c</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"n\">c</span><span class=\"p\">.</span><span class=\"n\">downcast_mut</span><span class=\"p\">::</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">().</span><span class=\"n\">is_some</span><span class=\"p\">())</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">            </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">i</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">ctxs</span><span class=\"p\">[</span><span class=\"n\">i</span><span class=\"p\">].</span><span class=\"n\">downcast_mut</span><span class=\"p\">().</span><span class=\"n\">unwrap</span><span class=\"p\">(),</span>\n<span class=\"w\">            </span><span class=\"nb\">None</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">                </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">ctxs</span><span class=\"p\">.</span><span class=\"n\">push</span><span class=\"p\">(</span><span class=\"nb\">Box</span><span class=\"p\">::</span><span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">or_insert</span><span class=\"p\">()));</span>\n<span class=\"w\">                </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">ctxs</span><span class=\"p\">.</span><span class=\"n\">last_mut</span><span class=\"p\">().</span><span class=\"n\">unwap</span><span class=\"p\">().</span><span class=\"n\">downcast_mut</span><span class=\"p\">().</span><span class=\"n\">unwrap</span><span class=\"p\">()</span>\n<span class=\"w\">            </span><span class=\"p\">}</span>\n<span class=\"w\">        </span><span class=\"p\">}</span>\n<span class=\"w\">    </span><span class=\"p\">}</span>\n<span class=\"p\">}</span>\n\n<span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">TargetIsa</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">SomeBackend</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"k\">fn</span><span class=\"w\"> </span><span class=\"nf\">compile_function_with_ctx</span><span class=\"p\">(</span>\n<span class=\"w\">        </span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"n\">func</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kp\">&amp;</span><span class=\"nc\">Function</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"n\">domtree</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kp\">&amp;</span><span class=\"nc\">DominatorTree</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"n\">want_disasm</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kt\">bool</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"n\">ctrl_plane</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">ControlPlane</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"n\">ctx</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">IsaCtx</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">-&gt;</span><span class=\"w\"> </span><span class=\"nc\">CodegenResult</span><span class=\"o\">&lt;</span><span class=\"n\">CompiledCodeBase</span><span class=\"o\">&lt;</span><span class=\"n\">Stencil</span><span class=\"o\">&gt;&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"n\">ctx</span><span class=\"p\">.</span><span class=\"n\">get_ctx</span><span class=\"p\">(</span><span class=\"n\">SomeBackendCtx</span><span class=\"p\">::</span><span class=\"n\">default</span><span class=\"p\">).</span><span class=\"n\">emit</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">func</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">domtree</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">want_disasm</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ctrl_plane</span><span class=\"p\">)</span>\n<span class=\"w\">    </span><span class=\"p\">}</span>\n<span class=\"w\">    </span><span class=\"cm\">/* ... */</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>I wonder how much would this improve compile times when crunching many functions. (I could volunteer to try it out!)</p>",
+        "id": 471771740,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726848858
+    },
+    {
+        "content": "<p>Storing a <code>Option&lt;Box&lt;dyn Any&gt;&gt;</code> in <code>Context</code> for the backend to reuse allocations would be an option.</p>\n<p>It would be a lot of work to get rid of all allocations in the backend however. Unlike the frontend where there are a bunch of allocations that live for the entire duration of the <code>Function</code>, the backend allocates and deallocates all the time. The most costly lists already use <code>SmallVec</code> to avoid allocation most of the time however.</p>",
+        "id": 471772789,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1726849112
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> What I should have asked first: Are backend allocations an actual issue based on profiling?</p>",
+        "id": 471775622,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726849825
+    },
+    {
+        "content": "<p>Probably not really. Regalloc is one of the biggest issues. Someone is writing a faster but dumber regalloc for GSOC.</p>",
+        "id": 471776095,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1726849933
+    },
+    {
+        "content": "<p>regalloc spends ~5-10% of the time in the allocator.</p>",
+        "id": 471790088,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1726853473
+    },
+    {
+        "content": "<p>and it is mostly in the b-trees. I did some experiments a while back forking the <code>std</code> b-trees into both <code>bumpalo</code>-backed allocation and arena-backed allocation with 32-bit ids instead of full 64-bit pointers. neither change provided any wins, unfortunately</p>",
+        "id": 471790801,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726853641
+    },
+    {
+        "content": "<p>To the original question, I suspect reusing allocations for RA2 data structures might be an interesting experiment -- the <code>BTreeMap</code>s (preg allocation maps) I think will hang onto allocated memory if cleared, likewise for the large entity arrays (liverange data, etc)</p>",
+        "id": 471792045,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726853897
+    },
+    {
+        "content": "<p>a big part of the cost in my experience is in cache misses as one touches new memory -- allocation hurts not just because the allocator itself takes time to find some memory but because it implies we're writing out lots of data to new cache lines</p>",
+        "id": 471792208,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726853934
+    },
+    {
+        "content": "<p>so reusing memory helps in that way (likely already in some level of the cache hierarchy)</p>",
+        "id": 471792250,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726853944
+    },
+    {
+        "content": "<p>RA2's API doesn't have the equivalent of Cranelift's <code>Context</code> but it could be added</p>",
+        "id": 471792375,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726853967
+    },
+    {
+        "content": "<p>all that said, I forget how this was wired up with the bumpalo experiment <span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> -- were you reusing the same arena backing store or was there a fresh one each function compilation?</p>",
+        "id": 471792661,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854029
+    },
+    {
+        "content": "<blockquote>\n<p>the <code>BTreeMap</code>s (preg allocation maps) I think will hang onto allocated memory if cleared</p>\n</blockquote>\n<p>I don't think it does. There is no <code>with_capacity</code> or <code>shrink_to_fit</code> like <code>Vec</code> and <code>HashMap</code> do. I believe <code>BTreeMap</code> allocates every node individually and doesn't keep a cache with unused nodes around.</p>",
+        "id": 471792669,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1726854032
+    },
+    {
+        "content": "<p>ah, hmm, that's too bad</p>",
+        "id": 471792698,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854043
+    },
+    {
+        "content": "<p>Are the items in the BTreeMap expected to be inserted in the same order as the key sorts? If so maybe a Vec + binary_search for retrieval would work?</p>",
+        "id": 471793236,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1726854187
+    },
+    {
+        "content": "<p>yeah it doesn't because it is multiple allocations for each node, not one big table like <code>Vec</code>/<code>HashMap</code>, and I suspect that <code>std</code> takes a conservative approach and says \"why do we expect this super generic collection code to do better size-classing/pooling/reuse than the actual allocator?\"</p>",
+        "id": 471793241,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854189
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471792661\">said</a>:</p>\n<blockquote>\n<p>all that said, I forget how this was wired up with the bumpalo experiment <span class=\"user-mention silent\" data-user-id=\"253990\">fitzgen (he/him)</span> -- were you reusing the same arena backing store or was there a fresh one each function compilation?</p>\n</blockquote>\n<p>whatever cranelift does, which last time I looked was creating a new reg alloc env for each function, iirc</p>",
+        "id": 471793446,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854248
+    },
+    {
+        "content": "<p>although I also vaguely remember someone fixing that maybe?</p>",
+        "id": 471793506,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854262
+    },
+    {
+        "content": "<p>ah, there's the MachineEnv which is the register data; that was indeed fixed at some point</p>",
+        "id": 471793603,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854282
+    },
+    {
+        "content": "<p>I'm thinking of the actual allocation data structures though</p>",
+        "id": 471793643,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854293
+    },
+    {
+        "content": "<p>yeah I thought maybe someone did the actual data structures</p>",
+        "id": 471793704,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854304
+    },
+    {
+        "content": "<p>but I could be misremembering. anyways: the perf experiments were running sightglass's spidermonkey/bz2/pulldown-cmark, so however wasmtime uses cranelift uses regalloc2</p>",
+        "id": 471793902,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854347
+    },
+    {
+        "content": "<p>unfortunately not, the signature <a href=\"https://docs.rs/regalloc2/latest/regalloc2/fn.run.html\">here</a> doesn't allow for any mutable persisted state between runs</p>",
+        "id": 471793931,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854354
+    },
+    {
+        "content": "<p>ah okay, well we should fix that</p>",
+        "id": 471793997,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854363
+    },
+    {
+        "content": "<p>indeed, that's what I'm suggesting here :-)</p>",
+        "id": 471794080,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854381
+    },
+    {
+        "content": "<p>might be interesting to revive your experiment branch specifically for the btrees -- but reusing the same bumpalo backing store between runs</p>",
+        "id": 471794163,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854396
+    },
+    {
+        "content": "<p>(I forget the precise API, is there a way to reuse the same blocks from a torn-down arena?)</p>",
+        "id": 471794206,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854408
+    },
+    {
+        "content": "<p>yeah, I think the PRs are still accessible in the github history</p>",
+        "id": 471794223,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854414
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471794206\">said</a>:</p>\n<blockquote>\n<p>(I forget the precise API, is there a way to reuse the same blocks from a torn-down arena?)</p>\n</blockquote>\n<p>the <code>reset</code> method will reuse the largest backing chunk from the bump arena, that will quickly give you a steady state of never needing to allocate more backing chunks</p>",
+        "id": 471794427,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854463
+    },
+    {
+        "content": "<p>backing chunks are allocated in a roughly doubling manner</p>",
+        "id": 471794464,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854477
+    },
+    {
+        "content": "<p>cool, seems totally workable then</p>",
+        "id": 471794557,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854492
+    },
+    {
+        "content": "<p>/me reaches into his reserves and pulls out a large block of free time to experiment with this</p>",
+        "id": 471794685,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854516
+    },
+    {
+        "content": "<p>(not really but it should be high on our perf ideas list IMHO!)</p>",
+        "id": 471794741,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854529
+    },
+    {
+        "content": "<p>I mean it really shouldn't be too hard to try, could be a good first issue</p>",
+        "id": 471794790,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854542
+    },
+    {
+        "content": "<p>hardest part is probably measuring the perf wins</p>",
+        "id": 471794825,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726854553
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"756208\">@Jakub Dóka</span> how do you feel about the above? makes sense or need more details?</p>",
+        "id": 471794887,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854564
+    },
+    {
+        "content": "<p>Seems good, If there is a good way to benchmark I can try this out. Maybe a question: could the whole backend use a bump allocator?</p>",
+        "id": 471795529,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726854752
+    },
+    {
+        "content": "<p>that's a bigger lift I think, would have to be threaded through and many collections changed</p>",
+        "id": 471795619,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854788
+    },
+    {
+        "content": "<p>good eventual goal</p>",
+        "id": 471795643,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854797
+    },
+    {
+        "content": "<p>but we're talking about a ~200kLoC project, so, one piece at a time!</p>",
+        "id": 471795699,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726854817
+    },
+    {
+        "content": "<p>I guess lets try lift the regalloc first and see if that helps</p>",
+        "id": 471795742,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726854835
+    },
+    {
+        "content": "<p>darn it, if only this was zig haha</p>",
+        "id": 471795841,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726854860
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> would you mind linking me to the branch with bumpalo? I am using regalloc2 in my project and already planned to do this on my fork (- the bumpalo)</p>",
+        "id": 471796615,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726855113
+    },
+    {
+        "content": "<p><a href=\"https://github.com/bytecodealliance/regalloc2/pull/92\">https://github.com/bytecodealliance/regalloc2/pull/92</a></p>\n<p><a href=\"https://github.com/bytecodealliance/regalloc2/pull/88\">https://github.com/bytecodealliance/regalloc2/pull/88</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/regalloc2/pull/92\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/217a8b2d537eaedf88772a0721d5f14bbcfb5196/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f666464616430346166613564666636303931623263373662373236623434333737666338643633636235666432383132363065363638636332663436386631312f62797465636f6465616c6c69616e63652f726567616c6c6f63322f70756c6c2f3932&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/regalloc2/pull/92\" title=\"Use b-trees based on bumpalo arenas by fitzgen · Pull Request #92 · bytecodealliance/regalloc2\">Use b-trees based on bumpalo arenas by fitzgen · Pull Request #92 · bytecodealliance/regalloc2</a></div><div class=\"message_embed_description\">Alternative to #88. cc @Amanieu\nNumbers don&#39;t look great though?\n$ cargo run --release -- benchmark -e ~/scratch/bumpalo-arena.so -e ~/scratch/main.so -m perf-counters --stop-after compilation ...</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/regalloc2/pull/88\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/ea86446bd8a43e08f92b23827cac7176a71f06c1/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f393861316233363131356631343966316664653332323132343331383436663134313864386464316565613337366636343036313234636638383266393962332f62797465636f6465616c6c69616e63652f726567616c6c6f63322f70756c6c2f3838&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/regalloc2/pull/88\" title=\"Use an arena-based BTree library by fitzgen · Pull Request #88 · bytecodealliance/regalloc2\">Use an arena-based BTree library by fitzgen · Pull Request #88 · bytecodealliance/regalloc2</a></div><div class=\"message_embed_description\">Depends on bytecodealliance/arena-btree#1</div></div></div>",
+        "id": 471797898,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1726855556
+    },
+    {
+        "content": "<p>One important question: what is the <code>unsafe</code> code policy? I like to use unsafe if it simplifies my life e.g. not sprinkling lifetimes everywhere where arena is used, instead live with few unsafe blocks behind safe API.</p>",
+        "id": 471799668,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726856207
+    },
+    {
+        "content": "<p>By the way, regalloc3's API is specifically <a href=\"https://github.com/Amanieu/regalloc3/blob/main/src/lib.rs#L147-L151\">designed</a> to reuse allocations.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/Amanieu/regalloc3/blob/main/src/lib.rs#L147-L151\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/352e2eded7fd19cc3404c7f76acf9ee839004d62/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f376133653531623236613938363833663639663134646530383261613465393836383261303963613533356162383436623230363536363966333430343034322f416d616e6965752f726567616c6c6f6333&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/Amanieu/regalloc3/blob/main/src/lib.rs#L147-L151\" title=\"regalloc3/src/lib.rs at main · Amanieu/regalloc3\">regalloc3/src/lib.rs at main · Amanieu/regalloc3</a></div><div class=\"message_embed_description\">New register allocator designed as a successor to regalloc2 - Amanieu/regalloc3</div></div></div>",
+        "id": 471799905,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1726856290
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"756208\">@Jakub Dóka</span> in general we try to avoid <code>unsafe</code> unless absolutely necessary: in our opinion (well, my opinion at least) it makes for a much easier auditing to know <em>for sure</em> that there is no unsafety</p>",
+        "id": 471800269,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726856410
+    },
+    {
+        "content": "<p>we do have <code>unsafe</code> in I think one place in Cranelift to wrap the lower-level raw hashtable interface in <code>CtxHash</code>; RA2 is completely unsafe-free</p>",
+        "id": 471800362,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726856436
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471800269\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"756208\">Jakub Dóka</span> in general we try to avoid <code>unsafe</code> unless absolutely necessary: in our opinion (well, my opinion at least) it makes for a much easier auditing to know <em>for sure</em> that there is no unsafety</p>\n</blockquote>\n<p>I admit that most people get filtered on <code>unsafe</code>, I will see what's possible without it. Note though that safe arenas in Rust require lifetime and I am not sure if we can afford to store that anywhere, definitely not behind <code>dyn std::any::Any</code>.</p>",
+        "id": 471804660,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726857565
+    },
+    {
+        "content": "<p>in general I'd be OK with threading a lifetime through the backend -- it's more \"honest\" in some sense (if we're going to bump-allocate all compilation temporary data) than trying to hide the arena somehow</p>",
+        "id": 471805251,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726857681
+    },
+    {
+        "content": "<p>(the only use of <code>std::any::Any</code> I see in <code>cranelift-codegen</code> is in the timing submodule, in a thing that I think doesn't need to interact with this at all)</p>",
+        "id": 471805661,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726857765
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471805661\">said</a>:</p>\n<blockquote>\n<p>(the only use of <code>std::any::Any</code> I see in <code>cranelift-codegen</code> is in the timing submodule, in a thing that I think doesn't need to interact with this at all)</p>\n</blockquote>\n<p>In order to smuggle context into the <code>TargetIsa</code> trait, It needs to be behind <code>dyn</code> and rust does not allow downcasting things with lifetimes (in safe code at least), I might be able to find an arena that has owned part tho (I have implemented that before so its possible, but did not publish it).</p>",
+        "id": 471807458,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726858143
+    },
+    {
+        "content": "<p>ah, interesting. OK, yeah, if we need a tiny bit of carefully-vetted <code>unsafe</code> somewhere, it's not the end of the world; though ideally we'd wrap it in an abstraction that minimizes misuse</p>",
+        "id": 471808336,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1726858409
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"756208\">Jakub Dóka</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471804660\">said</a>:</p>\n<blockquote>\n<p>I admit that most people get filtered on <code>unsafe</code>, I will see what's possible without it. Note though that safe arenas in Rust require lifetime and I am not sure if we can afford to store that anywhere, definitely not behind <code>dyn std::any::Any</code>.</p>\n</blockquote>\n<p>Taking that back <code>rustc_arena::DroplessArena</code> has no lifetime, I confused it with scoped version sorry, All good.</p>",
+        "id": 471808388,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726858424
+    },
+    {
+        "content": "<p>Oh jeez, and allocator API is unstable I hate this so much.</p>",
+        "id": 471810003,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726858792
+    },
+    {
+        "content": "<p>Here are the changes to <code>regalloc2</code> <a href=\"https://github.com/bytecodealliance/regalloc2/pull/196\">https://github.com/bytecodealliance/regalloc2/pull/196</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/regalloc2/pull/196\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/90e8e7eed36485be6e6ece5846f3964e6f85717d/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f356262333965333235656531633130336137326331633238383732636530323937663432633431366330356663313435343134633131653165303761653330392f62797465636f6465616c6c69616e63652f726567616c6c6f63322f70756c6c2f313936&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/regalloc2/pull/196\" title=\"Adding new API that accepts resusable context. by jakubDoka · Pull Request #196 · bytecodealliance/regalloc2\">Adding new API that accepts resusable context. by jakubDoka · Pull Request #196 · bytecodealliance/regalloc2</a></div><div class=\"message_embed_description\">Sadly due to how the code was structured, I needed to change the `Env&#39; fields so basically everything that was used was changed as well. I did not benchmark anything yet (work in progress).\nCon...</div></div></div>",
+        "id": 471930333,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726918422
+    },
+    {
+        "content": "<p>Here are some results from my horrible benchmark:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">regalloc</span><span class=\"w\"> </span><span class=\"n\">with</span><span class=\"w\"> </span><span class=\"n\">sorted</span><span class=\"w\"> </span><span class=\"n\">vecs</span><span class=\"w\"> </span><span class=\"n\">instead</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">btrees</span><span class=\"w\"> </span><span class=\"n\">with</span><span class=\"w\"> </span><span class=\"n\">reused</span><span class=\"w\"> </span><span class=\"n\">resources</span><span class=\"w\"> </span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">7</span><span class=\"p\">,</span><span class=\"mi\">363</span><span class=\"p\">,</span><span class=\"mi\">597</span><span class=\"p\">,</span><span class=\"mi\">706</span><span class=\"w\"> </span><span class=\"n\">cycles</span>\n<span class=\"n\">regalloc</span><span class=\"w\"> </span><span class=\"n\">with</span><span class=\"w\"> </span><span class=\"n\">sorted</span><span class=\"w\"> </span><span class=\"n\">vecs</span><span class=\"w\"> </span><span class=\"n\">instead</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">btrees</span><span class=\"w\"> </span><span class=\"n\">with</span><span class=\"w\"> </span><span class=\"n\">no</span><span class=\"w\"> </span><span class=\"n\">resource</span><span class=\"w\"> </span><span class=\"n\">reuse</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">8</span><span class=\"p\">,</span><span class=\"mi\">900</span><span class=\"p\">,</span><span class=\"mi\">538</span><span class=\"p\">,</span><span class=\"mi\">665</span><span class=\"w\"> </span><span class=\"n\">cycles</span>\n<span class=\"n\">regalloc</span><span class=\"w\"> </span><span class=\"n\">from</span><span class=\"w\"> </span><span class=\"n\">the</span><span class=\"w\"> </span><span class=\"n\">crates</span><span class=\"p\">.</span><span class=\"n\">io</span><span class=\"w\"> </span><span class=\"o\">--------------------------------------</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">9</span><span class=\"p\">,</span><span class=\"mi\">969</span><span class=\"p\">,</span><span class=\"mi\">449</span><span class=\"p\">,</span><span class=\"mi\">265</span><span class=\"w\"> </span><span class=\"n\">cycles</span>\n</code></pre></div>\n<p>The benchmark is terrible because:</p>\n<ol>\n<li>I regalloc the same function in a tight loop</li>\n<li>The function might not be representative (I adjusted register count to cause spill)</li>\n<li>Function is rather small and with simple code</li>\n</ol>\n<p>In any case, this is best I ve gotten</p>",
+        "id": 471963879,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726943004
+    },
+    {
+        "content": "<p>Do you just re-sort the vec after every insertion? That's definitely going to cause problems with larger functions.</p>",
+        "id": 471964560,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1726943638
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"301625\">Amanieu</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471964560\">said</a>:</p>\n<blockquote>\n<p>Do you just re-sort the vec after every insertion? That's definitely going to cause problems with larger functions.</p>\n</blockquote>\n<p>no I insert with binary search</p>",
+        "id": 471964618,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726943678
+    },
+    {
+        "content": "<p>Hmm, that's still <code>O(n)</code> per insertion instead of <code>O(log(n))</code>, so it could still end up being an issue for larger functions.</p>",
+        "id": 471964743,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1726943805
+    },
+    {
+        "content": "<p>It's worth benchmarking compilation of real programs.</p>",
+        "id": 471964762,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1726943823
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"301625\">Amanieu</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471964762\">said</a>:</p>\n<blockquote>\n<p>It's worth benchmarking compilation of real programs.</p>\n</blockquote>\n<p>I d love to do that, but I don't know how, at least not easily</p>",
+        "id": 471964860,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726943884
+    },
+    {
+        "content": "<p>The way I usually benchmark is by building wasmtime with my local copy of regalloc2 by adding this to Cargo.toml:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">[</span><span class=\"n\">patch</span><span class=\"p\">.</span><span class=\"n\">crates</span><span class=\"o\">-</span><span class=\"n\">io</span><span class=\"p\">]</span>\n<span class=\"n\">regalloc2</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">path</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"s\">\"../regalloc2\"</span><span class=\"w\"> </span><span class=\"p\">}</span>\n</code></pre></div>",
+        "id": 471964929,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1726943957
+    },
+    {
+        "content": "<p>Then grab some .wasm benchmarks from <a href=\"https://github.com/bytecodealliance/sightglass\">sightglass</a> and compare the 2 builds of wasmtime (with &amp; without your changes) using hyperfine:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">hyperfine</span><span class=\"w\"> </span><span class=\"s\">\"./wasmtime.orig compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm\"</span><span class=\"w\"> </span><span class=\"s\">\"./wasmtime.new compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm\"</span>\n</code></pre></div>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/sightglass\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/ef7b418926aea6a6a04fd14b5125ceabb5a9bb1e/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f646435653464396430613534333739313438353966633863633837666663633561656662646336316431643139653733643564633337383362323935616630662f62797465636f6465616c6c69616e63652f7369676874676c617373&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/sightglass\" title=\"GitHub - bytecodealliance/sightglass: A benchmark suite and tool to compare different implementations of the same primitives.\">GitHub - bytecodealliance/sightglass: A benchmark suite and tool to compare different implementations of the same primitives.</a></div><div class=\"message_embed_description\">A benchmark suite and tool to compare different implementations of the same primitives. - bytecodealliance/sightglass</div></div></div>",
+        "id": 471965020,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1726944031
+    },
+    {
+        "content": "<p>Though I guess perf stat would also work for measuring cycles.</p>",
+        "id": 471965051,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1726944066
+    },
+    {
+        "content": "<p>Awesome, thank you very much</p>",
+        "id": 471965085,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726944109
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"301625\">@Amanieu</span> this is just testing difference between vecs (new) and binary trees (old)</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">hyperfine</span><span class=\"w\"> </span><span class=\"s\">\"./wasmtime.old compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm\"</span><span class=\"w\"> </span><span class=\"s\">\"./wasmtime.new compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm\"</span>\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">old</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">):</span><span class=\"w\">     </span><span class=\"mf\">144.2</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">   </span><span class=\"mf\">3.5</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mf\">135.4</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mf\">7.5</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"p\">]</span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">):</span><span class=\"w\">   </span><span class=\"mf\">140.4</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"mf\">152.8</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\">    </span><span class=\"mi\">20</span><span class=\"w\"> </span><span class=\"n\">runs</span>\n\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">new</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">):</span><span class=\"w\">     </span><span class=\"mf\">142.0</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">   </span><span class=\"mf\">4.3</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mf\">134.7</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mf\">5.8</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"p\">]</span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">):</span><span class=\"w\">   </span><span class=\"mf\">137.1</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"mf\">155.0</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\">    </span><span class=\"mi\">21</span><span class=\"w\"> </span><span class=\"n\">runs</span>\n\n<span class=\"n\">Summary</span>\n<span class=\"w\">  </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">new</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span><span class=\"w\"> </span><span class=\"n\">ran</span>\n<span class=\"w\">    </span><span class=\"mf\">1.02</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">0.04</span><span class=\"w\"> </span><span class=\"n\">times</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">old</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n</code></pre></div>\n<p>How should I understand the result? This seems within margin of error</p>",
+        "id": 471966753,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726945576
+    },
+    {
+        "content": "<p>tho it seems I cant get the old to beat new</p>",
+        "id": 471966886,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726945720
+    },
+    {
+        "content": "<p>You could add <code>--runs 100</code> as argument to reduce noise a bit by running it 100 times instead of 20 times.</p>",
+        "id": 471967078,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1726945896
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471967078\">said</a>:</p>\n<blockquote>\n<p>You could add <code>--runs 100</code> as argument to reduce noise a bit by running it 100 times instead of 20 times.</p>\n</blockquote>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">hyperfine</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">runs</span><span class=\"w\"> </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"s\">\"./wasmtime.new compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm\"</span><span class=\"w\"> </span><span class=\"s\">\"./wasmtime.old compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm\"</span>\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">new</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">):</span><span class=\"w\">     </span><span class=\"mf\">148.9</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">   </span><span class=\"mf\">6.6</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mf\">139.9</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mf\">7.2</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"p\">]</span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">):</span><span class=\"w\">   </span><span class=\"mf\">139.1</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"mf\">178.7</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\">    </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">runs</span>\n\n<span class=\"n\">Benchmark</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">old</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n<span class=\"w\">  </span><span class=\"n\">Time</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">mean</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"err\">σ</span><span class=\"p\">):</span><span class=\"w\">     </span><span class=\"mf\">156.8</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\">   </span><span class=\"mf\">4.6</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\">    </span><span class=\"p\">[</span><span class=\"n\">User</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mf\">147.1</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">System</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mf\">7.5</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"p\">]</span>\n<span class=\"w\">  </span><span class=\"n\">Range</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">min</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"n\">max</span><span class=\"p\">):</span><span class=\"w\">   </span><span class=\"mf\">149.6</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\"> </span><span class=\"err\">…</span><span class=\"w\"> </span><span class=\"mf\">173.3</span><span class=\"w\"> </span><span class=\"n\">ms</span><span class=\"w\">    </span><span class=\"mi\">100</span><span class=\"w\"> </span><span class=\"n\">runs</span>\n\n<span class=\"n\">Summary</span>\n<span class=\"w\">  </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">new</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span><span class=\"w\"> </span><span class=\"n\">ran</span>\n<span class=\"w\">    </span><span class=\"mf\">1.05</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">0.06</span><span class=\"w\"> </span><span class=\"n\">times</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">old</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n</code></pre></div>\n<p>note: I have a shitty intel CPU that tends to throttle</p>",
+        "id": 471967735,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726946469
+    },
+    {
+        "content": "<p>It appears that the order in which I run the benchmark matters <span aria-label=\"smiling face with tear\" class=\"emoji emoji-1f972\" role=\"img\" title=\"smiling face with tear\">:smiling_face_with_tear:</span></p>",
+        "id": 471968304,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726946985
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">new</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span><span class=\"w\"> </span><span class=\"n\">ran</span>\n<span class=\"w\">    </span><span class=\"mf\">1.03</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">0.05</span><span class=\"w\"> </span><span class=\"n\">times</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"p\">.</span><span class=\"o\">/</span><span class=\"n\">wasmtime</span><span class=\"p\">.</span><span class=\"n\">new</span><span class=\"w\"> </span><span class=\"n\">compile</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">C</span><span class=\"w\"> </span><span class=\"n\">parallel</span><span class=\"o\">-</span><span class=\"n\">compilation</span><span class=\"o\">=</span><span class=\"n\">n</span><span class=\"w\"> </span><span class=\"o\">../</span><span class=\"n\">sightglass</span><span class=\"o\">/</span><span class=\"n\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n</code></pre></div>\n<p><span aria-label=\"smiling face with tear\" class=\"emoji emoji-1f972\" role=\"img\" title=\"smiling face with tear\">:smiling_face_with_tear:</span></p>",
+        "id": 471968907,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726947495
+    },
+    {
+        "content": "<p>comparing cycles seems more relayable:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">(</span><span class=\"n\">old</span><span class=\"w\">  </span><span class=\"o\">-</span><span class=\"w\"> </span><span class=\"n\">new</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"w\"> </span><span class=\"n\">old</span><span class=\"w\"> </span><span class=\"o\">=</span>\n<span class=\"p\">(</span><span class=\"mi\">15608637381</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"w\"> </span><span class=\"mi\">14952009848</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"w\"> </span><span class=\"mi\">15608637381</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.0420682163</span>\n</code></pre></div>",
+        "id": 471972971,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726951008
+    },
+    {
+        "content": "<p>Okay, I have tried bumpalo + btree map, the performance degraded</p>",
+        "id": 472022978,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726990377
+    },
+    {
+        "content": "<p>The allocations are actually not eliminated that well Regalloc still contains ~22% of all temporary allocations and most of them are from <code>SmallVec</code>s overflowing:<br>\n<a href=\"/user_uploads/15107/fOS5HdUCFADc0Iq4uom-D75H/image.png\">image.png</a><br>\nAt this point, using arena-backed Vecs instead of SmallVecs might help.</p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/fOS5HdUCFADc0Iq4uom-D75H/image.png\" title=\"image.png\"><img data-original-dimensions=\"1890x400\" src=\"/user_uploads/thumbnail/15107/fOS5HdUCFADc0Iq4uom-D75H/image.png/840x560.webp\"></a></div>",
+        "id": 472031919,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1726997603
+    },
+    {
+        "content": "<p>Okay, I reduced the temporary allocations within RA2 from 35% to 0.7% (according to heaptrack).<br>\n<a href=\"/user_uploads/15107/tcJvcK2egHuRcc_WuLXJjFFT/image.png\">image.png</a><br>\nThat's great but the total cycle count did not improve that much </p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/tcJvcK2egHuRcc_WuLXJjFFT/image.png\" title=\"image.png\"><img data-original-dimensions=\"3794x1250\" src=\"/user_uploads/thumbnail/15107/tcJvcK2egHuRcc_WuLXJjFFT/image.png/840x560.webp\"></a></div><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">(</span><span class=\"n\">old</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"w\"> </span><span class=\"n\">new</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"w\"> </span><span class=\"n\">old</span><span class=\"w\"> </span><span class=\"o\">=</span>\n<span class=\"p\">(</span><span class=\"mi\">15</span><span class=\"p\">,</span><span class=\"mi\">552</span><span class=\"p\">,</span><span class=\"mi\">110</span><span class=\"p\">,</span><span class=\"mi\">365</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"w\"> </span><span class=\"mi\">14</span><span class=\"p\">,</span><span class=\"mi\">632</span><span class=\"p\">,</span><span class=\"mi\">439</span><span class=\"p\">,</span><span class=\"mi\">684</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"w\"> </span><span class=\"mi\">15</span><span class=\"p\">,</span><span class=\"mi\">552</span><span class=\"p\">,</span><span class=\"mi\">110</span><span class=\"p\">,</span><span class=\"mi\">365</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">0.0591347836</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">~</span><span class=\"mi\">6</span><span class=\"o\">%</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">cpu_core</span><span class=\"o\">/</span><span class=\"n\">cycles</span><span class=\"o\">/</span><span class=\"n\">u</span><span class=\"w\"> </span><span class=\"n\">form</span><span class=\"w\"> </span><span class=\"n\">perf</span><span class=\"w\"> </span><span class=\"n\">stat</span><span class=\"p\">)</span>\n</code></pre></div>\n<p>The peak memory usage also increased by ~15MB. I have tested this by storing the RA2 context in thread-local on <code>sightglass/benchmarks/spidermonkey/benchmark.wasm</code></p>",
+        "id": 472049343,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1727013844
+    },
+    {
+        "content": "<p>I am a bit confused about why the program takes fewer cycles but RA2 takes a bigger chunk of runtime. Could it be that allocating less in one place can make other things faster?</p>",
+        "id": 472072663,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1727029894
+    },
+    {
+        "content": "<p>Okay, I managed to avoid lifetimes and unsafe code by using <code>bumpalo::Bump</code> in <code>Rc</code>, I had to implement <code>Allocator</code> trait, which is unsafe but all it does is delegate methods. I then clear the arena through <code>Rc::get_mut</code> (after all arena-backed <code>Vec</code>'s are dropped).</p>",
+        "id": 472209977,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1727092988
+    },
+    {
+        "content": "<p>seems like you're investigations are unearthing some good stuff, but I do want to note that we can't rely on nightly-only Rust features here</p>",
+        "id": 472269806,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1727106758
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253990\">fitzgen (he/him)</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/472269806\">said</a>:</p>\n<blockquote>\n<p>seems like you're investigations are unearthing some good stuff, but I do want to note that we can't rely on nightly-only Rust features here</p>\n</blockquote>\n<p>I used allocator-api2, I know about this</p>",
+        "id": 472270018,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1727106812
+    },
+    {
+        "content": "<p>It compiles on stable</p>",
+        "id": 472270238,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1727106857
+    },
+    {
+        "content": "<p>great!</p>",
+        "id": 472291103,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1727112957
+    },
+    {
+        "content": "<p>Welp, I managed to save 1b out of 15.5b cycles, with some non-memory optimizations, like replacing hashmaps with vectors (where the hashmap key can index it), and two places do linear merge instead of sorting. This brings the cycles down by another ~150m. I am unsure what more I can do to make this faster. (on Spidermonkey bench) <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> Are there any tests that can verify that the generated code is valid? I noticed some bugs I introduced during development were not caught by Fuzzer but when compiling Spidermonkey I would get a crash, so I am not confident If miss-compilation could occur.</p>",
+        "id": 472535978,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1727196942
+    },
+    {
+        "content": "<p>Ideally, passing the test-suite in Wasmtime/Cranelift, passing the RA2 fuzzer (<code>ion_checker</code> target -- it can take overnight or longer on 8 cores to find some bugs, let it run for a while), and maybe passing <code>differential</code> fuzz target in Wasmtime for a little bit too</p>",
+        "id": 472536186,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1727197019
+    },
+    {
+        "content": "<p>for regalloc work mainly we trust the RA-specific checker (it'll have much higher throughput by banging just on RA) but again it has to run for a while</p>",
+        "id": 472536282,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1727197058
+    },
+    {
+        "content": "<p>I neglected to start with though: 1B out of 15.5B cycles saved is great, thanks so much for looking into this! We'll definitely take it assuming it is passing all tests</p>",
+        "id": 472536414,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1727197098
+    },
+    {
+        "content": "<p>(or, \"most likely\" I should say, I still need to review the details of the integration)</p>",
+        "id": 472536441,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1727197111
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/472536282\">said</a>:</p>\n<blockquote>\n<p>for regalloc work mainly we trust the RA-specific checker (it'll have much higher throughput by banging just on RA) but again it has to run for a while</p>\n</blockquote>\n<p>I assume there are some nobs on the fuzzer to use more threads, my notebook can maintain 8 cores at 2ghz is that enough for a night?<br>\nI should probably use highest level of optimizations (lto, panic-abort, codegen-units=1) which is not done currently.</p>",
+        "id": 472539189,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1727197997
+    },
+    {
+        "content": "<p><code>-j 8</code> to <code>cargo fuzz</code> should work; also I typically run with <code>-s none</code>, i.e. no sanitizer instrumentation, because that's not needed to find logic bugs and it's a significant speedup</p>",
+        "id": 472539352,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1727198046
+    },
+    {
+        "content": "<p>I have ran the fuzzer (ion_checker) overnight, It ended with this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">#</span><span class=\"mi\">133803205</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">cov</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">12736</span><span class=\"w\"> </span><span class=\"n\">ft</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">18897</span><span class=\"w\"> </span><span class=\"n\">corp</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">3233</span><span class=\"w\"> </span><span class=\"n\">exec</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mi\">194</span><span class=\"w\"> </span><span class=\"n\">oom</span><span class=\"o\">/</span><span class=\"n\">timeout</span><span class=\"o\">/</span><span class=\"n\">crash</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"n\">time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">46251</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"n\">job</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">2599</span><span class=\"w\"> </span><span class=\"n\">dft_time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span>\n<span class=\"p\">#</span><span class=\"mi\">133872329</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">cov</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">12736</span><span class=\"w\"> </span><span class=\"n\">ft</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">18897</span><span class=\"w\"> </span><span class=\"n\">corp</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">3233</span><span class=\"w\"> </span><span class=\"n\">exec</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mi\">229</span><span class=\"w\"> </span><span class=\"n\">oom</span><span class=\"o\">/</span><span class=\"n\">timeout</span><span class=\"o\">/</span><span class=\"n\">crash</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"n\">time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">46269</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"n\">job</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">2600</span><span class=\"w\"> </span><span class=\"n\">dft_time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span>\n<span class=\"p\">#</span><span class=\"mi\">133918523</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">cov</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">12736</span><span class=\"w\"> </span><span class=\"n\">ft</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">18897</span><span class=\"w\"> </span><span class=\"n\">corp</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">3233</span><span class=\"w\"> </span><span class=\"n\">exec</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mi\">153</span><span class=\"w\"> </span><span class=\"n\">oom</span><span class=\"o\">/</span><span class=\"n\">timeout</span><span class=\"o\">/</span><span class=\"n\">crash</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"n\">time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">46289</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"n\">job</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">2601</span><span class=\"w\"> </span><span class=\"n\">dft_time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span>\n<span class=\"p\">#</span><span class=\"mi\">133971880</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">cov</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">12736</span><span class=\"w\"> </span><span class=\"n\">ft</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">18897</span><span class=\"w\"> </span><span class=\"n\">corp</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">3233</span><span class=\"w\"> </span><span class=\"n\">exec</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mi\">177</span><span class=\"w\"> </span><span class=\"n\">oom</span><span class=\"o\">/</span><span class=\"n\">timeout</span><span class=\"o\">/</span><span class=\"n\">crash</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"n\">time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">46308</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"n\">job</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">2602</span><span class=\"w\"> </span><span class=\"n\">dft_time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span>\n<span class=\"p\">#</span><span class=\"mi\">134018335</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">cov</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">12736</span><span class=\"w\"> </span><span class=\"n\">ft</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">18897</span><span class=\"w\"> </span><span class=\"n\">corp</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">3233</span><span class=\"w\"> </span><span class=\"n\">exec</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mi\">154</span><span class=\"w\"> </span><span class=\"n\">oom</span><span class=\"o\">/</span><span class=\"n\">timeout</span><span class=\"o\">/</span><span class=\"n\">crash</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"n\">time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">46327</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"n\">job</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">2603</span><span class=\"w\"> </span><span class=\"n\">dft_time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span>\n<span class=\"p\">#</span><span class=\"mi\">134087566</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">cov</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">12736</span><span class=\"w\"> </span><span class=\"n\">ft</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">18897</span><span class=\"w\"> </span><span class=\"n\">corp</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">3233</span><span class=\"w\"> </span><span class=\"n\">exec</span><span class=\"o\">/</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"mi\">230</span><span class=\"w\"> </span><span class=\"n\">oom</span><span class=\"o\">/</span><span class=\"n\">timeout</span><span class=\"o\">/</span><span class=\"n\">crash</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"o\">/</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"n\">time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">46345</span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"n\">job</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">2604</span><span class=\"w\"> </span><span class=\"n\">dft_time</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"mi\">0</span>\n</code></pre></div>",
+        "id": 472625099,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1727247116
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span>  I would like to add the changes I reverted during the review of the first pr which would turn into the following PRs:</p>\n<ul>\n<li>moving some code around which was too big of a change that allows for reusing more stuff (there are some types defined inside a function so I can't add them to the context)</li>\n<li>replacing some hashmaps with bitsets</li>\n<li>changing BTees to Vecs (with fallback to BTrees to prevent potential DDOs as discussed)</li>\n<li>replacing calls to sort with linear merge<br>\nThese collectively eliminate ~750mil cycles out of 1b/15.5b presented originally (sightglass/spidermonkey).</li>\n</ul>",
+        "id": 474873766,
+        "sender_full_name": "Jakub Dóka",
+        "timestamp": 1728064074
+    },
+    {
+        "content": "<p>sure, I can't say for sure until seeing the PRs and we'll iterate on it but in principle I'm ok with these</p>",
+        "id": 474878591,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1728066208
+    }
+]

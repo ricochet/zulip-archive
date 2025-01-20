@@ -1,0 +1,158 @@
+[
+    {
+        "content": "<p>Hello, I am seeking advice with regards to WASI usability and the wasmtime linker interface (C API).</p>\n<p>I am left with no choice but to use the C linker interface in order to use WASI (even though I would very, very, much rather avoid it), but it is very unclear to me how it should be used (the other choice which we are considering is to drop support for Wasmtime entirely and go with other runtimes that commit to supporting WASI with the wasm-c-api). I am aware of <a href=\"https://github.com/bytecodealliance/wasmtime/issues/2974\">https://github.com/bytecodealliance/wasmtime/issues/2974</a>. </p>\n<p>In this project (Nginx Wasm embedding), with other runtimes (with which it is possible to use the wasm-c-api only, even with WASI), each created instance is tied to a connection in Nginx. Each instance gets a number of <code>env</code> (host) function imports, all created via <code>wasm_func_new_with_env(store, type, cb, ctx)</code>, where <code>ctx</code> is a pointer to said connection which can thus be retrieved from within the host function.</p>\n<p>Now with the _Wasmtime_ C API _and_ the requirement to enable WASI, I don't really see a way to achieve an equivalent to this except if each instance gets a different linker, and each imported host function is defined with <code>wasmtime_linker_define_func</code> where <code>data</code> is the aforementioned <code>ctx</code>. Is this acceptable/by design? I am under the impression that <code>wasmtime_context_set_data</code> was designed for this purpose, unfortunately I don't see an equivalent in the wasm-c-api for other runtimes to store some context alongside a <code>wasm_store_t</code>, which still leaves us in an incompatible state with regards to compatibility with other runtimes - unless I am missing something?</p>\n<p>For example, as an alternative to the linker interface, Wasmer defines <a href=\"https://github.com/wasmerio/wasmer/blob/master/lib/c-api/wasmer.h#L1761-L1764\">wasi_get_imports</a> and this works well enough, we handle the linking ourselves.</p>\n<p>Please advise, thank you!</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/2974\" style=\"background-image: url(https://opengraph.githubassets.com/54eff5fb253c815f99b4647139d0ddc5e72ec96f2708d398cc449a05b84f48e7/bytecodealliance/wasmtime/issues/2974)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/2974\" title=\"RFC 11: Broken WASM/WASI-C-API embedding code due to removed functionality · Issue #2974 · bytecodealliance/wasmtime\">RFC 11: Broken WASM/WASI-C-API embedding code due to removed functionality · Issue #2974 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">We have a scenario that integrates Wasm VMs using the plain standard Wasm-C-Api functionality. For WASI, the additional WASI specific calls are used. With the implementation of RFC 11, our code was...</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/wasmerio/wasmer/blob/master/lib/c-api/wasmer.h#L1761-L1764\" style=\"background-image: url(https://repository-images.githubusercontent.com/152572186/f467fe00-c8e6-11e9-9237-9449454fdcf5)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/wasmerio/wasmer/blob/master/lib/c-api/wasmer.h#L1761-L1764\" title=\"wasmer/wasmer.h at master · wasmerio/wasmer\">wasmer/wasmer.h at master · wasmerio/wasmer</a></div><div class=\"message_embed_description\">🚀 The leading WebAssembly Runtime supporting WASI and Emscripten - wasmer/wasmer.h at master · wasmerio/wasmer</div></div></div>",
+        "id": 256151540,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633391097
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"302434\">@Thibault Charbonnier</span> would you be up for discussing some of the requirements of your embedding? Depending those it'll probably help guide the best solution here. For example it sounds like a requirement is you need to use a built-in implementation of WASI rather than a custom nginx-specific implementation? Alternatively, though, do you have performance requirements around instantiation and/or invoking wasm functions? </p>\n<p>For some history when we redesigned Wasmtime's C API we decided to provide compatibility with <code>wasm.h</code> as a shim rather than designing the C API around that header. This was done for a number of reasons including maintainability (<code>wasm.h</code> hasn't changed in quite some time and doesn't support features like reference types, simd, or module linking) and speed (the singular method of instantiation in <code>wasm.h</code> we've found is difficult to optimize further given the API requirements). This means that most features of Wasmtime's C API, including the <code>wasmtime_linker_t</code> type, are geared towards the Wasmtime-specific support primarily and we've added compatibility with <code>wasm.h</code> afterwards. We could provide a custom linker type for the <code>wasm.h</code> types but we decided to not do so initially and see how things panned out in the future.</p>\n<p>In any case it might be useful to discuss some more the properties/requirements of your embedding. Depending on that the design of <code>wasmtime.h</code> may make sense, or the conclusion may be that the best thing to do would be to add more Wasmtime-specific enhancements to <code>wasm.h</code>. I'd be happy to help out with the latter but we unfortunately don't have the bandwidth to implement the latter at this time.</p>",
+        "id": 256255039,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633444088
+    },
+    {
+        "content": "<p>Hi <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span>, thank you for reaching out! Yes, I can certainly elaborate. The only requirement is to use the wasm-c-api only so as to give users the choice of which WASM runtime to use. So far, we have a WASM \"VM\" component within Nginx which is written with wasm-c-api only and allows us to load modules, do the host linking, invoke our WASM functions anywhere within Nginx, etc... It works with Wasmtime and Wasmer already. We thus use this VM to implement the proxy-wasm SDK inside of Nginx (the same SDK used by Envoy for its WASM filters). For this reason, the wasm-c-api is more than enough for our needs, we do not need any of the newer WASM features, and likely won't for quite some time. </p>\n<p>Things started getting complicated when I tried adding support for Golang with proxy-wasm-go-sdk; this TinyGo implementation of proxy-wasm requires WASI imports. When I wrote the aforementioned VM with wasm-c-api, this used to not be an issue since both Wasmer and Wasmtime supported WASI with the wasm-c-api, however <a href=\"https://github.com/bytecodealliance/wasmtime/issues/2974\">https://github.com/bytecodealliance/wasmtime/issues/2974</a> happened in the meantime and now the approach we have taken for almost a year is broken with Wasmtime because of this decision. So I find myself having to rewrite most of the VM for Wasmtime specifically, and adding a consequential amount of undesired complexity solely for the purpose of maintaining Wasmtime compatibility. <br>\nHowever like I was pointing out in my above topic, I am even finding out that this might still not be a valid approach after all, unless I instantiate and use a Linker for each and every instance (i.e. connection) within Nginx; this does not seem ideal at all so I am wondering what I am missing.  When I look at <code>wasmtime_context_set_data</code> as an alternative to setting env context for retrieval in host functions, that alternative does not seem to exist for wasm-c-api runtimes. I am having a hard-time maintaining compatibility of runtimes with or without wasm-c-api/Linkers.</p>\n<p>This feels like a dead-end, unless Wasmtime reverts support for WASI imports with wasm-c-api; what do you think?</p>\n<p>Thank you again for lending an ear!</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/2974\" style=\"background-image: url(https://opengraph.githubassets.com/54eff5fb253c815f99b4647139d0ddc5e72ec96f2708d398cc449a05b84f48e7/bytecodealliance/wasmtime/issues/2974)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/2974\" title=\"RFC 11: Broken WASM/WASI-C-API embedding code due to removed functionality · Issue #2974 · bytecodealliance/wasmtime\">RFC 11: Broken WASM/WASI-C-API embedding code due to removed functionality · Issue #2974 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">We have a scenario that integrates Wasm VMs using the plain standard Wasm-C-Api functionality. For WASI, the additional WASI specific calls are used. With the implementation of RFC 11, our code was...</div></div></div>",
+        "id": 256269787,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633448829
+    },
+    {
+        "content": "<p>this is only <a href=\"https://github.com/bytecodealliance/rfcs/blob/main/accepted/new-api.md#the-new-wasmtime-c-api\">lightly touched on</a> in the RFC about the new API, but a major reason we're not focusing on the wasm-c-api approach is that there are some pretty fundamental sources of overhead. In particular in your use case, it seems like performance is really crucial, so I'd be careful about making the \"must use wasm-c-api\" approach too hard a requirement.</p>\n<p>Another issue is that the wasm-c-api leaves a huge amount of semantics unspecified, meaning that there are lots of situations where runtimes will do pretty fundamentally different things anyway, so there's a false sense of compatibility, and you really can't treat the API as an abstraction for drop-in replacements.</p>\n<p>Given all this, I'd strongly counsel to create higher-level abstractions and use the best way to embed each relevant runtime. I'd be pretty surprised if that didn't save you work in the long (or even medium) run in addition to the perf benefits</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/rfcs/blob/main/accepted/new-api.md#the-new-wasmtime-c-api\" style=\"background-image: url(https://opengraph.githubassets.com/c8120c4c9cdb6e2117ec2583871ff802bce8f42d19ee7d9b12072a235d010d0b/bytecodealliance/rfcs)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/rfcs/blob/main/accepted/new-api.md#the-new-wasmtime-c-api\" title=\"rfcs/new-api.md at main · bytecodealliance/rfcs\">rfcs/new-api.md at main · bytecodealliance/rfcs</a></div><div class=\"message_embed_description\">RFC process for Bytecode Alliance projects. Contribute to bytecodealliance/rfcs development by creating an account on GitHub.</div></div></div>",
+        "id": 256272103,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1633449637
+    },
+    {
+        "content": "<p>One thing I would add to what Till said is it sounds like you are having trouble implementing your embedding with the current as-of-today <code>wasmtime.h</code> APIs? If so I'd be more than happy to help out there as well to figure out how to wrangle them.</p>",
+        "id": 256272371,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633449736
+    },
+    {
+        "content": "<p>Hi Till! Yes Alex, correct; even with the Wasmtime API (wasmtime.h), which is already a significant source overhaul, I still cannot figure out how to use it so as to do the equivalent of what we do with wasm-c-api.</p>",
+        "id": 256272525,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633449800
+    },
+    {
+        "content": "<p>Ah ok, would you be up for digging more into that? (e.g. outlining a bit more what you're stuck on)</p>",
+        "id": 256272897,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633449927
+    },
+    {
+        "content": "<p>The general gist of the data pointers is that there's two-levels of custom data pointers, one is at the store/context level where you get a custom <code>void*</code>, and the second is at the per-host-function level where you get a <code>void*</code> for each host function (using <code>wasmtime_func_new</code>)</p>",
+        "id": 256273181,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450007
+    },
+    {
+        "content": "<p>Sure; it all has to do with storing a context structure (keeping pointers to the current connection, the current proxy-wasm execution context as well, etc...) so as to retrieve them from the host callback (like <code>wasmtime_func_callback_t</code>'s <code>env</code> argument - first argument)</p>",
+        "id": 256273224,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633450022
+    },
+    {
+        "content": "<p>for that what I'd recommend is to place everything into the store/context pointer</p>",
+        "id": 256273294,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450046
+    },
+    {
+        "content": "<p>that way you can create one <code>wasmtime_linker_t</code> for the entire lifetime of the program</p>",
+        "id": 256273321,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450054
+    },
+    {
+        "content": "<p>and it's much faster to instantiate since the linker is already created for all connections</p>",
+        "id": 256273353,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450065
+    },
+    {
+        "content": "<p>Right; like we do with wasm-c-api, I use <code>wasm_func_new_with_env</code>. But I cannot find the equivalent with Wasmtime's Linker API?</p>",
+        "id": 256273388,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633450079
+    },
+    {
+        "content": "<p>and then you'll create a store-per-connection where the custom data is stored in the store's context pointer</p>",
+        "id": 256273391,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450080
+    },
+    {
+        "content": "<p>You'll instead want to use <code>wasmtime_linker_define_func</code></p>",
+        "id": 256273481,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450097
+    },
+    {
+        "content": "<p>So that's the issue, I wish to maintain flexibility here, and while a store per connection is possible, the current approach also supports a global store.</p>",
+        "id": 256273526,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633450116
+    },
+    {
+        "content": "<p>I wouldn't recommend a global store because it means that instances are never free'd</p>",
+        "id": 256273619,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450148
+    },
+    {
+        "content": "<p>instances are only deallocated once their containing store is deallocated</p>",
+        "id": 256273657,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450160
+    },
+    {
+        "content": "<p>Right</p>",
+        "id": 256273691,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633450175
+    },
+    {
+        "content": "<p>it also would means that instances could accidentally leak data between each other, breaking some isolation</p>",
+        "id": 256273692,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450175
+    },
+    {
+        "content": "<p>but if you still want to a global store is still possible (although you'll have to synchronize access to it since it's not threadsafe)</p>",
+        "id": 256273774,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450201
+    },
+    {
+        "content": "<p>a linker can be a one-per-program thing but if you really want it can also be a per-store thing</p>",
+        "id": 256273874,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450220
+    },
+    {
+        "content": "<p>can't you also do multiple stores, but still reuse them across connections?</p>",
+        "id": 256273932,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1633450242
+    },
+    {
+        "content": "<p>Perhaps. Now if I use multiple stores, don't I need to load modules once for each store?</p>",
+        "id": 256274284,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633450390
+    },
+    {
+        "content": "<p>Modules exist at the engine-level so you only need to compile a module once, and then it can be instantiated within separate stores</p>",
+        "id": 256274342,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1633450417
+    },
+    {
+        "content": "<p>Using multiple stores should be an easy change since I was planning on supporting it too, I will try that out and try to make it work with Wasmer's wasm-c-api too. Thanks!</p>",
+        "id": 256274566,
+        "sender_full_name": "Thibault Charbonnier",
+        "timestamp": 1633450508
+    }
+]

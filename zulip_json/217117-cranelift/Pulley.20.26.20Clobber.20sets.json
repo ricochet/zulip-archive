@@ -1,0 +1,134 @@
+[
+    {
+        "content": "<p>I've got a regalloc/cranelift question that others might know better how to debug. I've got a CLIF function which emits <code>xconst8 x23, 0</code> in pulley bytecode which is storing the immediate 0 in register <code>x23</code>. The register <code>x23</code> is a callee-save register, though, so it needs to be saved at the beginning of the function. This function, however is only saving <code>x25</code> for some other reason. Basically I'm not sure why the <code>compute_clobbers</code> function is only returning x25 and not other registers (x23 isn't the only one)</p>",
+        "id": 487097212,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733777848
+    },
+    {
+        "content": "<p>my guess is that this is some typo or missing piece by accident in the pulley backend, so I'm mostly curious if anyone else knows how this might come about off the top of their head</p>",
+        "id": 487097276,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733777875
+    },
+    {
+        "content": "<p>clobbers are computed by looking at defs on all instructions; is the regalloc metadata correct on <code>xconst8</code>?</p>",
+        "id": 487098071,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733778108
+    },
+    {
+        "content": "<p>I double-checked it was using <code>reg_def</code> yeah</p>",
+        "id": 487098166,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778127
+    },
+    {
+        "content": "<p>cool, and then the other piece is ensuring it's actually a callee-save; going to look at ABI code, one sec</p>",
+        "id": 487098227,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733778149
+    },
+    {
+        "content": "<p>it's listed in <code>DEFAULT_CALLEE_SAVES</code> on the pulley backend -- I'll note there's a typo in this definition where the float registers are using <code>px_reg</code> instead of <code>pf_reg</code>, but that I don't think should affect this</p>",
+        "id": 487098362,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778195
+    },
+    {
+        "content": "<p>I threw some debugging in <code>OperandCollector::reg_def</code> and it looks like it's only ever called with virtual registers, not physical registers, so that seems a bit suspect</p>",
+        "id": 487098531,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778245
+    },
+    {
+        "content": "<p>one thing I also thought was odd was that in <code>compute_clobbers</code> it iterates over <code>operand_ranges</code> but that set is basically empty</p>",
+        "id": 487098792,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778336
+    },
+    {
+        "content": "<p>it only iterates over the <code>Inst::Args</code> instruction which also seems odd</p>",
+        "id": 487098873,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778363
+    },
+    {
+        "content": "<p>ah, so there isn't a separate collector pass to gather clobbers -- we collect once into the shared operand array, then regalloc works over that, then we iterate over that to gather clobbers (here: <a href=\"https://github.com/bytecodealliance/wasmtime/blob/5dcaa13ced14a4fe135036c82fdc9cb9170b1074/cranelift/codegen/src/machinst/vcode.rs#L661\">https://github.com/bytecodealliance/wasmtime/blob/5dcaa13ced14a4fe135036c82fdc9cb9170b1074/cranelift/codegen/src/machinst/vcode.rs#L661</a>)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/5dcaa13ced14a4fe135036c82fdc9cb9170b1074/cranelift/codegen/src/machinst/vcode.rs#L661\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/93231087db9ae0cfc56d1871930d4fb9bbe07083/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f326636306432353335663634373963633661616334633332616336663235373837343761326436363630333464316331393739343539363562623132623433392f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/5dcaa13ced14a4fe135036c82fdc9cb9170b1074/cranelift/codegen/src/machinst/vcode.rs#L661\" title=\"wasmtime/cranelift/codegen/src/machinst/vcode.rs at 5dcaa13ced14a4fe135036c82fdc9cb9170b1074 · bytecodealliance/wasmtime\">wasmtime/cranelift/codegen/src/machinst/vcode.rs at 5dcaa13ced14a4fe135036c82fdc9cb9170b1074 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A lightweight WebAssembly runtime that is fast, secure, and standards-compliant - bytecodealliance/wasmtime</div></div></div>",
+        "id": 487098906,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733778370
+    },
+    {
+        "content": "<p>but: is <code>included_in_clobbers</code> correct for the generated instructions?</p>",
+        "id": 487098932,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733778383
+    },
+    {
+        "content": "<p>oh you know</p>",
+        "id": 487098964,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778395
+    },
+    {
+        "content": "<p>ok yep that's it</p>",
+        "id": 487099018,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778415
+    },
+    {
+        "content": "<p>the return value of that is inverted</p>",
+        "id": 487099026,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778419
+    },
+    {
+        "content": "<p>I looked at that earlier and glossed over this by accident</p>",
+        "id": 487099056,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778428
+    },
+    {
+        "content": "<p>t hanks!</p>",
+        "id": 487099057,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778429
+    },
+    {
+        "content": "<p><code>included_in_clobbers</code>, doing what it says on the tin (but ever sneaky in doing so)! no problem</p>",
+        "id": 487099110,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733778449
+    },
+    {
+        "content": "<p>yeah it's defined as <code>is_args()</code> on pulley whereas x64 has <code>!self.is_args()</code> (roughly)</p>",
+        "id": 487099180,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778478
+    },
+    {
+        "content": "<p>all good now though, thanks!</p>",
+        "id": 487099254,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778492
+    },
+    {
+        "content": "<p>yep yep</p>",
+        "id": 487099284,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733778503
+    },
+    {
+        "content": "<p>woohoo that got this batch of new tests down to only one failure which I already knew about</p>",
+        "id": 487099770,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1733778679
+    },
+    {
+        "content": "<p>sweet!</p>",
+        "id": 487099807,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1733778696
+    }
+]

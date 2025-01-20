@@ -1,0 +1,116 @@
+[
+    {
+        "content": "<p>It seems I found a roadblock for implementing the sock_connect proposal. I am getting this:</p>\n<div class=\"codehilite\"><pre><span></span><code>error: proc macro panicked\n --&gt; crates/wasi/src/lib.rs:9:1\n  |\n9 | wig::define_wasi_struct_for_wiggle!(&quot;phases/snapshot/witx/wasi_snapshot_preview1.witx&quot;);\n  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  |\n  = help: message: unsupported argument type\n</code></pre></div>\n\n\n<p>Which after some tracking seems to be because of this function signature:</p>\n<div class=\"codehilite\"><pre><span></span><code>  ;;; Initiate a connection on a socket to the specified address\n  ;;; Note: This is similar to `connect` in POSIX\n  (@interface func (export &quot;sock_connect&quot;)\n    ;;; Socket descriptor\n    (param $fd $fd)\n    ;;; Address of the local socket (ex &#39;/dev/tmp&#39;)\n    (param $addr $addr)\n    (result $error $errno)\n  )\n</code></pre></div>\n\n\n<p><code>$addr</code> is a union of three different structs. </p>\n<div class=\"codehilite\"><pre><span></span><code>;;; Union of all possible addresses type\n(typename $addr\n  (union $addr_type\n    (field $local $addr_local)\n    (field $ip4 $addr_ip4_port)\n    (field $ip6 $addr_ip6_port)\n  )\n)\n</code></pre></div>\n\n\n<p>I'm afraid that I am not knowledgable enough to implement support for that. Can somebody help me out?<br>\n<span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> <span class=\"user-mention\" data-user-id=\"253992\">@Pat Hickey</span> <span class=\"user-mention\" data-user-id=\"263195\">@Jakub Konka</span></p>",
+        "id": 198715297,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590459993
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"305220\">@Emiliano Lesende</span> for know struct-by-value isn't supported, so you'll want to put it behind a pointer indirection</p>",
+        "id": 198769747,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1590503348
+    },
+    {
+        "content": "<p>e.g. pass a pointer to the sockaddr</p>",
+        "id": 198769763,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1590503359
+    },
+    {
+        "content": "<p>That would be <code>(@witx pointer $addr)</code> right?</p>",
+        "id": 198770039,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590503455
+    },
+    {
+        "content": "<p>I believe so yeah</p>",
+        "id": 198770687,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1590503717
+    },
+    {
+        "content": "<p>Thank you <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span></p>",
+        "id": 198771404,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590504020
+    },
+    {
+        "content": "<p>it looks like this is a minor issue in the <code>wig</code> crate, which is the adapter between wasmtime and wiggle. I think the fix is: diff --git a/crates/wasi-common/wig/src/wasi.rs b/crates/wasi-common/wig/src/wasi.rs<br>\nindex 579e6f3ca..80f7f2f90 100644<br>\n--- a/crates/wasi-common/wig/src/wasi.rs<br>\n+++ b/crates/wasi-common/wig/src/wasi.rs<br>\n@@ -155,7 +155,7 @@ pub fn define_struct(args: TokenStream) -&gt; TokenStream {<br>\n                     }</p>\n<div class=\"codehilite\"><pre><span></span><code>                 witx::Type::Struct(_) | witx::Type::Union(_) =&gt; {\n</code></pre></div>\n\n\n<ul>\n<li>panic!(\"unsupported argument type\")</li>\n<li>add_param(&amp;name, Abi::I32, true);<br>\n                     }<br>\n                 }<br>\n             }</li>\n</ul>",
+        "id": 198795021,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514210
+    },
+    {
+        "content": "<p>wiggle believes that structs and unions are valid to pass \"by value\" and automatically expects them to be behind a pointer</p>",
+        "id": 198795095,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514241
+    },
+    {
+        "content": "<p>so using a param type of $addr should be equivelant to (@witx const_pointer $addr)</p>",
+        "id": 198795185,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514283
+    },
+    {
+        "content": "<p>we pass structs by value in other uses of wiggle over in lucet-land, anyway</p>",
+        "id": 198795254,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514311
+    },
+    {
+        "content": "<p>this is the idea of the <code>func.core_type()</code> method in witx.</p>",
+        "id": 198795425,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514389
+    },
+    {
+        "content": "<p>(also, sorry, zulip didnt show me the rest of this discussion before i replied)</p>",
+        "id": 198795645,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514499
+    },
+    {
+        "content": "<p>Thanks <span class=\"user-mention\" data-user-id=\"253992\">@Pat Hickey</span>. I already converted the param to a pointer.</p>",
+        "id": 198795946,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590514660
+    },
+    {
+        "content": "<p>cool. in the long run, we want to get rid of @witx pointer and const_pointer completely</p>",
+        "id": 198796024,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514689
+    },
+    {
+        "content": "<p>since that sort of idea isnt really part of interface types</p>",
+        "id": 198796043,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514706
+    },
+    {
+        "content": "<p>so its better to avoid them now for everywhere theyre not absolutely necessary</p>",
+        "id": 198796066,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514720
+    },
+    {
+        "content": "<p>but if it doesnt hurt and it keeps you moving, then go for it.</p>",
+        "id": 198796077,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1590514730
+    },
+    {
+        "content": "<p>Yeah, for background here, the reason you don't see any examples of pointer-to-aggregate parameters in WASI is that for structs, it's nicer at the wasm level to just pass the individual values as parameters.</p>",
+        "id": 198802039,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590517719
+    },
+    {
+        "content": "<p>Of course that doesn't work for unions, but until now we haven't had a need to pass a union that wasn't part of an array (which needs to be in memory anyway)</p>",
+        "id": 198802079,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590517745
+    }
+]

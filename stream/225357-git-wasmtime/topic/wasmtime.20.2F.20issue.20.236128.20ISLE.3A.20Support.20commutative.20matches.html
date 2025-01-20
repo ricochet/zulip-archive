@@ -1,0 +1,256 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #6128 ISLE: Support commutative matches · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html">wasmtime / issue #6128 ISLE: Support commutative matches</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="345793955"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/345793955" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#345793955">(Mar 30 2023 at 21:54)</a>:</h4>
+<p>jameysharp opened <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>An ISLE pattern like <code>(iadd (pattern_a) (pattern_b))</code> should also match if <code>(iadd (pattern_b) (pattern_a))</code> would match, because <code>iadd</code> is a commutative operation.</p>
+<h4>Benefit</h4>
+<p>We currently have many rules, both in mid-end optimization and in backend lowering, where we have to write out all possible rules that are equivalent up to commutativity. If there are N commutative patterns in a rule's left-hand side, that requires writing up to 2^N rules. This is tedious and error-prone.</p>
+<p>It's worthwhile having ISLE generate code for each distinct form of these rules because then the ISLE compiler can build an efficient pattern-matching tree that evaluates each part of the pattern as few times as possible.</p>
+<p>In the mid-end optimization rules, we've considered rewriting commutative instructions to their flipped equivalents, so that all commutative alternatives are available in the same e-class (see #5546). But it's cheaper to have more ISLE rules than to double the number of instructions in e-classes, the GVN map, and the dataflow graph. And this doesn't help backends because the egraph cost function can pick either version, so there's no guarantee the backend will see the operands in the order it wants (see #5709).</p>
+<p>If we can declare once that a term like <code>iadd</code> is commutative and have ISLE generate all the equivalent rules, then we can get the performance advantages of an optimized pattern-matching tree while writing a minimum set of rules.</p>
+<h4>Challenges</h4>
+<p>These commutative alternative rules often overlap with each other. If the sub-patterns overlap each other, then swapping them will produce a rule which overlaps with the original. The simplest example is that <code>(iadd x y)</code> overlaps with <code>(iadd y x)</code> since <code>x</code> and <code>y</code> are wildcard patterns which only bind variables.</p>
+<p>In some cases, swapping the operands produces exactly the same rule. For example, <code>(iadd x x)</code> only matches if both operands are the same SSA value or e-class, and matches exactly the same inputs when flipped. In these cases, generating a duplicate lowering rule will lead to either an error during overlap checking or an assertion failure during code generation, depending on where we expand the rule. Generating a duplicate egraph rule will produce correct results but do more work than necessary.</p>
+<p>In other cases, swapping the operands matches the same inputs when flipped but the right-hand side could evaluate to different results depending on which version of the rule is selected. A rule which lowers <code>(iadd x y)</code> to <code>(x64_add x y)</code> would, when flipped, lower to <code>(x64_add y x)</code> instead. The result should be equivalent but is not the same machine instruction. We need to ensure that we choose one of these alternatives deterministically.</p>
+<h4>Implementation</h4>
+<p>We've discussed several alternative implementation plans, and I'm probably missing some. None have yet emerged as the "right" answer.</p>
+<p>One idea is a new flag when declaring a term. <code>(decl commutative iadd (Value Value) Inst)</code> would mean that when the term is used as an extractor, then implicitly two versions of the enclosing rule are generated, with the subpatterns swapped.</p>
+<p>Another approach is to add some kind of support for or-patterns to the ISLE language. For example, if we allow a term to be defined by multiple internal extractors, then we might create a helper term for matching 2-element value arrays in commutative instructions:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">value_array_commutative</span><span class="w"> </span><span class="p">(</span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span><span class="w"> </span><span class="nv">ValueArray2</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_commutative</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+<span class="p">(</span><span class="nv">extractor</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_commutative</span><span class="w"> </span><span class="nv">y</span><span class="w"> </span><span class="nv">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+</code></pre></div>
+<p>An alternative syntax is to add a special <code>(or ...)</code> pattern combinator, as proposed by @Kmeakin in <a href="#narrow/stream/217117-cranelift/topic/Commutative.20rewrites/near/344151148">https://bytecodealliance.zulipchat.com/#narrow/stream/217117-cranelift/topic/Commutative.20rewrites/near/344151148</a>:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">bor</span><span class="w"> </span><span class="p">(</span><span class="nv">Type</span><span class="w"> </span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">bor</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span>
+<span class="w">    </span><span class="p">(</span><span class="nb">or</span>
+<span class="w">        </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.Binary</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Bor</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)))</span>
+<span class="w">        </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.Binary</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Bor</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">y</span><span class="w"> </span><span class="nv">x</span><span class="p">))))</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>I prefer these versions over the <code>commutative</code> flag because it allows us to be explicit about how to match the alternatives. For example, we could write explicit alternatives for <code>icmp</code> which reverse the condition code if matching the operands flipped (hand-waving that <code>intcc_reverse</code> is currently a constructor, but would need to be an extractor):</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">icmp</span><span class="w"> </span><span class="p">(</span><span class="nv">IntCC</span><span class="w"> </span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span><span class="w"> </span><span class="nv">Inst</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">icmp</span><span class="w"> </span><span class="nv">Cond</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.IntCompare</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Icmp</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="nv">Cond</span><span class="p">))</span>
+<span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">icmp</span><span class="w"> </span><span class="nv">Cond</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.IntCompare</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Icmp</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">y</span><span class="w"> </span><span class="nv">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">intcc_reverse</span><span class="w"> </span><span class="nv">Cond</span><span class="p">)))</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>We might add priorities to internal extractors to declare how they should interact with overlap checking. But that leaves priorities ambiguous in a pattern like <code>(isub (iadd a b) (iadd c d))</code>: swapping <code>a</code> with <code>b</code> would apparently have the same priority as swapping <code>c</code> with <code>d</code>.</p>
+<p>It might also be useful to declare some constructors as commutative: If we've produced two versions of a rule with left-hand patterns swapped due to commutativity, and find that they match the same inputs and produce the same right-hand side up to constructor commutativity, then we don't need the duplicate rule. Currently we can just avoid writing such rules but if all uses of <code>iadd</code> match an or-pattern, then ISLE needs to figure out how to avoid unnecessary work.</p>
+<p>As an extension, it would be nice if ISLE could emit Rust <code>match</code> or-patterns to group match arms which bind the same variables in different orders or from different enum variants. I suspect that optimization would never be relevant for the commutative-operator use case though: if we can tell the right-hand side is the same, I think that always means that the left-hand patterns are equivalent and the rules are just duplicates. I have other uses in mind for or-patterns which might benefit from this optimization though.</p>
+<p>A bunch of people have expressed interest in this topic: @cfallin @fitzgen @elliottt @afonso360 @alexcrichton </p>
+</blockquote>
+
+
+
+<a name="345793957"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/345793957" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#345793957">(Mar 30 2023 at 21:54)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>An ISLE pattern like <code>(iadd (pattern_a) (pattern_b))</code> should also match if <code>(iadd (pattern_b) (pattern_a))</code> would match, because <code>iadd</code> is a commutative operation.</p>
+<h4>Benefit</h4>
+<p>We currently have many rules, both in mid-end optimization and in backend lowering, where we have to write out all possible rules that are equivalent up to commutativity. If there are N commutative patterns in a rule's left-hand side, that requires writing up to 2^N rules. This is tedious and error-prone.</p>
+<p>It's worthwhile having ISLE generate code for each distinct form of these rules because then the ISLE compiler can build an efficient pattern-matching tree that evaluates each part of the pattern as few times as possible.</p>
+<p>In the mid-end optimization rules, we've considered rewriting commutative instructions to their flipped equivalents, so that all commutative alternatives are available in the same e-class (see #5546). But it's cheaper to have more ISLE rules than to double the number of instructions in e-classes, the GVN map, and the dataflow graph. And this doesn't help backends because the egraph cost function can pick either version, so there's no guarantee the backend will see the operands in the order it wants (see #5709).</p>
+<p>If we can declare once that a term like <code>iadd</code> is commutative and have ISLE generate all the equivalent rules, then we can get the performance advantages of an optimized pattern-matching tree while writing a minimum set of rules.</p>
+<h4>Challenges</h4>
+<p>These commutative alternative rules often overlap with each other. If the sub-patterns overlap each other, then swapping them will produce a rule which overlaps with the original. The simplest example is that <code>(iadd x y)</code> overlaps with <code>(iadd y x)</code> since <code>x</code> and <code>y</code> are wildcard patterns which only bind variables.</p>
+<p>In some cases, swapping the operands produces exactly the same rule. For example, <code>(iadd x x)</code> only matches if both operands are the same SSA value or e-class, and matches exactly the same inputs when flipped. In these cases, generating a duplicate lowering rule will lead to either an error during overlap checking or an assertion failure during code generation, depending on where we expand the rule. Generating a duplicate egraph rule will produce correct results but do more work than necessary.</p>
+<p>In other cases, swapping the operands matches the same inputs when flipped but the right-hand side could evaluate to different results depending on which version of the rule is selected. A rule which lowers <code>(iadd x y)</code> to <code>(x64_add x y)</code> would, when flipped, lower to <code>(x64_add y x)</code> instead. The result should be equivalent but is not the same machine instruction. We need to ensure that we choose one of these alternatives deterministically.</p>
+<h4>Implementation</h4>
+<p>We've discussed several alternative implementation plans, and I'm probably missing some. None have yet emerged as the "right" answer.</p>
+<p>One idea is a new flag when declaring a term. <code>(decl commutative iadd (Value Value) Inst)</code> would mean that when the term is used as an extractor, then implicitly two versions of the enclosing rule are generated, with the subpatterns swapped.</p>
+<p>Another approach is to add some kind of support for or-patterns to the ISLE language. For example, if we allow a term to be defined by multiple internal extractors, then we might create a helper term for matching 2-element value arrays in commutative instructions:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">value_array_commutative</span><span class="w"> </span><span class="p">(</span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span><span class="w"> </span><span class="nv">ValueArray2</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_commutative</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+<span class="p">(</span><span class="nv">extractor</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_commutative</span><span class="w"> </span><span class="nv">y</span><span class="w"> </span><span class="nv">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+</code></pre></div>
+<p>An alternative syntax is to add a special <code>(or ...)</code> pattern combinator, as proposed by @Kmeakin in <a href="#narrow/stream/217117-cranelift/topic/Commutative.20rewrites/near/344151148">https://bytecodealliance.zulipchat.com/#narrow/stream/217117-cranelift/topic/Commutative.20rewrites/near/344151148</a>:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">bor</span><span class="w"> </span><span class="p">(</span><span class="nv">Type</span><span class="w"> </span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">bor</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span>
+<span class="w">    </span><span class="p">(</span><span class="nb">or</span>
+<span class="w">        </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.Binary</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Bor</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)))</span>
+<span class="w">        </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.Binary</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Bor</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">y</span><span class="w"> </span><span class="nv">x</span><span class="p">))))</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>I prefer these versions over the <code>commutative</code> flag because it allows us to be explicit about how to match the alternatives. For example, we could write explicit alternatives for <code>icmp</code> which reverse the condition code if matching the operands flipped (hand-waving that <code>intcc_reverse</code> is currently a constructor, but would need to be an extractor):</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">decl</span><span class="w"> </span><span class="nv">icmp</span><span class="w"> </span><span class="p">(</span><span class="nv">IntCC</span><span class="w"> </span><span class="nv">Value</span><span class="w"> </span><span class="nv">Value</span><span class="p">)</span><span class="w"> </span><span class="nv">Inst</span><span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">icmp</span><span class="w"> </span><span class="nv">Cond</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.IntCompare</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Icmp</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="nv">Cond</span><span class="p">))</span>
+<span class="p">)</span>
+<span class="p">(</span><span class="nv">extractor</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">icmp</span><span class="w"> </span><span class="nv">Cond</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span>
+<span class="w">    </span><span class="p">(</span><span class="nv">inst_data</span><span class="w"> </span><span class="p">(</span><span class="nv">InstructionData.IntCompare</span><span class="w"> </span><span class="p">(</span><span class="nv">Opcode.Icmp</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">value_array_2</span><span class="w"> </span><span class="nv">y</span><span class="w"> </span><span class="nv">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">intcc_reverse</span><span class="w"> </span><span class="nv">Cond</span><span class="p">)))</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>We might add priorities to internal extractors to declare how they should interact with overlap checking. But that leaves priorities ambiguous in a pattern like <code>(isub (iadd a b) (iadd c d))</code>: swapping <code>a</code> with <code>b</code> would apparently have the same priority as swapping <code>c</code> with <code>d</code>.</p>
+<p>It might also be useful to declare some constructors as commutative: If we've produced two versions of a rule with left-hand patterns swapped due to commutativity, and find that they match the same inputs and produce the same right-hand side up to constructor commutativity, then we don't need the duplicate rule. Currently we can just avoid writing such rules but if all uses of <code>iadd</code> match an or-pattern, then ISLE needs to figure out how to avoid unnecessary work.</p>
+<p>As an extension, it would be nice if ISLE could emit Rust <code>match</code> or-patterns to group match arms which bind the same variables in different orders or from different enum variants. I suspect that optimization would never be relevant for the commutative-operator use case though: if we can tell the right-hand side is the same, I think that always means that the left-hand patterns are equivalent and the rules are just duplicates. I have other uses in mind for or-patterns which might benefit from this optimization though.</p>
+<p>A bunch of people have expressed interest in this topic: @cfallin @fitzgen @elliottt @afonso360 @alexcrichton </p>
+</blockquote>
+
+
+
+<a name="345794043"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/345794043" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#345794043">(Mar 30 2023 at 21:55)</a>:</h4>
+<p>github-actions[bot] <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-1491014660">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<h4>Subscribe to Label Action</h4>
+<p>cc @cfallin, @fitzgen</p>
+<p>&lt;details&gt;<br>
+This issue or pull request has been labeled: "isle"</p>
+<p>Thus the following users have been cc'd because of the following labels:</p>
+<ul>
+<li>cfallin: isle</li>
+<li>fitzgen: isle</li>
+</ul>
+<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>
+<p><a href="https://github.com/bytecodealliance/subscribe-to-label-action">Learn more.</a><br>
+&lt;/details&gt;</p>
+</blockquote>
+
+
+
+<a name="346665279"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/346665279" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#346665279">(Apr 03 2023 at 19:54)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-1494891074">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<p>@cfallin, @fitzgen, @elliottt and I discussed this today and clarified some of the design constraints.</p>
+<p>We prefer the explicit <code>(or ...)</code> pattern approach.</p>
+<p>We don't want to try to hide commutative patterns inside terms generated by cranelift-codegen-meta. Doing that would require ISLE to analyze or-patterns to identify when multiple alternatives are equivalent. Instead, if you match on, for example, <code>(bor x y)</code> then you'll always match <code>x</code> and <code>y</code> in that order. We can easily hand-write terms for when you explicitly want a commutative match, like so:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">extractor</span><span class="w"> </span><span class="p">(</span><span class="nv">bor_commute</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">or</span><span class="w"> </span><span class="p">(</span><span class="nv">bor</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">bor</span><span class="w"> </span><span class="nv">y</span><span class="w"> </span><span class="nv">x</span><span class="p">)))</span>
+</code></pre></div>
+<p>We have open questions about semantics of or-patterns when used outside of multi-terms. So we've decided to initially implement them only for use in the mid-end <code>simplify</code> multi-constructor, and figure out how they should work for backends later.</p>
+<p>When a rule author uses an or-pattern, they're declaring that all the alternatives are equivalent to the same right-hand side. So for the purposes of overlap checking, none of the alternatives within the same pattern should be treated as overlapping. However, for backends, the right-hand side may expand differently depending on which alternative we selected, so the match order is observable and maybe should be explicitly specified. For the mid-end, we're going to select all the alternatives anyway, so we don't need to think about order, and multi-terms are already excluded from overlap checking.</p>
+<p>I had hoped to preserve or-patterns until ISLE generates Rust source, to allow emitting Rust <code>match</code> or-patterns when possible. However that seems hard so we're going to implement this as an early rewrite, probably in the <code>sema</code> module. Once we have something working maybe we can do better later. Anyway, this will generate code that is no worse than the current state of things, where we're writing a separate rule for each alternative by hand.</p>
+<p>Something I forgot to mention: I've also wanted or-patterns to replace external extractors like <code>fits_in_64</code> but there's an awkward interaction with error checking. At least initially, I think the following won't work:</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">extractor</span><span class="w"> </span><span class="p">(</span><span class="nv">fits_in_32</span><span class="w"> </span><span class="nv">ty</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">and</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="p">(</span><span class="nb">or</span><span class="w"> </span><span class="nv">$I8</span><span class="w"> </span><span class="nv">$I16</span><span class="w"> </span><span class="nv">$I32</span><span class="w"> </span><span class="nv">$F32</span><span class="p">)))</span>
+<span class="p">(</span><span class="nv">extractor</span><span class="w"> </span><span class="p">(</span><span class="nv">ty_float</span><span class="w"> </span><span class="nv">ty</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">and</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="p">(</span><span class="nb">or</span><span class="w"> </span><span class="nv">$F32</span><span class="w"> </span><span class="nv">$F64</span><span class="p">)))</span>
+<span class="o">...</span><span class="w"> </span><span class="p">(</span><span class="nv">fits_in_32</span><span class="w"> </span><span class="p">(</span><span class="nv">ty_float</span><span class="w"> </span><span class="nv">ty</span><span class="p">))</span><span class="w"> </span><span class="o">...</span>
+</code></pre></div>
+<p>That pattern will expand to sub-rules such as <code>(and $I8 $F32)</code>, which we'll reject as an unsatisfiable rule. I kind of wanted this to be accepted as long as at least one of the sub-rules is valid (in this case, <code>(and $F32 $F32)</code>). But I think that's going to hide bugs, and also it's hard to report a useful error message for the case where no sub-rules are valid.</p>
+<p>Huh. An or-pattern which doesn't bind any variables can't expand to a different right-hand side based on which case matched, so those could be allowed in backends without introducing overlap or worrying about match order. Maybe that's a useful next step after mid-end usage.</p>
+</blockquote>
+
+
+
+<a name="347199863"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/347199863" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#347199863">(Apr 05 2023 at 16:29)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-1497785594">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<p>Implementing or-patterns in ISLE is turning out to be surprisingly complicated but I've figured out some things.</p>
+<p>There's no need to explicitly limit where or-patterns may be used (e.g. only in multi-constructors). Instead let's implement them as syntactic sugar for writing out a set of rules which all have the same priority. Later maybe we'll figure out a priority scheme, and until then, if you use them to write a pair of rules which overlap and aren't in a multi-constructor, your pattern will be rejected by the overlap checker. Similarly, the <code>(fits_int_32 (ty_float _))</code> case will be rejected since the equivalent Cartesian product of rules would be rejected.</p>
+<p>Where should this syntactic sugar be expanded?</p>
+<ul>
+<li>Parsing is too early.</li>
+<li>I haven't been able to come up with a way to express this in the "sea of nodes" construction in <code>trie_again</code>, so it should be expanded before that or during its construction.</li>
+<li>Type-checking is complicated enough without building a Cartesian product of rules. Also the typing and name-binding rules for or-patterns require that all branches bind the same names to the same types (but possibly in a different order) so expanding this there just makes it more complicated.</li>
+<li>We could have an explicit pass that rewrites patterns with or-patterns into sets of patterns without or-patterns, but I don't like it.</li>
+</ul>
+<p>So my current plan is to expand this syntax in the <code>Pattern::visit</code> method in <code>sema</code>, which is used during construction of the <code>trie_again</code> representation. The only way I can see to do that is to CPS-transform that method. In particular, the map of variable bindings may be different in each expansion, and the expressions and patterns from if-lets and the right-hand side need to be interpreted with every distinct map of variable bindings.</p>
+</blockquote>
+
+
+
+<a name="347244541"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/347244541" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#347244541">(Apr 05 2023 at 20:05)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-1498055850">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<p>Why don’t you like the explicit pass? That seems more reasonable than CPS converting parts of the compiler to me.</p>
+</blockquote>
+
+
+
+<a name="347259726"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/347259726" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#347259726">(Apr 05 2023 at 21:52)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-1498204775">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<p>That is a fair question!</p>
+<p>The plain answer is I just don't like walking the pattern and building an exponential number of clones of the pattern tree while searching for the or-pattern nodes in it. It makes me feel gross.</p>
+<p>A somewhat more defensible answer is I can avoid duplicating a bunch of the work to build these rules if I do the expansion during the traversal that builds the <code>trie_again</code> representation. With a separate earlier pass, I have to lean harder on the hash-cons map to deduplicate binding sites that are common across sub-rules. Since <code>build.rs</code> is compiled in debug mode, that could potentially have a significant impact.</p>
+<p>It's also worth noting that I don't think the CPS-conversion I need is a big deal. It just affects one function, which recursively walks a pattern and calls caller-provided visitor methods, so it's only a few short match arms.</p>
+<p>That said, continuation-passing style is kind of a big hammer to pull out in Rust, so I understand your concern!</p>
+</blockquote>
+
+
+
+<a name="347444498"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/347444498" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#347444498">(Apr 06 2023 at 14:55)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-1499204719">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<p>Ah yeah if it is just one function, that isn't a big deal.</p>
+</blockquote>
+
+
+
+<a name="429234190"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/429234190" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#429234190">(Mar 24 2024 at 18:25)</a>:</h4>
+<p>scottmcm <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-2016894089">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<p>Hmm, would the <code>(or …)</code> approach also let us handle equivalent <code>icmp</code>s?</p>
+<p>Like instead of</p>
+<div class="codehilite" data-code-language="Common Lisp"><pre><span></span><code><span class="p">(</span><span class="nv">rule</span><span class="w"> </span><span class="p">(</span><span class="nv">ult</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nv">icmp</span><span class="w"> </span><span class="nv">ty</span><span class="w"> </span><span class="p">(</span><span class="nv">IntCC.UnsignedLessThan</span><span class="p">)</span><span class="w"> </span><span class="nv">x</span><span class="w"> </span><span class="nv">y</span><span class="p">))</span>
+</code></pre></div>
+<p>would we be able to have this?</p>
+<p><div class="codehilite" data-code-language="list"><pre><span></span><code>(rule (ult ty x y) (or
+    (icmp ty (IntCC.UnsignedLessThan) x y)
+    (icmp ty (IntCC.UnsignedGreaterThan) y x)
+))
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="429257020"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/429257020" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#429257020">(Mar 24 2024 at 22:48)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-2016973591">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<p>Your example places the <code>(or …)</code> on the right-hand side of a rule, which wouldn't work, but I think what you meant was this extractor from <code>prelude.isle</code> instead:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">extractor</span><span class="w"> </span><span class="p">(</span><span class="n">ult</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">icmp</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">IntCC</span><span class="p">.</span><span class="n">UnsignedLessThan</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">))</span>
+</code></pre></div>
+<p>And yes, I would expect the equivalent extractor pattern to work:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">extractor</span><span class="w"> </span><span class="p">(</span><span class="n">ult</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">or</span>
+<span class="w">    </span><span class="p">(</span><span class="n">icmp</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">IntCC</span><span class="p">.</span><span class="n">UnsignedLessThan</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">)</span>
+<span class="w">    </span><span class="p">(</span><span class="n">icmp</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">IntCC</span><span class="p">.</span><span class="n">UnsignedGreaterThan</span><span class="p">)</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="n">x</span><span class="p">)</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>Which would sure be handy, right?</p>
+</blockquote>
+
+
+
+<a name="429264333"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236128%20ISLE%3A%20Support%20commutative%20matches/near/429264333" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236128.20ISLE.3A.20Support.20commutative.20matches.html#429264333">(Mar 25 2024 at 00:27)</a>:</h4>
+<p>scottmcm <a href="https://github.com/bytecodealliance/wasmtime/issues/6128#issuecomment-2017012099">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6128">issue #6128</a>:</p>
+<blockquote>
+<p>Oops, you're right, I definitely meant the extractor.</p>
+<p>And yes, that sounds <em>extremely</em> handy!</p>
+<p>For example, right now all the spaceship optimizations look for <code>(a &gt; b) - (a &lt; b)</code>, and improving the <code>lt</code>/<code>gt</code> extractors like that would make them immediately start working for things like <code>(b &lt; a) - (a &lt; b)</code> too.</p>
+<p>So or-patterns sounds great, as it would help for more than just commutative scenarios.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

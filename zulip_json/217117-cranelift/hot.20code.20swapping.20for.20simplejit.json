@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>I have been thinking about how to handle hot code swapping inside simplejit and how to export it to the user. I think I have something now that would work:</p>\n<ol>\n<li>Always use GOT/PLT for relocations in functions, even when the hot code swapping is not used by the user. This simplifies the next steps at the cost of a bit of overhead when hot code swapping is not necessary.</li>\n<li>Refer to the PLT entry for function relocations within data objects to allow swapping functions without having to perform relocations on data objects again.</li>\n<li>Immediately perform all relocations in define_* except for data object -&gt; data object relocations.</li>\n<li>Add prepare_*_for_redefine. This will allow a single future redefinition of the specified function or data object by overwriting the GOT entry. It will also mark all relevant data object -&gt; data object relocations as pending again.</li>\n<li>Add define_*_with_address on SimpleJITModule as replacement for the current symbol(s) functions on SimpleJITBuilder.</li>\n</ol>\n<p>What do you all think about this plan?</p>",
+        "id": 216403611,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1605131845
+    },
+    {
+        "content": "<ol>\n<li>done (eaa2c5b and 5458473)</li>\n<li>done (8a4749a)</li>\n<li>done (bf9e5d9)</li>\n<li>partially done (functions only: bbc2afb)</li>\n<li>can be done later</li>\n</ol>\n<p>extra, can be done later: add unwind info for plt</p>\n<p>I got lazy compilation working in cg_clif. Cranelift PR up at #2403.</p>",
+        "id": 216509830,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1605206342
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> what does it mean to be lazy in rustc/cg_clif?</p>",
+        "id": 216591943,
+        "sender_full_name": "Joey Gouly",
+        "timestamp": 1605262849
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"265780\">@Joey Gouly</span> cg_clif has a JIT mode. Currently it compiles all functions before running any user code. Lazy compilation would only compile functions as the get called, so it can start earlier and when code only gets called in edge cases, compilation can often be avoided completely.</p>",
+        "id": 216596229,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1605265492
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> When using <code>cargo run</code>? I dont get how this works w.r.t cargo etc</p>",
+        "id": 216599729,
+        "sender_full_name": "Joey Gouly",
+        "timestamp": 1605267995
+    },
+    {
+        "content": "<p>The JIT mode is currently rather limited as it requires all dependencies to be directly or indirectly available as dylib. You can use it by running <code>cargo.sh jit</code>. This will use <code>cargo rustc -- --jit</code> to make cargo pass <code>--jit</code> only when compiling the executable. <code>--jit</code> is intercepted by the cg_clif driver to enable JIT mode. In the JIT mode compilation happens as usual until the codegen step. During this step it will use SimpleJIT as backend instead of cranelift_object as usual. When compilation is done (or enough done to run something when using lazy compilation), the main function will be invoked, after which cg_clif exits with the exit code of the jitted program. <a href=\"https://github.com/bjorn3/rustc_codegen_cranelift/blob/4e547b942daf9b6786fabdb8ee52056a448d8c9f/src/driver/jit.rs\">https://github.com/bjorn3/rustc_codegen_cranelift/blob/4e547b942daf9b6786fabdb8ee52056a448d8c9f/src/driver/jit.rs</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bjorn3/rustc_codegen_cranelift/blob/4e547b942daf9b6786fabdb8ee52056a448d8c9f/src/driver/jit.rs\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/17426603?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bjorn3/rustc_codegen_cranelift/blob/4e547b942daf9b6786fabdb8ee52056a448d8c9f/src/driver/jit.rs\" title=\"bjorn3/rustc_codegen_cranelift\">bjorn3/rustc_codegen_cranelift</a></div><div class=\"message_embed_description\">Cranelift based backend for rustc. Contribute to bjorn3/rustc_codegen_cranelift development by creating an account on GitHub.</div></div></div>",
+        "id": 216601736,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1605269371
+    },
+    {
+        "content": "<p>Wait does this mean it is possible to do inline caching inside optimizing jit compilers?</p>",
+        "id": 222459785,
+        "sender_full_name": "playX",
+        "timestamp": 1610470234
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"295416\">@playX</span> Not really, this is about swapping whole functions at a time. The code sections are still read-only. In fact on some modern systems (eg iOS and SELinux) it isn't even possible to have writable code sections anymore. You have to call <code>mmap</code> to switch between R+W and R+X.</p>",
+        "id": 222464288,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1610471803
+    },
+    {
+        "content": "<p>Self-modifying code also has a high performance cost on modern processors. Javascript engines switched away from them for a reason.</p>",
+        "id": 222464452,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1610471872
+    },
+    {
+        "content": "<p>@playX to build on the above, the usual technique for ICs these days is to use updatable function pointers -- e.g. in SpiderMonkey there are \"inline cache (IC) chains\" which are linked lists of structs, each of which has a pointer to code to branch to. Codegen just needs to emit an indirect call then</p>",
+        "id": 222465993,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1610472566
+    },
+    {
+        "content": "<p>In other words all of this should happen at an abstraction level above the compiler IR (with the possible exception of support for tail-calling, which you want for the fallback from one IC to the next)</p>",
+        "id": 222466144,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1610472606
+    },
+    {
+        "content": "<p>Yes I know about this. What I did is similar to these inline cache chains but I was mostly taking inspiration from WebKit which replaces jump targets rather than function pointers. What WebKit does is it generates new code block and replaces jump target from slow path to this new code block. I had to write my own macro assembler for this <a href=\"https://github.com/playxe/masm-rs\">https://github.com/playxe/masm-rs</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/playxe/masm-rs\" style=\"background-image: url(https://avatars2.githubusercontent.com/u/41432780?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/playxe/masm-rs\" title=\"playXE/masm-rs\">playXE/masm-rs</a></div><div class=\"message_embed_description\">Macro assembler for Rust. Contribute to playXE/masm-rs development by creating an account on GitHub.</div></div></div>",
+        "id": 222574812,
+        "sender_full_name": "playX",
+        "timestamp": 1610542673
+    }
+]

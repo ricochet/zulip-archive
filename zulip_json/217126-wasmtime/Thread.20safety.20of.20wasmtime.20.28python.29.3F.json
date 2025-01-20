@@ -1,0 +1,50 @@
+[
+    {
+        "content": "<p><strong>Given</strong> I take an ordinary WASM component (single threaded) and provide Python bindings to it,<br>\n<strong>When</strong> I call it from <a href=\"https://pola.rs/\">Polars</a> by using its <a href=\"https://docs.pola.rs/user-guide/concepts/lazy-api/\">lazy api</a>,<br>\n<strong>Then</strong> I can see my application crash with hints to <strong>wasmtime</strong> and different <strong>threads</strong> in the <strong>stack trace</strong>.</p>\n<p>Hence, my hypothesis: wasmtime and Polars crash over some concurrency issue.<br>\nTherefore my question: Is wasmtime (python) thread-safe? What do I have to consider when using it in a multi-threaded environment?</p>\n<p>P.s. The error does NOT appear in case that Polars application is explicitly executed in a <strong>single threaded</strong> way.</p>\n<p>P.P.s. I do not see such weird exceptions when using the same WASM component in a highly concurrent Tokio (pure Rust) application.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://pola.rs/\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/2bb067b3b5d5c62bb6e54582f945af904b3cf44e/68747470733a2f2f7777772e706f6c612e72732f73686172652e6a7067&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://pola.rs/\" title=\"Polars\">Polars</a></div><div class=\"message_embed_description\">DataFrames for the new era</div></div></div>",
+        "id": 477225037,
+        "sender_full_name": "Christoph Brewing",
+        "timestamp": 1729087905
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span>  I would be very interested in your thoughts about that!</p>",
+        "id": 477228941,
+        "sender_full_name": "Christoph Brewing",
+        "timestamp": 1729088843
+    },
+    {
+        "content": "<p>I take it you're using <code>wasmtime-py</code>?  <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> would know more about the internals there, but yeah, I wouldn't be surprised if the API is not thread-safe.  Maybe we need to add some explicit locking and/or defer everything to a worker thread.</p>\n<p>When using the Rust API for Wasmtime, the compiler catches any <code>Send</code>/<code>Sync</code> violations, so you tend to get thread safety by construction, but I imagine there are no such guardrails in the Python API (or the C API on which it is built).</p>",
+        "id": 477237083,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1729090638
+    },
+    {
+        "content": "<p>Yes, <code>wasmtime-py</code> v25.0.0</p>",
+        "id": 477248160,
+        "sender_full_name": "Christoph Brewing",
+        "timestamp": 1729093759
+    },
+    {
+        "content": "<p>Python itself will make it thread-safe due to the GIL if wasmtime-py isn't releasing the GIL itself. But if you're doing something outside of Python or wasmtime-py is releasing the GIL then there could be a race condition.</p>",
+        "id": 477282287,
+        "sender_full_name": "Brett Cannon",
+        "timestamp": 1729105606
+    },
+    {
+        "content": "<p><code>wasmtime-py</code> is basically a Python API on top of a C API on top of a Rust implementation, so presumably the problem is in one of the lower layers beneath Python.</p>\n<p>BTW, Alex will be unavailable until October 22nd (and might not remember the details regarding this anyway), so <span class=\"user-mention\" data-user-id=\"595146\">@Christoph Brewing</span> if you need a quick fix I'd recommend conservatively assuming <code>wasmtime-py</code> is <em>not</em> thread safe, meaning you should refactor your app so all the Wasmtime calls happen on the same thread.</p>",
+        "id": 477283369,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1729106049
+    },
+    {
+        "content": "<p>Assuming the C API type <code>wasmtime_store_t</code> is just a handle to a <code>wasmtime::Store</code>, then the fact that the latter is not thread-safe would imply the former isn't either.  In Rust parlance a <code>Store</code> (and handles to it) is <code>Send</code> (meaning it can be passed from one thread to another) but not <code>Sync</code> (meaning it can't safely be shared among multiple threads simultaneously).</p>",
+        "id": 477283960,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1729106296
+    },
+    {
+        "content": "<p>The <code>wasmtime-py</code> package uses <code>ctypes</code> in Python which I believe means that the GIL is released whenever Wasmtime-native code is executing. That means that there's no protection against concurrency, and that's a known issue with <code>wasmtime-py</code>. There's <a href=\"https://github.com/bytecodealliance/wasmtime-py/issues/217#issuecomment-2035373713\">some discussion in an issue</a> which I never got around to making a dedicated issue for though, so the \"known\" part is \"well at least it's in my head\" which I realize isn't the most useful...</p>\n<p>In any case Joel is right in that the Store is the main part here. Without any protections in Python (which is a bug in the <code>wasmtime-py</code> library) the thread-safety story in Python is the same as that from C. That means that you can for example use a <code>Module</code> on multiple threads (and <code>Engine</code> too) but <code>Store</code> can only be used on one thread at a time. All instances/functions live within a single <code>Store</code> so you can't, for example, call two functions on an instance in parallel on two threads.</p>\n<p>To directly answer your initial questions:</p>\n<blockquote>\n<p>Therefore my question: Is wasmtime (python) thread-safe?</p>\n</blockquote>\n<p>Not currently. It's subject to the same requirements as the C API. This is a bug in <code>wasmtime-py</code> I'd love to see fixed one day, however. (sorry you're running into this)</p>\n<blockquote>\n<p>What do I have to consider when using it in a multi-threaded environment?</p>\n</blockquote>\n<p>The general rule of thumb is a <code>Store</code>, and everything that works with it, should stick to a single thread. It can move around as a \"unit\" between threads, but can only be used on one thread at a time. The <code>Engine</code> and <code>Module</code> types are threadsafe.</p>\n<p>The <code>Linker</code> type is also safe to use across threads, so long as the method isn't mutating the <code>Linker</code>. For example a linker populated with <code>define_func</code> is safe to use across threads. A <code>Linker</code> populated with <code>define</code>, however, is not.</p>\n<p>Linker \"accessors\" such as <code>get</code> or <code>instantiate</code> should be safe to use across threads though.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime-py/issues/217#issuecomment-2035373713\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/7474b8bb13517a0e4d4da0ad09b054fb644ebed6/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f653738366231626231663066623138623565326538336137636237353538316439326632393731386537633965623737616431343533343030356333326534312f62797465636f6465616c6c69616e63652f7761736d74696d652d70792f6973737565732f323137&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime-py/issues/217#issuecomment-2035373713\" title=\"When used with ComponentizeJS output, `wasmtime.Module.from_file` is extremely slow and not configurable · Issue #217 · bytecodealliance/wasmtime-py\">When used with ComponentizeJS output, `wasmtime.Module.from_file` is extremely slow and not configurable · Issue #217 · bytecodealliance/wasmtime-py</a></div><div class=\"message_embed_description\">I have a really simple component with this WIT world: package local:wavedrom; world wavedrom { export render-json: func(json: string) -&gt; string; } After running through ComponentizeJS, it results i...</div></div></div>",
+        "id": 477305199,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1729114851
+    }
+]

@@ -1,0 +1,1834 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #1718 Rework of MachInst isel, branch fixup... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html">wasmtime / PR #1718 Rework of MachInst isel, branch fixup...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="197770871"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197770871" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197770871">(May 16 2020 at 02:08)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>Creating this PR now to start the review, but I still need to do the following before merging:</p>
+<ul>
+<li>Rebase to latest <code>master</code></li>
+<li>Update vcode filetests (since isel changed)</li>
+<li>Write tests for the island-emission cases of <code>MachBuffer</code></li>
+<li>Update the x64 backend to the slightly-changed isel API (it's disabled at the moment to allow this to compile)</li>
+</ul>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197770872"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197770872" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197770872">(May 16 2020 at 02:08)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/bnjbvr">bnjbvr</a> and <a href="https://github.com/julian-seward1">julian-seward1</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a>.</p>
+
+
+
+<a name="197770873"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197770873" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197770873">(May 16 2020 at 02:08)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/bnjbvr">bnjbvr</a> and <a href="https://github.com/julian-seward1">julian-seward1</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a>.</p>
+
+
+
+<a name="197770900"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197770900" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197770900">(May 16 2020 at 02:09)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>Creating this PR now to start the review, but I still need to do the following before merging:</p>
+<ul>
+<li>Rebase to latest <code>master</code></li>
+<li>Update vcode filetests (since isel changed)</li>
+<li>Write tests for the island-emission cases of <code>MachBuffer</code></li>
+<li>Update the x64 backend to the slightly-changed isel API (it's disabled at the moment to allow this to compile)</li>
+</ul>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197779960"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197779960" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197779960">(May 16 2020 at 06:22)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>Creating this PR now to start the review, but I still need to do the following before merging:</p>
+<ul>
+<li>Rebase to latest <code>master</code></li>
+<li>Update vcode filetests (since isel changed)</li>
+<li>Write tests for the island-emission cases of <code>MachBuffer</code></li>
+<li>Update the x64 backend to the slightly-changed isel API (it's disabled at the moment to allow this to compile)</li>
+</ul>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197783256"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197783256" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197783256">(May 16 2020 at 08:02)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>Creating this PR now to start the review, but I still need to do the following before merging:</p>
+<ul>
+<li>Rebase to latest <code>master</code></li>
+<li>Update vcode filetests (since isel changed)</li>
+<li>Write tests for the island-emission cases of <code>MachBuffer</code></li>
+<li>Update the x64 backend to the slightly-changed isel API (it's disabled at the moment to allow this to compile)</li>
+</ul>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197830967"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197830967" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197830967">(May 17 2020 at 05:03)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>Creating this PR now to start the review, but I still need to do the following before merging:</p>
+<ul>
+<li>Rebase to latest <code>master</code></li>
+<li>Update vcode filetests (since isel changed)</li>
+<li>Write tests for the island-emission cases of <code>MachBuffer</code></li>
+<li>Update the x64 backend to the slightly-changed isel API (it's disabled at the moment to allow this to compile)</li>
+</ul>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197833104"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197833104" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197833104">(May 17 2020 at 06:11)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>Creating this PR now to start the review, but I still need to do the following before merging:</p>
+<ul>
+<li>Rebase to latest <code>master</code></li>
+<li>Update vcode filetests (since isel changed)</li>
+<li>Write tests for the island-emission cases of <code>MachBuffer</code></li>
+<li>Update the x64 backend to the slightly-changed isel API (it's disabled at the moment to allow this to compile)</li>
+</ul>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197879737"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197879737" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197879737">(May 18 2020 at 01:17)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>Creating this PR now to start the review, but I still need to do the following before merging:</p>
+<ul>
+<li>Rebase to latest <code>master</code></li>
+<li>Update vcode filetests (since isel changed)</li>
+<li>Write tests for the island-emission cases of <code>MachBuffer</code></li>
+<li>Update the x64 backend to the slightly-changed isel API (it's disabled at the moment to allow this to compile)</li>
+</ul>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197879805"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197879805" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197879805">(May 18 2020 at 01:18)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>Creating this PR now to start the review, but I still need to do the following before merging:</p>
+<ul>
+<li>Rebase to latest <code>master</code></li>
+<li>Update vcode filetests (since isel changed)</li>
+<li>Write tests for the island-emission cases of <code>MachBuffer</code></li>
+<li>Update the x64 backend to the slightly-changed isel API (it's disabled at the moment to allow this to compile)</li>
+</ul>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197879869"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197879869" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197879869">(May 18 2020 at 01:20)</a>:</h4>
+<p>cfallin edited <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="197921701"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921701" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921701">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413394429">PR Review</a>.</p>
+
+
+
+<a name="197921702"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921702" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921702">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413394429">PR Review</a>.</p>
+
+
+
+<a name="197921703"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921703" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921703">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426468376">PR Review Comment</a>:</p>
+<blockquote>
+<p>What does this mean?  Can you clarify the semantics?  When is it used?</p>
+</blockquote>
+
+
+
+<a name="197921704"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921704" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921704">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426469354">PR Review Comment</a>:</p>
+<blockquote>
+<p>nit: it would be better not to use the word <code>Load</code> here since it's not a load.  Maybe <code>Compute</code> ?</p>
+</blockquote>
+
+
+
+<a name="197921705"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921705" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921705">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426471121">PR Review Comment</a>:</p>
+<blockquote>
+<p>Could you add some details to say what the island consists of?  More generally, is there a top level description of the islands-and-deadlines algorithm somewhere?</p>
+</blockquote>
+
+
+
+<a name="197921706"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921706" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921706">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426473004">PR Review Comment</a>:</p>
+<blockquote>
+<p>What if <code>ty</code> is a vector type?  Then <code>Inst::load_constant</code> doesn't sound right to me.  Is there some guarantee that this won't get called with such a type?  If not, can you assert/panic it out?</p>
+</blockquote>
+
+
+
+<a name="197921707"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921707" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921707">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426475641">PR Review Comment</a>:</p>
+<blockquote>
+<p>Is there any way that this can be automatically cross-checked with reality?  This sounds to me like something that could be violated somewhere down the line, but that would not break anything except in some extremely rare huge-function input, which will make it hard to track down.  So some (any?) kind of cross-check scheme would be a Good Thing.</p>
+<p>If not possible, at least add a load comment at the top of the insn emitter to the effect that it <em>must</em> comply with what is claimed here.</p>
+</blockquote>
+
+
+
+<a name="197921708"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921708" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921708">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426477124">PR Review Comment</a>:</p>
+<blockquote>
+<p>Interpreted signed or unsigned?</p>
+</blockquote>
+
+
+
+<a name="197921709"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921709" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921709">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426510592">PR Review Comment</a>:</p>
+<blockquote>
+<p>That doesn't read quite right; is it correct?</p>
+</blockquote>
+
+
+
+<a name="197921710"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921710" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921710">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426502172">PR Review Comment</a>:</p>
+<blockquote>
+<p>This is a bit unclear; could you make it more precise?  Is there a 1:1 mapping from CLIR blocks to VCode blocks?  The use of "subgraphs" implies there isn't, but there's no clarification of the meaning of "subgraphs" here.</p>
+</blockquote>
+
+
+
+<a name="197921711"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921711" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921711">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426499129">PR Review Comment</a>:</p>
+<blockquote>
+<p>Does <code>(emit island with guard jump if needed)</code> refer to the 6 insns that follow (I think so), or does it denote further insns that need to be emitted (I think not) ?  It would be good to make this clearer in the comment.</p>
+</blockquote>
+
+
+
+<a name="197921712"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921712" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921712">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426524453">PR Review Comment</a>:</p>
+<blockquote>
+<p>"freely permuted" .. surely they'd have to maintain the same data dependency relationships?</p>
+</blockquote>
+
+
+
+<a name="197921713"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921713" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921713">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426526820">PR Review Comment</a>:</p>
+<blockquote>
+<p>Since forgetting to do this might be a common mistake, can you say here how the system will fail should one forget to do that?</p>
+</blockquote>
+
+
+
+<a name="197921714"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921714" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921714">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426524657">PR Review Comment</a>:</p>
+<blockquote>
+<p>For the sake of clarity, could you add "CLIR" before "instructions" ?</p>
+</blockquote>
+
+
+
+<a name="197921715"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921715" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921715">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426531501">PR Review Comment</a>:</p>
+<blockquote>
+<p>Can you add a 1 liner comment saying what this does?</p>
+</blockquote>
+
+
+
+<a name="197921716"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197921716" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197921716">(May 18 2020 at 11:45)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426532609">PR Review Comment</a>:</p>
+<blockquote>
+<p><code>tmp</code> doesn't give a big enough hint what this does.  A better name would be <code>new_vreg</code>.</p>
+</blockquote>
+
+
+
+<a name="197925229"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197925229" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197925229">(May 18 2020 at 12:17)</a>:</h4>
+<p>julian-seward1 edited <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426475641">PR Review Comment</a>.</p>
+
+
+
+<a name="197927249"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197927249" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197927249">(May 18 2020 at 12:31)</a>:</h4>
+<p>julian-seward1 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413539586">PR Review</a>.</p>
+
+
+
+<a name="197927250"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197927250" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197927250">(May 18 2020 at 12:31)</a>:</h4>
+<p>julian-seward1 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413539586">PR Review</a>.</p>
+
+
+
+<a name="197927251"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197927251" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197927251">(May 18 2020 at 12:31)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426587566">PR Review Comment</a>:</p>
+<blockquote>
+<p>Is this definition of <code>is64</code> right?  That seems like it's an unsigned criterion, but the general rule on Intel for 32-bit immediate fields is that they are sign extended to 64 bits as appropriate.  If this logic simply moved from elsewhere in this patch, then leave it as is; but otherwise maybe change to the signed variant, using <code>low32willSXto64</code> ?</p>
+</blockquote>
+
+
+
+<a name="197927252"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197927252" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197927252">(May 18 2020 at 12:31)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426583981">PR Review Comment</a>:</p>
+<blockquote>
+<p>This change concerns me somewhat.  What guarantees that this assertion can't fail now?</p>
+</blockquote>
+
+
+
+<a name="197927253"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197927253" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197927253">(May 18 2020 at 12:31)</a>:</h4>
+<p>julian-seward1 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426588893">PR Review Comment</a>:</p>
+<blockquote>
+<p>I feel like it's a shame to lose this, because it means losing the ability to easily differentiate legitimate failures due to non-implementation of a target-independent CLIR insn, vs bugs resulting in machine-specific CLIRs being handed to us.</p>
+</blockquote>
+
+
+
+<a name="197954693"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197954693" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197954693">(May 18 2020 at 15:52)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413725103">PR Review</a>.</p>
+
+
+
+<a name="197954694"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/197954694" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#197954694">(May 18 2020 at 15:52)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426727598">PR Review Comment</a>:</p>
+<blockquote>
+<p>Oh, these <code>X86*</code> opcodes went away in the latest <code>master</code>, so this is just a rebase-related change. I think the rule is still (as has always been) never have a fallthrough in the big-opcode-match, and handle additions or deletions as they come, indicated by compile errors -- so if any machine-specific ops are added back in the future, we'll figure out what to do then.</p>
+</blockquote>
+
+
+
+<a name="198004267"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004267" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004267">(May 18 2020 at 22:38)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413984037">PR Review</a>.</p>
+
+
+
+<a name="198004269"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004269" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004269">(May 18 2020 at 22:38)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426929691">PR Review Comment</a>:</p>
+<blockquote>
+<p>Nothing guarantees it, but this form (<code>ResolvedOffset</code>) is used only when the lowering explicitly selects it, now; ordinary branches don't go through this code (the <code>LabelUse</code> handles them instead, and we can implement 64-bit long-form veneers there if we think we need &gt;2GB code-size).</p>
+</blockquote>
+
+
+
+<a name="198004331"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004331" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004331">(May 18 2020 at 22:39)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413984370">PR Review</a>.</p>
+
+
+
+<a name="198004333"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004333" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004333">(May 18 2020 at 22:39)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426929950">PR Review Comment</a>:</p>
+<blockquote>
+<p>I think so, or at least, this was existing logic in the <code>Iconst</code> lowering prior to this patch:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/a75377565f830052094aa8aa72c5e7a6b787fa18/cranelift/codegen/src/isa/x64/lower.rs#L116">https://github.com/bytecodealliance/wasmtime/blob/a75377565f830052094aa8aa72c5e7a6b787fa18/cranelift/codegen/src/isa/x64/lower.rs#L116</a></p>
+</blockquote>
+
+
+
+<a name="198004493"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004493" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004493">(May 18 2020 at 22:40)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="198004494"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004494" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004494">(May 18 2020 at 22:40)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413985014">PR Review</a>.</p>
+
+
+
+<a name="198004495"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004495" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004495">(May 18 2020 at 22:40)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426930472">PR Review Comment</a>:</p>
+<blockquote>
+<p>Was part of the old API, but no reason not to rename here :-) Now it's <code>alloc_tmp()</code>.</p>
+</blockquote>
+
+
+
+<a name="198004508"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004508" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004508">(May 18 2020 at 22:40)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413985073">PR Review</a>.</p>
+
+
+
+<a name="198004509"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004509" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004509">(May 18 2020 at 22:40)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426930520">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done!</p>
+</blockquote>
+
+
+
+<a name="198004534"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004534" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004534">(May 18 2020 at 22:41)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413985193">PR Review</a>.</p>
+
+
+
+<a name="198004535"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004535" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004535">(May 18 2020 at 22:41)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426930634">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done.</p>
+</blockquote>
+
+
+
+<a name="198004585"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004585" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004585">(May 18 2020 at 22:41)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413985429">PR Review</a>.</p>
+
+
+
+<a name="198004586"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004586" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004586">(May 18 2020 at 22:41)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426930859">PR Review Comment</a>:</p>
+<blockquote>
+<p>Yep, modulo true deps; clarified.</p>
+</blockquote>
+
+
+
+<a name="198004606"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004606" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004606">(May 18 2020 at 22:41)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413985497">PR Review</a>.</p>
+
+
+
+<a name="198004607"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004607" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004607">(May 18 2020 at 22:41)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426930902">PR Review Comment</a>:</p>
+<blockquote>
+<p>Was correct but probably too terse; fixed.</p>
+</blockquote>
+
+
+
+<a name="198004676"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004676" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004676">(May 18 2020 at 22:42)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413985709">PR Review</a>.</p>
+
+
+
+<a name="198004679"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004679" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004679">(May 18 2020 at 22:42)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426931059">PR Review Comment</a>:</p>
+<blockquote>
+<p>Hopefully the ASCII art and additional explanation help! This is pretty subtle so I'm happy to clarify further if needed.</p>
+</blockquote>
+
+
+
+<a name="198004706"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004706" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004706">(May 18 2020 at 22:42)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413985821">PR Review</a>.</p>
+
+
+
+<a name="198004707"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004707" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004707">(May 18 2020 at 22:42)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426931143">PR Review Comment</a>:</p>
+<blockquote>
+<p>Added some more docs on <code>EmitIsland</code> to clarify.</p>
+</blockquote>
+
+
+
+<a name="198004720"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004720" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004720">(May 18 2020 at 22:42)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413985912">PR Review</a>.</p>
+
+
+
+<a name="198004721"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004721" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004721">(May 18 2020 at 22:42)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426931226">PR Review Comment</a>:</p>
+<blockquote>
+<p>Signed (clarified).</p>
+</blockquote>
+
+
+
+<a name="198004741"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004741" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004741">(May 18 2020 at 22:43)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413986061">PR Review</a>.</p>
+
+
+
+<a name="198004742"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004742" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004742">(May 18 2020 at 22:43)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426931358">PR Review Comment</a>:</p>
+<blockquote>
+<p>Good idea! I added a debug assert to <code>Inst::emit()</code> that verifies that no more than <code>worst_case_size()</code> bytes were emitted.</p>
+</blockquote>
+
+
+
+<a name="198004756"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004756" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004756">(May 18 2020 at 22:43)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413986137">PR Review</a>.</p>
+
+
+
+<a name="198004757"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198004757" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198004757">(May 18 2020 at 22:43)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426931419">PR Review Comment</a>:</p>
+<blockquote>
+<p>Added assert.</p>
+</blockquote>
+
+
+
+<a name="198006209"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006209" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006209">(May 18 2020 at 23:04)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413994528">PR Review</a>.</p>
+
+
+
+<a name="198006210"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006210" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006210">(May 18 2020 at 23:04)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426938845">PR Review Comment</a>:</p>
+<blockquote>
+<p>Added to the top of <code>machinst/buffer.rs</code>.</p>
+</blockquote>
+
+
+
+<a name="198006212"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006212" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006212">(May 18 2020 at 23:04)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="198006224"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006224" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006224">(May 18 2020 at 23:04)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413994637">PR Review</a>.</p>
+
+
+
+<a name="198006226"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006226" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006226">(May 18 2020 at 23:04)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426938928">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done.</p>
+</blockquote>
+
+
+
+<a name="198006257"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006257" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006257">(May 18 2020 at 23:05)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413994865">PR Review</a>.</p>
+
+
+
+<a name="198006259"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006259" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006259">(May 18 2020 at 23:05)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426939138">PR Review Comment</a>:</p>
+<blockquote>
+<p>Clarified; this is the same as the original "lowered" form, but we just call out the actual semantics and purpose a bit more explicitly now rather than conflating it with the branch-lowering process.</p>
+</blockquote>
+
+
+
+<a name="198006281"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006281" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006281">(May 18 2020 at 23:05)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-413995023">PR Review</a>.</p>
+
+
+
+<a name="198006282"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006282" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006282">(May 18 2020 at 23:05)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#discussion_r426939266">PR Review Comment</a>:</p>
+<blockquote>
+<p>Done.</p>
+</blockquote>
+
+
+
+<a name="198006364"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006364" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006364">(May 18 2020 at 23:06)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="198006378"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198006378" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198006378">(May 18 2020 at 23:07)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="198007459"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198007459" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198007459">(May 18 2020 at 23:25)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a> from <code>machinst-codebuffer</code> to <code>master</code>:</p>
+<blockquote>
+<p>tl;dr: new new-isel; better block-ordering, handling branches in one pass. 24% faster compile+run on bz2 (28% fewer instructions); 10% faster compile (10% fewer instructions).</p>
+<p>This patch includes:</p>
+<ul>
+<li>
+<p>A complete rework of the way that CLIF blocks and edge blocks are<br>
+  lowered into VCode blocks. The new mechanism in <code>BlockLoweringOrder</code><br>
+  computes RPO over the CFG, but with a twist: it merges edge blocks intto<br>
+  heads or tails of original CLIF blocks wherever possible, and it does<br>
+  this without ever actually materializing the full nodes-plus-edges<br>
+  graph first. The backend driver lowers blocks in final order so<br>
+  there's no need to reshuffle later.</p>
+</li>
+<li>
+<p>A new <code>MachBuffer</code> that replaces the <code>MachSection</code>. This is a special<br>
+  version of a code-sink that is far more than a humble <code>Vec&lt;u8&gt;</code>. In<br>
+  particular, it keeps a record of label definitions and label uses,<br>
+  with a machine-pluggable <code>LabelUse</code> trait that defines various types<br>
+  of fixups (basically internal relocations).</p>
+<p>Importantly, it implements some simple peephole-style branch rewrites<br>
+<em>inline in the emission pass</em>, without any separate traversals over<br>
+the code to use fallthroughs, swap taken/not-taken arms, etc. It<br>
+tracks branches at the tail of the buffer and can (i) remove blocks<br>
+that are just unconditional branches (by redirecting the label), (ii)<br>
+understand a conditional/unconditional pair and swap the conditional<br>
+polarity when it's helpful; and (iii) remove branches that branch to<br>
+the fallthrough PC.</p>
+<p>The <code>MachBuffer</code> also implements branch-island support. On<br>
+architectures like AArch64, this is needed to allow conditional<br>
+branches within plausibly-attainable ranges (+/- 1MB on AArch64<br>
+specifically). It also does this inline while streaming through the<br>
+emission, without any sort of fixpoint algorithm or later moving of<br>
+code, by simply tracking outstanding references and "deadlines" and<br>
+emitting an island just-in-time when we're in danger of going out of<br>
+range.</p>
+</li>
+<li>
+<p>A rework of the instruction selector driver. This is largely following<br>
+  the same algorithm as before, but is cleaned up significantly, in<br>
+  particular in the API: the machine backend can ask for an input arg<br>
+  and get any of three forms (constant, register, producing<br>
+  instruction), indicating it needs the register or can merge the<br>
+  constant or producing instruction as appropriate. This new driver<br>
+  takes special care to emit constants right at use-sites (and at phi<br>
+  inputs), minimizing their live-ranges, and also special-cases the<br>
+  "pinned register" to avoid superfluous moves.</p>
+</li>
+</ul>
+<p>Overall, on <code>bz2.wasm</code>, the results are:</p>
+<div class="codehilite"><pre><span></span><code>    wasmtime full run (compile + runtime) of bz2:
+
+    baseline:   9774M insns, 9742M cycles, 3.918s
+    w/ changes: 7012M insns, 6888M cycles, 2.958s  (24.5% faster, 28.3% fewer insns)
+
+    clif-util wasm compile bz2:
+
+    baseline:   2633M insns, 3278M cycles, 1.034s
+    w/ changes: 2366M insns, 2920M cycles, 0.923s  (10.7% faster, 10.1% fewer insns)
+
+    All numbers are averages of two runs on an Ampere eMAG.
+</code></pre></div>
+
+
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="198021580"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198021580" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198021580">(May 19 2020 at 04:36)</a>:</h4>
+<p>julian-seward1 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1718#pullrequestreview-414095295">PR Review</a>.</p>
+
+
+
+<a name="198072095"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231718%20Rework%20of%20MachInst%20isel%2C%20branch%20fixup.../near/198072095" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231718.20Rework.20of.20MachInst.20isel.2C.20branch.20fixup.2E.2E.2E.html#198072095">(May 19 2020 at 14:17)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/1718">PR #1718</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

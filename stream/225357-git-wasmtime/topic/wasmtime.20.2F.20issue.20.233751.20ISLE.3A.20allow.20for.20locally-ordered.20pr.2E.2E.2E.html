@@ -1,0 +1,188 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #3751 ISLE: allow for locally-ordered pr... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233751.20ISLE.3A.20allow.20for.20locally-ordered.20pr.2E.2E.2E.html">wasmtime / issue #3751 ISLE: allow for locally-ordered pr...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="270265441"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233751%20ISLE%3A%20allow%20for%20locally-ordered%20pr.../near/270265441" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233751.20ISLE.3A.20allow.20for.20locally-ordered.20pr.2E.2E.2E.html#270265441">(Feb 01 2022 at 18:56)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/issues/3751">issue #3751</a>:</p>
+<blockquote>
+<p>In conversation recently with several folks, it became apparent that the way in which ISLE rules' precedence is defined can be slightly at odds with intuition, or at least with some common idioms.</p>
+<p>There have been cases (e.g. <a href="https://github.com/bytecodealliance/wasmtime/pull/3706#discussion_r789203233">here</a> and several others) where the usual pattern-matching idiom from functional programming (and Rust <code>match</code> expressions) of</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">P1</span><span class="w"> </span><span class="n">P2</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">P3</span><span class="w"> </span><span class="n">_</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="n">P4</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="n">_</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+</code></pre></div>
+<p>occurs, and the later, more general cases actually <em>must</em> be shadowed by the earlier, more specific cases.</p>
+<p>In general, the ISLE design intended to (and the DSL compiler generally does) prioritize specific cases over general cases, so this is fine on the surface, but two problems arise.</p>
+<ul>
+<li>
+<p>First, as we look forward to verification, it would be better if every rule's meaning were independent of other rules. In other words, a more general rule should always be correct where it could be applied. A more specific rule might apply first, and give a better lowering; but any applicable rule (one with a LHS whose pattern matches) should give a correct answer. In a formal sense, we could say that execution of the lowering has multiple possible results (depending on rule application choice), and we require that they all be correct.</p>
+</li>
+<li>
+<p>Second, while the ordering rules (more specific first) are generally intuitive, they are still DSL compiler behavior that needs to be internalized and incorporated into a mental model. This is cognitive load that is possibly made worse by the fact that Rust pattern-matching semantics do <em>not</em> have this potential reordering by special heuristic.</p>
+</li>
+</ul>
+<p>There are good reasons for the reordering. I had originally proposed a sort of what-you-see-is-what-you-get "the rules apply in order" principle, as if the whole body of rules were one giant <code>match</code>. This is extremely simple; there is no misunderstanding what the DSL compiler will do; but as @fitzgen and others pointed out, it's not really compatible with a world where we have tools that generate lots of special-case lowerings and "append" them to the set of rules.</p>
+<p>In other words, we really do want some top-level sorting that puts more specific lowerings first, and we'd prefer that this not have to happen by literally sorting our source code.</p>
+<p>It seems that the root of the problem is that there are two different idioms or use-cases for having multiple rules with overlapping left-hand-side patterns:</p>
+<ul>
+<li>Refinements. A special case can be lowered more efficiently in a certain way, but this refinement isn't <em>necessary</em> for correctness. This is the "tool discovers lots of special lowerings" use-case.</li>
+<li>Conditional case breakdowns for a local pattern. In the example linked above, the idiom was really "for -1, do this; for not -1, do that." This is the sort of thing one would use a <code>match</code> for in Rust.</li>
+</ul>
+<p>An insight I think might be useful is that the second case happens at the <em>local</em> level, while the first case happens at the <em>global</em> level. So I'd like to propose a mechanism that might get us the benefits of both: locally-ordered groups of rules.</p>
+<p>Specifically I'm thinking of some sort of special form that groups a collection of rules into one unit and implies a strong precedence between them. In other words, if the first rule's LHS applies, then the first rule must be chosen over the other rules. Something like (forgiving some arbitrary syntax invention; we can bikeshed later):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">group</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="p">(</span><span class="n">Enum</span><span class="p">.</span><span class="n">A</span><span class="p">)</span><span class="w"> </span><span class="mi">1</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="p">(</span><span class="n">Enum</span><span class="p">.</span><span class="n">B</span><span class="p">)</span><span class="w"> </span><span class="mi">2</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="mi">3</span><span class="p">)))</span><span class="w"> </span><span class="p">;;</span><span class="w"> </span><span class="n">semantically</span><span class="p">,</span><span class="w"> </span><span class="n">returning</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">valid</span><span class="w"> </span><span class="n">execution</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">either</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">above</span><span class="w"> </span><span class="n">matches</span><span class="w"></span>
+</code></pre></div>
+<p>Then any analysis that is attempting to understand and verify rules' meanings in isolation has an explicit directive that these rules must be considered together, and rule <code>i</code> must be understood as having a pattern that is "not 0..i-1, AND (original pattern)".</p>
+<p>We can work this into the trie-construction in the ISLE compiler backend by doing something similar to the priority mechanism. I haven't worked out all of the details here (else I would show a prototype alongside this issue!) but I'm fairly sure it can be done; the only question is how much of the case-merging this will disrupt, but if it is mostly used for helpers or for small groups of rules then this should be reasonable I think.</p>
+<p>Thoughts? (cc @fitzgen @abrown @uweigand)</p>
+</blockquote>
+
+
+
+<a name="270270475"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233751%20ISLE%3A%20allow%20for%20locally-ordered%20pr.../near/270270475" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233751.20ISLE.3A.20allow.20for.20locally-ordered.20pr.2E.2E.2E.html#270270475">(Feb 01 2022 at 19:27)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/3751#issuecomment-1027206649">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3751">issue #3751</a>:</p>
+<blockquote>
+<p>As we previously discussed, this makes sense to me.</p>
+</blockquote>
+
+
+
+<a name="270270503"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233751%20ISLE%3A%20allow%20for%20locally-ordered%20pr.../near/270270503" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233751.20ISLE.3A.20allow.20for.20locally-ordered.20pr.2E.2E.2E.html#270270503">(Feb 01 2022 at 19:27)</a>:</h4>
+<p>fitzgen labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/3751">issue #3751</a>:</p>
+<blockquote>
+<p>In conversation recently with several folks, it became apparent that the way in which ISLE rules' precedence is defined can be slightly at odds with intuition, or at least with some common idioms.</p>
+<p>There have been cases (e.g. <a href="https://github.com/bytecodealliance/wasmtime/pull/3706#discussion_r789203233">here</a> and several others) where the usual pattern-matching idiom from functional programming (and Rust <code>match</code> expressions) of</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">P1</span><span class="w"> </span><span class="n">P2</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">P3</span><span class="w"> </span><span class="n">_</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="n">P4</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="n">_</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+</code></pre></div>
+<p>occurs, and the later, more general cases actually <em>must</em> be shadowed by the earlier, more specific cases.</p>
+<p>In general, the ISLE design intended to (and the DSL compiler generally does) prioritize specific cases over general cases, so this is fine on the surface, but two problems arise.</p>
+<ul>
+<li>
+<p>First, as we look forward to verification, it would be better if every rule's meaning were independent of other rules. In other words, a more general rule should always be correct where it could be applied. A more specific rule might apply first, and give a better lowering; but any applicable rule (one with a LHS whose pattern matches) should give a correct answer. In a formal sense, we could say that execution of the lowering has multiple possible results (depending on rule application choice), and we require that they all be correct.</p>
+</li>
+<li>
+<p>Second, while the ordering rules (more specific first) are generally intuitive, they are still DSL compiler behavior that needs to be internalized and incorporated into a mental model. This is cognitive load that is possibly made worse by the fact that Rust pattern-matching semantics do <em>not</em> have this potential reordering by special heuristic.</p>
+</li>
+</ul>
+<p>There are good reasons for the reordering. I had originally proposed a sort of what-you-see-is-what-you-get "the rules apply in order" principle, as if the whole body of rules were one giant <code>match</code>. This is extremely simple; there is no misunderstanding what the DSL compiler will do; but as @fitzgen and others pointed out, it's not really compatible with a world where we have tools that generate lots of special-case lowerings and "append" them to the set of rules.</p>
+<p>In other words, we really do want some top-level sorting that puts more specific lowerings first, and we'd prefer that this not have to happen by literally sorting our source code.</p>
+<p>It seems that the root of the problem is that there are two different idioms or use-cases for having multiple rules with overlapping left-hand-side patterns:</p>
+<ul>
+<li>Refinements. A special case can be lowered more efficiently in a certain way, but this refinement isn't <em>necessary</em> for correctness. This is the "tool discovers lots of special lowerings" use-case.</li>
+<li>Conditional case breakdowns for a local pattern. In the example linked above, the idiom was really "for -1, do this; for not -1, do that." This is the sort of thing one would use a <code>match</code> for in Rust.</li>
+</ul>
+<p>An insight I think might be useful is that the second case happens at the <em>local</em> level, while the first case happens at the <em>global</em> level. So I'd like to propose a mechanism that might get us the benefits of both: locally-ordered groups of rules.</p>
+<p>Specifically I'm thinking of some sort of special form that groups a collection of rules into one unit and implies a strong precedence between them. In other words, if the first rule's LHS applies, then the first rule must be chosen over the other rules. Something like (forgiving some arbitrary syntax invention; we can bikeshed later):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">group</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="p">(</span><span class="n">Enum</span><span class="p">.</span><span class="n">A</span><span class="p">)</span><span class="w"> </span><span class="mi">1</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="p">(</span><span class="n">Enum</span><span class="p">.</span><span class="n">B</span><span class="p">)</span><span class="w"> </span><span class="mi">2</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="mi">3</span><span class="p">)))</span><span class="w"> </span><span class="p">;;</span><span class="w"> </span><span class="n">semantically</span><span class="p">,</span><span class="w"> </span><span class="n">returning</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">valid</span><span class="w"> </span><span class="n">execution</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">either</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">above</span><span class="w"> </span><span class="n">matches</span><span class="w"></span>
+</code></pre></div>
+<p>Then any analysis that is attempting to understand and verify rules' meanings in isolation has an explicit directive that these rules must be considered together, and rule <code>i</code> must be understood as having a pattern that is "not 0..i-1, AND (original pattern)".</p>
+<p>We can work this into the trie-construction in the ISLE compiler backend by doing something similar to the priority mechanism. I haven't worked out all of the details here (else I would show a prototype alongside this issue!) but I'm fairly sure it can be done; the only question is how much of the case-merging this will disrupt, but if it is mostly used for helpers or for small groups of rules then this should be reasonable I think.</p>
+<p>Thoughts? (cc @fitzgen @abrown @uweigand)</p>
+</blockquote>
+
+
+
+<a name="270270547"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233751%20ISLE%3A%20allow%20for%20locally-ordered%20pr.../near/270270547" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233751.20ISLE.3A.20allow.20for.20locally-ordered.20pr.2E.2E.2E.html#270270547">(Feb 01 2022 at 19:27)</a>:</h4>
+<p>github-actions[bot] <a href="https://github.com/bytecodealliance/wasmtime/issues/3751#issuecomment-1027207045">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3751">issue #3751</a>:</p>
+<blockquote>
+<h4>Subscribe to Label Action</h4>
+<p>cc @cfallin, @fitzgen</p>
+<p>&lt;details&gt;<br>
+This issue or pull request has been labeled: "isle"</p>
+<p>Thus the following users have been cc'd because of the following labels:</p>
+<ul>
+<li>cfallin: isle</li>
+<li>fitzgen: isle</li>
+</ul>
+<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>
+<p><a href="https://github.com/bytecodealliance/subscribe-to-label-action">Learn more.</a><br>
+&lt;/details&gt;</p>
+</blockquote>
+
+
+
+<a name="270363577"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233751%20ISLE%3A%20allow%20for%20locally-ordered%20pr.../near/270363577" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233751.20ISLE.3A.20allow.20for.20locally-ordered.20pr.2E.2E.2E.html#270363577">(Feb 02 2022 at 10:36)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/3751#issuecomment-1027798529">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3751">issue #3751</a>:</p>
+<blockquote>
+<p>I agree this would be useful.</p>
+</blockquote>
+
+
+
+<a name="272867188"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233751%20ISLE%3A%20allow%20for%20locally-ordered%20pr.../near/272867188" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233751.20ISLE.3A.20allow.20for.20locally-ordered.20pr.2E.2E.2E.html#272867188">(Feb 22 2022 at 21:08)</a>:</h4>
+<p>avanhatt <a href="https://github.com/bytecodealliance/wasmtime/issues/3751#issuecomment-1048213532">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3751">issue #3751</a>:</p>
+<blockquote>
+<p>Sorry I'm late to this issue, but I agree this would be useful and probably prevent some roadblocks for verification. </p>
+<p>Our current verification prototype builds a list of assumptions from the LHS of each rule. To handle groups of this form we would probbaly just (as suggested) add a negation of the intersection of previous rules' assumptions (e.g., <code>(not (and (= arg1 Enum.A) ...))</code>) to the context of the later rules. In more complicated rules, any other assumptions (e.g., <code>fits_in_64</code>) from the LHS would also be included in these terms, but with the <code>and</code> this should have the intended effect of still allowing later rules to keep those same assumptions unrelated to the match.</p>
+<p>We would need a few changes to the prototype, but nothing too bad. Some strategy like this will be necessary for verification if, as in @cfallin's example, later rules are semantically incorrect without excluding previous match cases.</p>
+</blockquote>
+
+
+
+<a name="281212128"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233751%20ISLE%3A%20allow%20for%20locally-ordered%20pr.../near/281212128" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233751.20ISLE.3A.20allow.20for.20locally-ordered.20pr.2E.2E.2E.html#281212128">(May 04 2022 at 20:02)</a>:</h4>
+<p>cfallin labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/3751">issue #3751</a>:</p>
+<blockquote>
+<p>In conversation recently with several folks, it became apparent that the way in which ISLE rules' precedence is defined can be slightly at odds with intuition, or at least with some common idioms.</p>
+<p>There have been cases (e.g. <a href="https://github.com/bytecodealliance/wasmtime/pull/3706#discussion_r789203233">here</a> and several others) where the usual pattern-matching idiom from functional programming (and Rust <code>match</code> expressions) of</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">P1</span><span class="w"> </span><span class="n">P2</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">P3</span><span class="w"> </span><span class="n">_</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="n">P4</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+<span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">lower</span><span class="w"> </span><span class="p">(</span><span class="n">my_inst</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="n">_</span><span class="p">))</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="w"></span>
+</code></pre></div>
+<p>occurs, and the later, more general cases actually <em>must</em> be shadowed by the earlier, more specific cases.</p>
+<p>In general, the ISLE design intended to (and the DSL compiler generally does) prioritize specific cases over general cases, so this is fine on the surface, but two problems arise.</p>
+<ul>
+<li>
+<p>First, as we look forward to verification, it would be better if every rule's meaning were independent of other rules. In other words, a more general rule should always be correct where it could be applied. A more specific rule might apply first, and give a better lowering; but any applicable rule (one with a LHS whose pattern matches) should give a correct answer. In a formal sense, we could say that execution of the lowering has multiple possible results (depending on rule application choice), and we require that they all be correct.</p>
+</li>
+<li>
+<p>Second, while the ordering rules (more specific first) are generally intuitive, they are still DSL compiler behavior that needs to be internalized and incorporated into a mental model. This is cognitive load that is possibly made worse by the fact that Rust pattern-matching semantics do <em>not</em> have this potential reordering by special heuristic.</p>
+</li>
+</ul>
+<p>There are good reasons for the reordering. I had originally proposed a sort of what-you-see-is-what-you-get "the rules apply in order" principle, as if the whole body of rules were one giant <code>match</code>. This is extremely simple; there is no misunderstanding what the DSL compiler will do; but as @fitzgen and others pointed out, it's not really compatible with a world where we have tools that generate lots of special-case lowerings and "append" them to the set of rules.</p>
+<p>In other words, we really do want some top-level sorting that puts more specific lowerings first, and we'd prefer that this not have to happen by literally sorting our source code.</p>
+<p>It seems that the root of the problem is that there are two different idioms or use-cases for having multiple rules with overlapping left-hand-side patterns:</p>
+<ul>
+<li>Refinements. A special case can be lowered more efficiently in a certain way, but this refinement isn't <em>necessary</em> for correctness. This is the "tool discovers lots of special lowerings" use-case.</li>
+<li>Conditional case breakdowns for a local pattern. In the example linked above, the idiom was really "for -1, do this; for not -1, do that." This is the sort of thing one would use a <code>match</code> for in Rust.</li>
+</ul>
+<p>An insight I think might be useful is that the second case happens at the <em>local</em> level, while the first case happens at the <em>global</em> level. So I'd like to propose a mechanism that might get us the benefits of both: locally-ordered groups of rules.</p>
+<p>Specifically I'm thinking of some sort of special form that groups a collection of rules into one unit and implies a strong precedence between them. In other words, if the first rule's LHS applies, then the first rule must be chosen over the other rules. Something like (forgiving some arbitrary syntax invention; we can bikeshed later):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">group</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="p">(</span><span class="n">Enum</span><span class="p">.</span><span class="n">A</span><span class="p">)</span><span class="w"> </span><span class="mi">1</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="p">(</span><span class="n">Enum</span><span class="p">.</span><span class="n">B</span><span class="p">)</span><span class="w"> </span><span class="mi">2</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">my_helper</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="mi">3</span><span class="p">)))</span><span class="w"> </span><span class="p">;;</span><span class="w"> </span><span class="n">semantically</span><span class="p">,</span><span class="w"> </span><span class="n">returning</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">not</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">valid</span><span class="w"> </span><span class="n">execution</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">either</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">above</span><span class="w"> </span><span class="n">matches</span><span class="w"></span>
+</code></pre></div>
+<p>Then any analysis that is attempting to understand and verify rules' meanings in isolation has an explicit directive that these rules must be considered together, and rule <code>i</code> must be understood as having a pattern that is "not 0..i-1, AND (original pattern)".</p>
+<p>We can work this into the trie-construction in the ISLE compiler backend by doing something similar to the priority mechanism. I haven't worked out all of the details here (else I would show a prototype alongside this issue!) but I'm fairly sure it can be done; the only question is how much of the case-merging this will disrupt, but if it is mostly used for helpers or for small groups of rules then this should be reasonable I think.</p>
+<p>Thoughts? (cc @fitzgen @abrown @uweigand)</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

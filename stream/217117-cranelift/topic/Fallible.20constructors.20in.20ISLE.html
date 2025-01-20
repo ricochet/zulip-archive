@@ -1,0 +1,55 @@
+<html>
+<head><meta charset="utf-8"><title>Fallible constructors in ISLE · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Fallible.20constructors.20in.20ISLE.html">Fallible constructors in ISLE</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="491793138"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Fallible%20constructors%20in%20ISLE/near/491793138" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leon von Mulert <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Fallible.20constructors.20in.20ISLE.html#491793138">(Jan 03 2025 at 18:16)</a>:</h4>
+<p>I have defined a partial constructor to turn an Index into a FlatExpr, i.e. just a lookup into an arena-style container. Obviously, if the index is out of bounds, an expression cannot be constructed, thus it's fallible/partial.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">decl</span><span class="w"> </span><span class="n">partial</span><span class="w"> </span><span class="n">to_node</span><span class="w"> </span><span class="p">(</span><span class="n">Index</span><span class="p">)</span><span class="w"> </span><span class="n">FlatExpr</span><span class="p">)</span>
+<span class="p">(</span><span class="k">extern</span><span class="w"> </span><span class="n">constructor</span><span class="w"> </span><span class="n">to_node</span><span class="w"> </span><span class="n">to_node</span><span class="p">)</span>
+</code></pre></div>
+<p>I'm then using that constructor in a simple nested traversal/peeling operation:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="n">zext</span>
+<span class="w">      </span><span class="p">(</span><span class="n">lower_cl</span><span class="w"> </span><span class="p">(</span><span class="n">FlatExpr</span><span class="p">.</span><span class="n">Zext</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="p">(</span><span class="n">FlatExpr</span><span class="p">.</span><span class="n">Const</span><span class="w"> </span><span class="mi">64</span><span class="w"> </span><span class="mi">64</span><span class="p">)</span><span class="w"> </span><span class="mi">64</span><span class="p">))</span>
+<span class="w">      </span><span class="p">(</span><span class="n">lower_cl</span><span class="w"> </span><span class="p">(</span><span class="n">to_node</span><span class="w"> </span><span class="n">a</span><span class="p">)))</span>
+</code></pre></div>
+<p>(If a value is zero-extended to 64 bits, ignore the zext and continue with the inner expression)<br>
+However, the code generated is as follows:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">                                </span><span class="kd">let</span><span class="w"> </span><span class="n">v65</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">C</span><span class="p">::</span><span class="n">to_node</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span><span class="n">v58</span><span class="p">);</span>
+<span class="w">                                </span><span class="kd">let</span><span class="w"> </span><span class="n">v66</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">v65</span><span class="o">?</span><span class="p">;</span>
+</code></pre></div>
+<p>And this fails to compile, because the ? operator can not be applied to <code>&amp;Option&lt;...&gt;</code>. In short: Why does it immediately take a reference here from the constructor, even though the constructor returns an owned value?</p>
+<p>Additionally: Does ISLE support actual errors? I.e. in the example above, failing to use a valid index for arena-lookup should bubble an error to the top, rather than panicing (non-partial constructor) or just failing to match the rule (partial constructor). The lack of keywords for this in the language references leads me to believe there's no such thing in ISLE. I don't want to catch panics for this kind of use-case.</p>
+
+
+
+<a name="491796891"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Fallible%20constructors%20in%20ISLE/near/491796891" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Fallible.20constructors.20in.20ISLE.html#491796891">(Jan 03 2025 at 18:48)</a>:</h4>
+<p>The short answer is that the ABI to the Rust FFI, and in particular details around borrowing vs owning, have been hacked together just-so to make the Cranelift use-case work, but we don't have a coherent philosophy beyond that. You're welcome to jump in and work one out, making fixes as needed. (We're pretty thinly staffed and it's not anyone's job to be a fulltime maintainer of the ISLE compiler at the moment, or to take it beyond Cranelift's use-case.)</p>
+<p>Re: "actual errors": no, we don't have a <code>Result</code> or error monad or anything like that. The intent of the partial matching was to let <code>None</code> mean "fall back to the old framework" during our transition phase; that could potentially be used, together with an out-of-band "set error" side-effect in a constructor. Other ideas welcome though.</p>
+
+
+
+<a name="491797678"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Fallible%20constructors%20in%20ISLE/near/491797678" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Leon von Mulert <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Fallible.20constructors.20in.20ISLE.html#491797678">(Jan 03 2025 at 18:55)</a>:</h4>
+<p>I'm sorry if my post came across as entitled, I assumed as much but wanted to verify I wasn't missing anything, especially given that guides/tutorials/language references tend to be out of date ;)</p>
+<p>I'm still learning the ins and outs of ISLE, but once I have a more thorough understanding of it I might look to make some improvements :) For now, ISLE itself is intimidating enough, no need to dive into its implementation just yet.</p>
+<p>Out-of-band errors seem like a good solution for now, even if it hurts throwing away some of Rust's core learnings.</p>
+
+
+
+<a name="491798083"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Fallible%20constructors%20in%20ISLE/near/491798083" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Fallible.20constructors.20in.20ISLE.html#491798083">(Jan 03 2025 at 18:58)</a>:</h4>
+<p>Oh, no worries, more just to say "please help, improvements welcome". We could definitely use some help getting things polished to the point that third-party users of ISLE aren't as intimidated and have more docs</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

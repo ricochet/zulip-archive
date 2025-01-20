@@ -1,0 +1,272 @@
+[
+    {
+        "content": "<p>Hi all -- thought I would add a pointer here to a new blog post describing the new backend's branch optimizations and efficient binary-code generation: <a href=\"https://cfallin.org/blog/2021/01/22/cranelift-isel-2/\">https://cfallin.org/blog/2021/01/22/cranelift-isel-2/</a>. Feel free to share where you think it might be interesting :-)  Happy to discuss here as well</p>",
+        "id": 223698217,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1611348723
+    },
+    {
+        "content": "<p>The diagram for step 2 uses L2/L3 for the metadata where L1/L2 should have been used it seems.</p>",
+        "id": 223709217,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1611353936
+    },
+    {
+        "content": "<p>This is a really well written article <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span>!</p>",
+        "id": 223710421,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1611354628
+    },
+    {
+        "content": "<p>Thanks @bjorn3, fixed!</p>",
+        "id": 223712136,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1611355752
+    },
+    {
+        "content": "<p>What did you use to make the diagrams by the way?</p>",
+        "id": 223713855,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1611356869
+    },
+    {
+        "content": "<p>I drew them in Inkscape and saved as SVGs; text-to-path first to avoid issues with web fonts</p>",
+        "id": 223714093,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1611357040
+    },
+    {
+        "content": "<p>I dunno if that's the best way to do vector graphics for blog posts but I've been using Inkscape too long to try anything else :-)</p>",
+        "id": 223714124,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1611357083
+    },
+    {
+        "content": "<p>Excellent writeup! I'm looking forward to reading future entries in the series.</p>\n<p>Are (3,5) and (4,5) not merged into 3&amp;4 because (2,3) and (2,4) were? I saw a note about that in the linked implementation. Otherwise they would be candidate as they are not critical edges, correct?</p>",
+        "id": 223982327,
+        "sender_full_name": "Kasey C",
+        "timestamp": 1611620743
+    },
+    {
+        "content": "<p>Thanks! And yes -- edges (3,5) and (4,5) are not merged because we have (for simplicity) a design invariant that only one edge block can merge with an original block. Otherwise, the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/79649a15f62000a7487468d5b7041656c0fcabf4/cranelift/codegen/src/machinst/blockorder.rs#L107-L148\">enum</a> that encodes the source of a lowered block -- edge, edge+orig, orig+edge, or orig -- and its successor function would become more complex, and computing the successor would require more lookahead. I opted to keep it simple and it seemed that the marginal gain would be minimal beyond that :-)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/79649a15f62000a7487468d5b7041656c0fcabf4/cranelift/codegen/src/machinst/blockorder.rs#L107-L148\" style=\"background-image: url(https://avatars.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/79649a15f62000a7487468d5b7041656c0fcabf4/cranelift/codegen/src/machinst/blockorder.rs#L107-L148\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 223983260,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1611621373
+    },
+    {
+        "content": "<p>Hello! I have a question about branch optimization during lowering, as described in the article.</p>\n<p>My understanding is that we have a CFG of separately-allocated CLIF blocks, which we transform into a continuous buffer of VCode instructions, which we then transform into a continuous buffer of machine instructions; most of the branch optimizations are done in that last pass with a peephole optimizer of sorts, that looks at the last few branch instructions emitted and changes them as needed.</p>\n<p>Now, I understand how this pass can handle fallthroughs and branch relaxation. But I don't understand how it handles jump threading and dead block removal.</p>\n<p>Like, the principle of jump threading is that, if you have a block starting at L1 that does nothing but jump at L2, and the block starting at L3 jumps at L1, you can replace the jump at L1 to a jump at L2 and elide all the code in L1.</p>\n<p>But I don't understand how you can do that in a streaming compiler. By the time the code at L3 is processed, the code at L1 is already \"frozen\". And in the opposite scenario (a block B1 ends with a jump to \"future\" block B4 that itself jumps to future code B5, etc), by the time you're writing B4 and you figure out that B1 can jump directly to B5, B1 has already been written and frozen. How do you optimize that?</p>",
+        "id": 226797605,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613648266
+    },
+    {
+        "content": "<p>Hi <span class=\"user-mention\" data-user-id=\"354194\">@Olivier FAURE</span> ! So there are a few interesting cases here that we can handle. The key is the redirect table described in the post; by updating that on-the-fly, consulting it eagerly, and using it when doing branch-target fixups, we can handle all of the cases you describe.</p>\n<ol>\n<li>\n<p>L1 -&gt; L2; L3 -&gt; L1. Here, we would emit the branch at L1 to L2, but also note in the table that L1 is an alias for L2. Importantly, also, if the only instruction in the block at L1 is a branch to L2 (i.e., the immediately preceding instruction is <em>also</em> an unconditional branch), we can completely remove the branch. Then L1 exists only as an alias, and not as any machine code at all. That's <a href=\"https://github.com/bytecodealliance/wasmtime/blob/7b4652bb82893d2034025322f74ee31db18d079a/cranelift/codegen/src/machinst/buffer.rs#L817\">this case</a> in the code. Finally, when we process the branch at L3 to L1, we note the fixup record (\"target at this offset must refer to L1\") via the <code>LabelUse</code> mechanism; when we patch in the offset, we use the redirect table to note that L1 is actually L2, and patch in the offset for L2.</p>\n<p>So the key insight is that we remove the empty block <em>before</em> it's frozen, and we can know it's an empty block by recognizing the two-back-to-back-branch pattern. This is safe because we set up the redirect at the same time and always refer to it.</p>\n</li>\n<li>\n<p>L1 -&gt; L4, L4 -&gt; L5. Here we will note the redirect L4 -&gt; L5 as above. When we later come back to patch the offset in the first branch to refer to L4, we actually patch to refer to L5 instead.</p>\n<p>So the key insight here is that we have the <em>limited</em> second pass in which we just process fixups, and at that time we know about all \"future\" redirects. It's not really a conventional or full two-pass algorithm because the second pass is not O(code size), just O(branches); it's like relocation processing, and is truly unavoidable if there are any forward branches at all (since we don't know offsets until we see them).</p>\n</li>\n</ol>\n<p>Does that make sense? If you're curious you can also add test cases with interesting patterns in <code>buffer.rs</code> above and enable debug logging; you should see the branch-chomping in real time :-)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/7b4652bb82893d2034025322f74ee31db18d079a/cranelift/codegen/src/machinst/buffer.rs#L817\" style=\"background-image: url(https://avatars.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/7b4652bb82893d2034025322f74ee31db18d079a/cranelift/codegen/src/machinst/buffer.rs#L817\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 226837696,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613665508
+    },
+    {
+        "content": "<p>I might start hacking into the code with debug logging soon, yeah. I've been meaning to for a while but 1) it's intimidating and I'm about to take a short break from coding 2) I'm not sure where to start anyway. But your post is super helpful!</p>",
+        "id": 226850080,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613670326
+    },
+    {
+        "content": "<p>So just to be clear, you're saying we have a full pass where we produce all the instructions in our contiguous buffer, and a second pass where go over all jump/branch instructions in that buffer and fix them up to do jump threading?</p>",
+        "id": 226850480,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613670512
+    },
+    {
+        "content": "<p>Well, not quite: most of the optimizations (and all of the code deletion) happen on the main pass, during emission. The second pass is only over the fixup list. The reason that is relevant to your question is that we know \"the future\" when we handle target fixups, so we can chase through redirects. But emphatically we don't have an LLVM-style \"generate it all first then edit it later\" design</p>",
+        "id": 226850906,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613670687
+    },
+    {
+        "content": "<p>So what do the fixups cover?</p>",
+        "id": 226851018,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613670728
+    },
+    {
+        "content": "<p>They are \"this branch at this offset refers to this target\" records</p>",
+        "id": 226851055,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613670746
+    },
+    {
+        "content": "<p>The struct is <a href=\"https://github.com/bytecodealliance/wasmtime/blob/445e539ae0529ef46ce52bd739526f74caa71aac/cranelift/codegen/src/machinst/buffer.rs#L1366\">here</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/445e539ae0529ef46ce52bd739526f74caa71aac/cranelift/codegen/src/machinst/buffer.rs#L1366\" style=\"background-image: url(https://avatars.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/445e539ae0529ef46ce52bd739526f74caa71aac/cranelift/codegen/src/machinst/buffer.rs#L1366\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 226851146,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613670795
+    },
+    {
+        "content": "<p>The name may be a bit of a misnomer, sorry: it's not a general fixup (in the sense that we do all the branch opts); it's a label reference, i.e., patch these bits to the final code offset</p>",
+        "id": 226851211,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613670828
+    },
+    {
+        "content": "<p>So jump threading is the only thing it can do?</p>",
+        "id": 226851284,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613670850
+    },
+    {
+        "content": "<p>Well, no; it handles all relocations</p>",
+        "id": 226851295,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613670858
+    },
+    {
+        "content": "<p>If I jump to a future block, a fixup record will record that and the code will come back later and patch it</p>",
+        "id": 226851334,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613670877
+    },
+    {
+        "content": "<p>but if you mean that it cannot indicate that we delete code, then yes; all code is frozen once emission goes beyond it</p>",
+        "id": 226851455,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613670930
+    },
+    {
+        "content": "<p>Ok, so, if I'm following, you can send the following instructions to the machine instruction backend:</p>\n<ul>\n<li>Regular non-jump instruction -&gt; Emit the instruction as is.</li>\n<li>Backwards jump -&gt; Resolve the label through the table; may resolve to a \"frozen\" buffer offset or to a \"TODO - will be fixed later\" id.</li>\n<li>Forward jump, \"present\" offset -&gt; This is a fallthrough, elide it.</li>\n<li>Forward jump, \"future\" offset -&gt; Resolve to a \"TODO - will be fixed later\" id.</li>\n</ul>\n<p>Then we do a second pass where we replace all the \"TODO\" jumps with their final frozen offset; this may result in jump threading if there is an occasion to do so, since all frozen offsets are final.</p>",
+        "id": 226852037,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613671183
+    },
+    {
+        "content": "<p>yep, exactly!</p>",
+        "id": 226852297,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671257
+    },
+    {
+        "content": "<p>and to add possibly useful detail on your second point, the backwards -&gt; TODO case happens when the branch goes backward to another branch that has an unresolved target (so the final, optimized target is still in the future)</p>",
+        "id": 226852425,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671304
+    },
+    {
+        "content": "<p>(and then there's the conditional inversion stuff but you could see that as an orthogonal streaming opt)</p>",
+        "id": 226852581,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671351
+    },
+    {
+        "content": "<p>Oh, ok. So if we're doing <code>L1-&gt;L3 ; L2-&gt;... ; L3-&gt;... ; L4-&gt;L1</code> (where <code>...</code> means \"non-empty block\") then <code>L1-&gt;L3</code>needs to be fixed up because L3 was in the future when L1 was emitted, but <code>L4-&gt;L1</code> doesn't need to be fixed up because it threaded up to L3 which was in the past when L4 was emitted.</p>",
+        "id": 226852995,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613671515
+    },
+    {
+        "content": "<p>yes</p>",
+        "id": 226853243,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671626
+    },
+    {
+        "content": "<p>Another part I'm having trouble with:</p>\n<blockquote>\n<p>Any offset that (i) immediately follows an unconditional jump, and (ii) has no labels bound to it, is unreachable; an unconditional jump at an unreachable offset can be elided. (Actually, any code at an unreachable offset can be removed, but for simplicity and to make it easier to reason about correctness, we restrict the MachBuffer’s edits to code explicitly marked as branch instructions only.)</p>\n</blockquote>\n<p>How can an offset be unreachable if there's an unconditional jump to it?</p>",
+        "id": 226853247,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613671628
+    },
+    {
+        "content": "<p>ah, there's no unconditional jump <em>to</em> it; rather, it <em>immediately follows</em> an unconditional jump in the linear code stream</p>",
+        "id": 226853332,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671672
+    },
+    {
+        "content": "<p>so in other words, <code>jmp somewhere_else; unreachable_inst</code></p>",
+        "id": 226853395,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671686
+    },
+    {
+        "content": "<p>if there are no labels on <code>unreachable_inst</code>, then there's no way to execute it (because there's no fallthrough into it either)</p>",
+        "id": 226853438,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671706
+    },
+    {
+        "content": "<p>So what gets elided in that case?</p>",
+        "id": 226853521,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613671751
+    },
+    {
+        "content": "<p>just the unreachable_inst</p>",
+        "id": 226853779,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671849
+    },
+    {
+        "content": "<p>and specifically only if unreachable_inst is a jump too</p>",
+        "id": 226853804,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671864
+    },
+    {
+        "content": "<p>Oh, okay. But only if that instr is a jump?</p>",
+        "id": 226853821,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613671870
+    },
+    {
+        "content": "<p>Right</p>",
+        "id": 226853828,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613671873
+    },
+    {
+        "content": "<p>(that's for simplicity as noted above)</p>",
+        "id": 226853873,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671886
+    },
+    {
+        "content": "<p>it basically is complementary to the redirection; we first redirect all labels, then often it's the case the block was just a jump and we can delete it</p>",
+        "id": 226853988,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671924
+    },
+    {
+        "content": "<p>(and these empty blocks happen all the time because of split critical edges)</p>",
+        "id": 226854014,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671938
+    },
+    {
+        "content": "<p>I'm guessing the assumption is that most unreachable blocks would be elided in MIR or CLIR, if at all possible, and remaining unreachable blocks will mostly be short blocks with jumps and nothing else?</p>",
+        "id": 226854020,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613671940
+    },
+    {
+        "content": "<p>well, these are generally not coming from unreachable blocks in CLIF; in fact the BlockLoweringOrder would not include such blocks at all</p>",
+        "id": 226854092,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671979
+    },
+    {
+        "content": "<p>they become unreachable only after we redirect labels</p>",
+        "id": 226854127,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613671991
+    },
+    {
+        "content": "<p>Ok. Thanks for the detailed answers :D</p>",
+        "id": 226854213,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1613672028
+    },
+    {
+        "content": "<p>No problem, happy to help!</p>",
+        "id": 226854493,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1613672124
+    }
+]

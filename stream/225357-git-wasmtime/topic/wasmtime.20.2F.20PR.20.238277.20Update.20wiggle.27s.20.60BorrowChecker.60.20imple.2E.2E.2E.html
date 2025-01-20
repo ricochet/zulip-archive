@@ -1,0 +1,98 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #8277 Update wiggle&#x27;s `BorrowChecker` imple... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html">wasmtime / PR #8277 Update wiggle&#x27;s `BorrowChecker` imple...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="430607905"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430607905" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430607905">(Apr 01 2024 at 15:03)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8277">PR #8277</a>.</p>
+
+
+
+<a name="430607906"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430607906" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430607906">(Apr 01 2024 at 15:03)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers">wasmtime-core-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8277">PR #8277</a>.</p>
+
+
+
+<a name="430607907"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430607907" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430607907">(Apr 01 2024 at 15:03)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/8277">PR #8277</a> from <code>alexcrichton:less-borrow-checking</code> to <code>bytecodealliance:main</code>:</p>
+<blockquote>
+<p>This commit is a refactoring and modernization of wiggle's <code>BorrowChecker</code> implementation. This type is quite old and predates everything related to the component model for example. This type additionally predates the implementation of WASI threads for Wasmtime as well. In general, this type is old and has not been updated in a long time.</p>
+<p>Originally a <code>BorrowChecker</code> was intended to be a somewhat cheap method of enabling the host to have active safe shared and mutable borrows to guest memory. Over time though this hasn't really panned out. The WASI threads proposal, for example, doesn't allow safe shared or mutable borrows at all. Instead everything must be modeled as a copy in or copy out of data. This means that all of <code>wasmtime-wasi</code> and <code>wasi-common</code> have largely already been rewritten in such a way to minimize borrows into linear memory.</p>
+<p>Nowadays the only types that represent safe borrows are the <code>GuestSlice</code> type and its equivalents (e.g. <code>GuestSliceMut</code>, <code>GuestStr</code>, etc). These are minimally used throughout <code>wasi-common</code> and <code>wasmtime-wasi</code> and when they are used they're typically isolated to a small region of memory.</p>
+<p>This is all coupled with the facst that <code>BorrowChecker</code> never ended up being optimized. It's a <code>Mutex&lt;HashMap&lt;..&gt;&gt;</code> effectively and a pretty expensive one at that. The <code>Mutex</code> is required because <code>&amp;BorrowChecker</code> must both allow mutations and be <code>Sync</code>. The <code>HashMap</code> is used to implement precise byte-level region checking to fulfill the original design requirements of what <code>wiggle</code> was envisioned to be.</p>
+<p>Given all that, this commit guts <code>BorrowChecker</code>'s implementation and functionality. The type is now effectively a glorified <code>RefCell</code> for the entire span of linear memory. Regions are no longer considered when borrows are made and instead a shared borrow is considered as borrowing the entirety of shared memory. This means that it's not possible to simultaneously have a safe shared and mutable borrow, even if they're disjoint, at the same time.</p>
+<p>The goal of this commit is to address performance issues seen in #7973 which I've seen locally as well. The heavyweight implementation of <code>BorrowChecker</code> isn't really buying us much nowadays, especially with much development having since moved on to the component model. The hope is that this much coarser way of implementing borrow checking, which should be much more easily optimizable, is sufficient for the needs of WASI and not a whole lot else.</p>
+<p>&lt;!--<br>
+Please make sure you include the following information:</p>
+<ul>
+<li>
+<p>If this work has been discussed elsewhere, please include a link to that<br>
+  conversation. If it was discussed in an issue, just mention "issue #...".</p>
+</li>
+<li>
+<p>Explain why this change is needed. If the details are in an issue already,<br>
+  this can be brief.</p>
+</li>
+</ul>
+<p>Our development process is documented in the Wasmtime book:<br>
+<a href="https://docs.wasmtime.dev/contributing-development-process.html">https://docs.wasmtime.dev/contributing-development-process.html</a></p>
+<p>Please ensure all communication follows the code of conduct:<br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md">https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md</a><br>
+--&gt;</p>
+</blockquote>
+
+
+
+<a name="430619642"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430619642" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430619642">(Apr 01 2024 at 16:11)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8277#pullrequestreview-1971616746">PR review</a>.</p>
+
+
+
+<a name="430619643"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430619643" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430619643">(Apr 01 2024 at 16:11)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8277#pullrequestreview-1971616746">PR review</a>.</p>
+
+
+
+<a name="430619645"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430619645" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430619645">(Apr 01 2024 at 16:11)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/8277#discussion_r1546517634">PR review comment</a>:</p>
+<blockquote>
+<p>Should there be different handle types for mut vs shared borrows? </p>
+</blockquote>
+
+
+
+<a name="430635694"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430635694" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430635694">(Apr 01 2024 at 17:42)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8277#pullrequestreview-1971786537">PR review</a>.</p>
+
+
+
+<a name="430635695"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430635695" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430635695">(Apr 01 2024 at 17:42)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/8277#discussion_r1546637289">PR review comment</a>:</p>
+<blockquote>
+<p>In theory yeah, but I'm not too keen to do too much refactoring here because it's all basically a dated library on life support now. These are all ignored anyway so I should probably refactor to remove them entirely, but I'll leave that as a future TODO if necessary</p>
+</blockquote>
+
+
+
+<a name="430639963"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238277%20Update%20wiggle%27s%20%60BorrowChecker%60%20imple.../near/430639963" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238277.20Update.20wiggle.27s.20.60BorrowChecker.60.20imple.2E.2E.2E.html#430639963">(Apr 01 2024 at 18:09)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/8277">PR #8277</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

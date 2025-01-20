@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>I'm trying to figure out if there's a built-in way in cranelift to copy a memory region larger than what would fit in a value. For instance, I have a user struct, and a value pointing to its base address, and I want to copy it to a stack slot (for which I also have its base address of course). Do I have to emit individual load / store instructions for each of the primitive fields in the flattened structure? Or is there a more optimal way to express my intent to copy a block of memory with the IR?</p>\n<p>Another thing I'm wondering about is the distinction between stack_load / stack_store and load / store. For simplicity, I am currently generating all memory operations as load / store, because it's easy to generate code that way. Every time I have a stack slot, I simply use stack_addr to obtain its address. Will emitting the IR like this lead to less optimization opportunities? Or is stack_load / stack_store just an alias for convenience?</p>",
+        "id": 354844655,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1682938666
+    },
+    {
+        "content": "<p>There's an open issue about adding Cranelift instructions for memory copies (<a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">https://github.com/bytecodealliance/wasmtime/issues/5479</a>). If you're using the <code>cranelift-frontend</code> crate there are also helpers there for emitting sequences of loads/stores for you (<code>emit_small_mem*</code> in <a href=\"https://docs.rs/cranelift-frontend/latest/cranelift_frontend/struct.FunctionBuilder.html\">https://docs.rs/cranelift-frontend/latest/cranelift_frontend/struct.FunctionBuilder.html</a>), although they don't necessarily produce <em>good</em> code.</p>\n<p>I don't think there's anything wrong with always using <code>stack_addr</code>. I can't immediately think of any optimization opportunities we'd miss as a result, but I'm not guaranteeing anything. <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span> If you find that Cranelift is generating silly code sequences as a result, we might be able to fix that with either mid-end optimizations or better back-end lowering rules.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/0320b7547994c5be1dc438ed23bc50756b9ad4a1\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f366461333962343734323662633733346534363534626261633133366138353964653235613030653333343065623266386564313266613630366163666532612f62797465636f6465616c6c69616e63652f7761736d74696d652f6973737565732f35343739)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\" title=\"Cranelift: Introduce memcpy and memset instructions · Issue #5479 · bytecodealliance/wasmtime\">Cranelift: Introduce memcpy and memset instructions · Issue #5479 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Feature Introduce instructions that behave like memcpy and memset. These should lower to repe movsb and repe stosb for memcpy and memset respectively on x86_64 with the ermsb feature. According to ...</div></div></div>",
+        "id": 354916355,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1682957548
+    },
+    {
+        "content": "<blockquote>\n<p>distinction between stack_load / stack_store and load / store</p>\n</blockquote>\n<p>FWIW, <code>stack_load</code> / <code>stack_store</code> are legalized to <code>stack_addr</code> followed by regular loads/stores, so there's no need to worry about suboptimal codegen from that particular aspect</p>",
+        "id": 354916785,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1682957651
+    },
+    {
+        "content": "<blockquote>\n<p>There's an open issue about adding Cranelift instructions for memory copies (<a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">https://github.com/bytecodealliance/wasmtime/issues/5479</a>)</p>\n</blockquote>\n<p>I'll keep an eye on that <span aria-label=\"eyes\" class=\"emoji emoji-1f440\" role=\"img\" title=\"eyes\">:eyes:</span> </p>\n<blockquote>\n<p><code>emit_small_mem*</code></p>\n</blockquote>\n<p>Thanks! That seems just what I needed. I was already halfway implementing something myself, but I'd rather use a builtin solution.</p>\n<blockquote>\n<p>although they don't necessarily produce good code.</p>\n</blockquote>\n<p>Good enough for now. Make it run, then make it fast :)</p>\n<blockquote>\n<p>FWIW, stack_load / stack_store are legalized to stack_addr followed by regular loads/stores</p>\n</blockquote>\n<p>I'm so glad to hear this! <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span> I wasn't looking forward to juggling two different representations of memory during codegen.</p>\n<p>On that note, I was taking a look at <code>emit_small_memory_copy</code> and I see it has some alignment requirements on the alignment of the provided src and dst addresses. When allocating memory by reserving a stack slot, how can I make sure the stack slot will have a specific alignment? <code>create_sized_stack_slot</code> only takes a size parameter, but no alignment</p>",
+        "id": 354920963,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1682958796
+    },
+    {
+        "content": "<p><code>stack_{load,store}</code> might automatically set the \"stack\" bit on the mem flags, which might give a benefit for our simple alias analysis, but I'm not totally sure if that happens here or is up to the front ends</p>",
+        "id": 354930674,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1682961336
+    },
+    {
+        "content": "<p>We had some discussion and consensus in <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5922\">https://github.com/bytecodealliance/wasmtime/issues/5922</a> that stack slots should have an alignment specifier but I don't think anybody is working on that yet. In that issue bjorn3 noted that \"if you ensure that every stack slot is a multiple of 16, you get 16 aligned stack slots on all current backends.\" So that's a workaround you can use for stack-slot alignment for now.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/5922\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/6e6d377ce9bcbd5a54ee18101a361be050b1823c\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f643639373239313731313962626334393362303232323331656166333464636433326435626266373132386138363962323161313365653737396363623264662f62797465636f6465616c6c69616e63652f7761736d74696d652f6973737565732f35393232)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/5922\" title=\"Cranelift: Segfault with unaligned stack load sunk into `extractlane` on x64 · Issue #5922 · bytecodealliance/wasmtime\">Cranelift: Segfault with unaligned stack load sunk into `extractlane` on x64 · Issue #5922 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">👋 Hey, Me and @alexcrichton were discussing this via Zulip. The stack_load gets translated into a load.f64x2 notrap aligned v34, and that's why we do the load sinking in the backend. Is stack_load ...</div></div></div>",
+        "id": 354930758,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1682961358
+    },
+    {
+        "content": "<blockquote>\n<p>if you ensure that every stack slot is a multiple of 16, you get 16 aligned stack slots on all current backends.</p>\n</blockquote>\n<p>Right, thanks a lot! I'll use this workaround too in the meantime <span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span></p>",
+        "id": 354942458,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1682964537
+    },
+    {
+        "content": "<p>Why 16 specifically though? Isn't most data 8-byte aligned in 64-bit CPUs?</p>",
+        "id": 354942836,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1682964645
+    },
+    {
+        "content": "<p>16-alignment shows up both in ABIs (x86-64 and aarch64 both require SP to be 16-aligned) and in vector ISAs (some 128-bit-vector loads/stores -- actually usually most, except \"unaligned\" variants -- require 16-alignment)</p>",
+        "id": 354943190,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1682964738
+    },
+    {
+        "content": "<p>the former may be because of the latter and stack-spills, I'm not sure</p>",
+        "id": 354943217,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1682964746
+    },
+    {
+        "content": "<p>Right, makes sense! Just to make sure I understand: This workaround is just to ensure that my own stack slots are always 16-aligned, but cranelift still ensures the stack pointer is set to a multiple of 16 when I call a function using e.g. the SysV calling convention (or any other that requires it) right? I'm guessing I don't need to  manually insert any padding stack slots myself for that</p>",
+        "id": 354947904,
+        "sender_full_name": "Setzer22",
+        "timestamp": 1682965830
+    },
+    {
+        "content": "<p>Yeah, cranelift will always ensure that the calling convention is followed with respect to stack alignment. It does so even if you use stack slots of odd sizes. Only if you want your own stack slots to be 16 byte aligned do you need to make them all a multiple of 16 bytes as size.</p>",
+        "id": 354959950,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1682969079
+    }
+]

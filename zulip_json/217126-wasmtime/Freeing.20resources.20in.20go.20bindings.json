@@ -1,0 +1,470 @@
+[
+    {
+        "content": "<p>I tried doing a simple POC with the golang wasmtime bindings. The idea was that I would isolate a workload on a per-request basis. To accomplish this, I had a single engine and was creating per-request stores, linkers and instances. The instances were based on a pre-compiled WASM module.</p>\n<p>I noticed that I quickly OOM'd. Also didn't see obvious ways to explicitly free up those ephemeral objects.</p>\n<p>My guess is that I'm probably holding it wrong but wanted to know if others have seen such issues and how they got around them.</p>",
+        "id": 421702002,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708016900
+    },
+    {
+        "content": "<p>We do per-request isolation in Spin using <code>InstancePre</code> to make a new Instance (with a new <code>Store</code>) for each request with a variety of languages (including (Tiny)Go) and haven't had such issues.  Can you verify that you're definitely dropping the instance and store after each request?</p>",
+        "id": 421705956,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708018198
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> I'm embedding wasmtime in a go project, not running go as a guest language. I'm NOT explicitly dropping the instance and store because I couldn't find any way to do so.</p>",
+        "id": 421709729,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708019512
+    },
+    {
+        "content": "<p>It might be a gap in the bindings or just some trickery with Contexts that I didn't figure out.</p>",
+        "id": 421709980,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708019621
+    },
+    {
+        "content": "<p>Ah, I see.  Yeah, I don't have experience with <code>wasmtime-go</code> myself.  I'm guessing it's based on Wasmtime's C bindings, which presumably has a way to dispose of such resources.  Might be worth looking through the <code>wasmtime-go</code> source code and/or opening an issue on that repo.</p>",
+        "id": 421710113,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708019661
+    },
+    {
+        "content": "<p>Ah, let me see if I can find out the c api.</p>",
+        "id": 421710201,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708019705
+    },
+    {
+        "content": "<p>OK, found them so it looks like the c bindings don't expose an explicit <code>drop()</code> or <code>free()</code> method. It seems like they expect a finalizer. Is that like a destructor?</p>\n<p><a href=\"https://github.com/bytecodealliance/wasmtime/blob/83a5a1a607f5609249e451cbadd38827140bb7eb/crates/c-api/src/store.rs#L88-L93\">https://github.com/bytecodealliance/wasmtime/blob/83a5a1a607f5609249e451cbadd38827140bb7eb/crates/c-api/src/store.rs#L88-L93</a></p>",
+        "id": 421710589,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708019856
+    },
+    {
+        "content": "<p>A finalizer is a Go runtime feature that frees resources once a particular object gets garbage collected</p>",
+        "id": 421710729,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708019907
+    },
+    {
+        "content": "<p>So you'd need to remove any references to the store, including any \"child\" objects that might refer to it</p>",
+        "id": 421710874,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708019974
+    },
+    {
+        "content": "<p>In my little POC, the only long-lived references are these:</p>\n<div class=\"codehilite\" data-code-language=\"Go\"><pre><span></span><code><span class=\"w\">    </span><span class=\"nx\">engine</span><span class=\"w\"> </span><span class=\"o\">:=</span><span class=\"w\"> </span><span class=\"nx\">wasmtime</span><span class=\"p\">.</span><span class=\"nx\">NewEngine</span><span class=\"p\">()</span>\n\n<span class=\"w\">    </span><span class=\"nx\">mod</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nx\">err</span><span class=\"w\"> </span><span class=\"o\">:=</span><span class=\"w\"> </span><span class=\"nx\">wasmtime</span><span class=\"p\">.</span><span class=\"nx\">NewModule</span><span class=\"p\">(</span><span class=\"nx\">engine</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nx\">quickjsWasmBytes</span><span class=\"p\">)</span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"nx\">err</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"kc\">nil</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"nx\">slog</span><span class=\"p\">.</span><span class=\"nx\">Error</span><span class=\"p\">(</span><span class=\"s\">\"Error instantiating module: %e\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nx\">err</span><span class=\"p\">)</span>\n<span class=\"w\">        </span><span class=\"nx\">os</span><span class=\"p\">.</span><span class=\"nx\">Exit</span><span class=\"p\">(</span><span class=\"mi\">1</span><span class=\"p\">)</span>\n<span class=\"w\">    </span><span class=\"p\">}</span>\n</code></pre></div>\n<p>Beyond that, everything is assigned in the request handler and _should_ only have 1-way references back to the shared <code>engine</code>.</p>\n<p>Perhaps I'm making a mistake w/ per-request linkers?</p>",
+        "id": 421711370,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708020131
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"480579\">@Lann Martin</span>  But it's not an reference-counting GC, is it?  So it won't be collected until there's Go-visible memory pressure, which C and Rust allocations won't necessarily contribute to.  I think we'll want to have a pro-active way of disposing these things without leaning on the GC.</p>",
+        "id": 421711497,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708020166
+    },
+    {
+        "content": "<p>You'd hope GC would run before OOM but yeah it isn't deterministic</p>",
+        "id": 421711639,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708020213
+    },
+    {
+        "content": "<p>agree there should probably be a way to explicitly deallocate</p>",
+        "id": 421711704,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708020234
+    },
+    {
+        "content": "<p>I think the idiomatic trick in go would be:</p>\n<div class=\"codehilite\" data-code-language=\"Go\"><pre><span></span><code><span class=\"w\">        </span><span class=\"nx\">store</span><span class=\"w\"> </span><span class=\"o\">:=</span><span class=\"w\"> </span><span class=\"nx\">wasmtime</span><span class=\"p\">.</span><span class=\"nx\">NewStore</span><span class=\"p\">(</span><span class=\"nx\">engine</span><span class=\"p\">)</span>\n<span class=\"w\">        </span><span class=\"k\">defer</span><span class=\"w\"> </span><span class=\"nx\">store</span><span class=\"p\">.</span><span class=\"nx\">Drop</span><span class=\"p\">()</span>\n</code></pre></div>",
+        "id": 421711844,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708020275
+    },
+    {
+        "content": "<p>I can almost guarantee it won't run before OOM if it thinks each of these Instance and Store objects are tiny and doesn't even see the C/Rust objects they point to as being part of the heap it is managing.</p>",
+        "id": 421711871,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708020291
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"680230\">@Geoff Goodman</span>  You'd maybe call it <code>store.Close()</code> in go, but yes</p>",
+        "id": 421711933,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708020315
+    },
+    {
+        "content": "<p>I'm neither a rustacean nor gopher so I defer to the experts :D</p>",
+        "id": 421712000,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708020343
+    },
+    {
+        "content": "<p>How does that passed-in finalizer work in the c bindings?</p>",
+        "id": 421712654,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708020595
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[no_mangle]</span>\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">extern</span><span class=\"w\"> </span><span class=\"s\">\"C\"</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">wasmtime_store_new</span><span class=\"p\">(</span>\n<span class=\"w\">    </span><span class=\"n\">engine</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">wasm_engine_t</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"n\">data</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">c_void</span><span class=\"p\">,</span>\n<span class=\"w\">    </span><span class=\"n\">finalizer</span>: <span class=\"nb\">Option</span><span class=\"o\">&lt;</span><span class=\"k\">extern</span><span class=\"w\"> </span><span class=\"s\">\"C\"</span><span class=\"w\"> </span><span class=\"k\">fn</span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">c_void</span><span class=\"p\">)</span><span class=\"o\">&gt;</span><span class=\"p\">,</span>\n<span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nb\">Box</span><span class=\"o\">&lt;</span><span class=\"n\">wasmtime_store_t</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span>\n</code></pre></div>\n<p>For reference: <a href=\"https://github.com/bytecodealliance/wasmtime/blob/83a5a1a607f5609249e451cbadd38827140bb7eb/crates/c-api/src/store.rs#L88-L93\">https://github.com/bytecodealliance/wasmtime/blob/83a5a1a607f5609249e451cbadd38827140bb7eb/crates/c-api/src/store.rs#L88-L93</a></p>",
+        "id": 421712783,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708020633
+    },
+    {
+        "content": "<p>finalizers are a feature of the Go garbage collector; they have nothing to do with wasmtime or C</p>",
+        "id": 421712814,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708020646
+    },
+    {
+        "content": "<p>Looks like he's referring to a Wasmtime C API thing independent of Go, though</p>",
+        "id": 421712871,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708020677
+    },
+    {
+        "content": "<p>ohh sorry; maybe an unfortunate terminology collision?</p>",
+        "id": 421712980,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708020718
+    },
+    {
+        "content": "<p>Looks to me like the <code>finalizer</code> param is in case the <code>data</code> param needs to be disposed with custom code supplied by the embedder</p>",
+        "id": 421713052,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708020733
+    },
+    {
+        "content": "<p>If someone is using the c bindings, how does one drop a store?</p>",
+        "id": 421713183,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708020790
+    },
+    {
+        "content": "<p><code>wasmtime_store_delete</code>: <a href=\"https://github.com/bytecodealliance/wasmtime-go/blob/v1.0.0/store.go#L72\">https://github.com/bytecodealliance/wasmtime-go/blob/v1.0.0/store.go#L72</a></p>",
+        "id": 421713325,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708020844
+    },
+    {
+        "content": "<p>Nice. Missed that in the header. Seems like that offers a nice path to opt into explicit resource management.</p>",
+        "id": 421713508,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708020922
+    },
+    {
+        "content": "<p>It would probably require some more changes to the Go API to coexist with the Go finalizer</p>",
+        "id": 421713678,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708020988
+    },
+    {
+        "content": "<p>You'll want to set <code>store._ptr</code> to null after you delete it (and not call <code>wasmtime_store_delete</code> if it's already null) so it doesn't get deleted twice in the finalizer.</p>",
+        "id": 421713687,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708020991
+    },
+    {
+        "content": "<p>And check for null in all the methods.</p>",
+        "id": 421713783,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708021027
+    },
+    {
+        "content": "<p>yeah really needs to be an issue on the wasmtime-go repo for discussion</p>",
+        "id": 421713831,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708021047
+    },
+    {
+        "content": "<p>I can kick that off.</p>",
+        "id": 421713865,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708021064
+    },
+    {
+        "content": "<p>Thanks!</p>",
+        "id": 421713889,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708021072
+    },
+    {
+        "content": "<p>When I originally wrote the Go bindings I was hoping to lean heavily on the Go GC to clean things up to avoid the need for <code>.Drop()</code> everywhere since sometimes the lifetimes can be pretty tricky, but I do agree that we should add an explicit <code>Drop</code> method where needed!</p>\n<p>Is it possible to get a snapshot of the heap when OOM was triggered? There may also be a bug in the wasmtime-go bindings that is leaking something by accident</p>",
+        "id": 421713891,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708021073
+    },
+    {
+        "content": "<p>(also agreed an issue would be good to track as well)</p>",
+        "id": 421713969,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708021089
+    },
+    {
+        "content": "<p>To reiterate (since this is kind of a pet peeve of mine): whenever a GC-allocated object points to resources outside the GC-managed heap (e.g. sockets, malloc'd buffers, graphics contexts, file descriptors, mmap'd regions, etc.) and the only way to clean them up is via GC-triggered finalizers, you're going to have a bad time eventually.  The GC doesn't see any of those external resources as contributing to memory pressure <em>for</em> <em>the</em> <em>GC-managed</em> <em>heap</em>, so you can easily run out of those resources before the next GC cycle.</p>\n<p>Which isn't to criticize use of finalizers to dispose of such things as a good (and ergonomic) first step, but there's a reason why e.g. Python got a <code>with</code> statement, Java got <code>try-with-resources</code>, and Go has <code>defer</code> -- they all acknowledge that some resources need to be cleaned up independently of GC.</p>",
+        "id": 421715248,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708021585
+    },
+    {
+        "content": "<p>Even JavaScript is getting <code>using</code> and <code>await using</code>.</p>",
+        "id": 421715359,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708021624
+    },
+    {
+        "content": "<p>fwiw, using finalizers is quite rare in Go; people expect to manually clean up unmanaged resources</p>",
+        "id": 421715769,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708021780
+    },
+    {
+        "content": "<p>Issue created, thanks for the insight folks: <a href=\"https://github.com/bytecodealliance/wasmtime-go/issues/209\">https://github.com/bytecodealliance/wasmtime-go/issues/209</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime-go/issues/209\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/2c6fda941c71c3f35a46cb7d44f25e0182f30666\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f613234663662313337626364313230306339353239613831366637396230623430323236653938613666386361383061346333306132343361343337336133392f62797465636f6465616c6c69616e63652f7761736d74696d652d676f2f6973737565732f323039)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime-go/issues/209\" title=\"Feature request: support manual freeing of resources · Issue #209 · bytecodealliance/wasmtime-go\">Feature request: support manual freeing of resources · Issue #209 · bytecodealliance/wasmtime-go</a></div><div class=\"message_embed_description\">In a use-case that creates ephemeral stores and instances at high volume, such as on a per-request basis, it is easy to exhaust available memory. Currently, it appears that the go bindings rely on ...</div></div></div>",
+        "id": 421717166,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708022278
+    },
+    {
+        "content": "<p>This is a bit orthogonal at this point, but are y'all saying that wasmtime-go shouldn't have any finalizers at all? I agree it should have the option to explicitly finalize, but it'd be surprising to me if it's recommended to remove all finalizers</p>",
+        "id": 421717425,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022377
+    },
+    {
+        "content": "<p>insofar as I'd expect a managed language like Go to not have memory leaks by default, but if finalizers were removed then the wasmtime bindings would have memory leaks by default</p>",
+        "id": 421717494,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022400
+    },
+    {
+        "content": "<p>go finalizers have pretty weak guarantees, even in practice</p>",
+        "id": 421717655,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708022449
+    },
+    {
+        "content": "<p>I don't know what's idiomatic in Go, so no opinion on that from me, but you could equally say the C ABI has memory leaks by default (i.e. you have to explicitly call <code>wasmtime_store_delete</code> to avoid them).</p>",
+        "id": 421717697,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708022469
+    },
+    {
+        "content": "<p>Well no one expects C to manage memory for you, but I figured that users of Python and Go for example expect to not have memory leaks by default</p>",
+        "id": 421717791,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022504
+    },
+    {
+        "content": "<p>e.g. if I open a file in Python I'd expect that it'd eventually get closed when I stop referring to it</p>",
+        "id": 421717825,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022517
+    },
+    {
+        "content": "<p>like I understand nothing is deterministic about finalizers and it's a good point that finalizers hide the \"true cost\" of an object, but despite all that I was always under the impression that finalizers are exactly intended for this sort of use case of C ffi bindings cleanup</p>",
+        "id": 421717967,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022559
+    },
+    {
+        "content": "<p>Python is interesting because it has a reference-counting+plus-cycle-collector GC, so it tends to be more deterministic in practice (and thus maybe lean more heavily on finalizers).</p>",
+        "id": 421717971,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708022560
+    },
+    {
+        "content": "<p>(again not saying explicit finalizers shouldn't exist, that unambiguously is a good idea)</p>",
+        "id": 421718001,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022573
+    },
+    {
+        "content": "<p>I'm also asking b/c this would be a major change to the python/go bindings to remove finalizers</p>",
+        "id": 421718079,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022603
+    },
+    {
+        "content": "<p>FWIW, I think using finalizers as \"a backup\" for explicit disposal makes sense, and is common in Java at least.  I just don't know what's right for Go.</p>",
+        "id": 421718109,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708022616
+    },
+    {
+        "content": "<p>(I understand that the issue isn't saying remove finalizers, so talking about something somewhat orthogonal now)</p>",
+        "id": 421718117,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022618
+    },
+    {
+        "content": "<p>Another option would be to print a warning in the finalizer.</p>",
+        "id": 421718204,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708022645
+    },
+    {
+        "content": "<p>Which I've seen in Python.</p>",
+        "id": 421718253,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708022657
+    },
+    {
+        "content": "<p>yeah that makes sense to me, but it from</p>\n<blockquote>\n<p>fwiw, using finalizers is quite rare in Go; people expect to manually clean up unmanaged resources</p>\n</blockquote>\n<p>it sounded like <span class=\"user-mention\" data-user-id=\"480579\">@Lann Martin</span> was saying we should remove the current finalizers</p>",
+        "id": 421718271,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022665
+    },
+    {
+        "content": "<p>oh interesting (about warnings)</p>",
+        "id": 421718320,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022690
+    },
+    {
+        "content": "<p>that was more a response to <span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span>'s micro-rant <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 421718428,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708022738
+    },
+    {
+        "content": "<p>I would agree that using a finalizer as backup to an explicit close makes sense</p>",
+        "id": 421718481,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708022760
+    },
+    {
+        "content": "<p>We should print a warning in the finalizers that includes a link to my micro-rant on Zulip.</p>",
+        "id": 421718557,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708022776
+    },
+    {
+        "content": "<p>can I include your email in the warning?</p>",
+        "id": 421718589,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022791
+    },
+    {
+        "content": "<p>thanks Geoff for opening <a href=\"https://github.com/bytecodealliance/wasmtime-go/issues/209\">https://github.com/bytecodealliance/wasmtime-go/issues/209</a>! would you be interested in helping to implement that? I'd be happy to review!</p>\n<p>It also sounds like we should mirror that in the wasmtime-py Python bindings</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime-go/issues/209\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/2c6fda941c71c3f35a46cb7d44f25e0182f30666\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f613234663662313337626364313230306339353239613831366637396230623430323236653938613666386361383061346333306132343361343337336133392f62797465636f6465616c6c69616e63652f7761736d74696d652d676f2f6973737565732f323039)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime-go/issues/209\" title=\"Feature request: support manual freeing of resources · Issue #209 · bytecodealliance/wasmtime-go\">Feature request: support manual freeing of resources · Issue #209 · bytecodealliance/wasmtime-go</a></div><div class=\"message_embed_description\">In a use-case that creates ephemeral stores and instances at high volume, such as on a per-request basis, it is easy to exhaust available memory. Currently, it appears that the go bindings rely on ...</div></div></div>",
+        "id": 421718818,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708022869
+    },
+    {
+        "content": "<p>FWIW, on the Python guest side we make <code>resource</code> handles implement <code>ContextManager</code>, allowing them to be used in <code>with</code> statements.  I'm guessing we'll want to do something similar on the host side.</p>\n<p>Likewise, it might be worth looking at how the folks building guest tooling for Go are handling <code>resource</code> handles.</p>",
+        "id": 421719169,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708022982
+    },
+    {
+        "content": "<p><code>resource</code> handle lifetimes really have to be managed explicitly due to parent-child relationships</p>",
+        "id": 421719352,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708023045
+    },
+    {
+        "content": "<p>for sure yeah</p>",
+        "id": 421719387,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708023059
+    },
+    {
+        "content": "<p>this really shows that someone other than me, who knows very little of Python and Go, should be primarily maintaining wasmtime-{go,py}</p>",
+        "id": 421719422,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708023076
+    },
+    {
+        "content": "<p>(the silence you're hearing is the sound of nobody volunteering)</p>",
+        "id": 421719637,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708023157
+    },
+    {
+        "content": "<p>it's ok issues are enough of a signal for now :)</p>",
+        "id": 421719703,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708023183
+    },
+    {
+        "content": "<p>Sorry, in a 1:1</p>",
+        "id": 421719741,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708023202
+    },
+    {
+        "content": "<p>I'd be interested in the work but I can't realistically commit to the undertaking without setting folks (and myself) up for disappointment. I'm still in the exploratory phase in seeing if WASM might form a strategic investment for us. I'm personally very bullish about the tech but there are quite a few more stakeholders.</p>",
+        "id": 421724333,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708024877
+    },
+    {
+        "content": "<p>I didn't mean to imply that you should volunteer to be the new <code>wasmtime-{go,py}</code> maintainer, FWIW.  What you're saying is totally reasonable.</p>",
+        "id": 421724838,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708025077
+    },
+    {
+        "content": "<p>I was just teasing Alex since he's maintainer of half the projects on the Internet.</p>",
+        "id": 421724936,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708025119
+    },
+    {
+        "content": "<p>only 40%</p>",
+        "id": 421725027,
+        "sender_full_name": "Ralph",
+        "timestamp": 1708025162
+    },
+    {
+        "content": "<blockquote>\n<p><code>resource</code> handle lifetimes really have to be managed explicitly due to parent-child relationships</p>\n</blockquote>\n<p>FWIW in JS we got around this by having the finalizer function closure itself maintain a strong GC link to the parent resource, so the GC can still work despite these, as suggested by <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span></p>",
+        "id": 421731356,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1708027416
+    },
+    {
+        "content": "<p>This seems very tricky since dropping a resource is sometimes a positive signal in e.g. wasi-http</p>",
+        "id": 421733393,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1708028241
+    },
+    {
+        "content": "<p>(yeah, we support GC as the backup, with explicit resource management as the first line approach (ready for the soon to be shipped <code>using</code>)) I don't think there's any disagreement here just noting that GC isn't inhibited by child resource relations</p>",
+        "id": 421733844,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1708028428
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"553681\">Guy Bedford</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Freeing.20resources.20in.20go.20bindings/near/421731356\">said</a>:</p>\n<blockquote>\n<p>FWIW in JS we got around this by having the finalizer function closure itself maintain a strong GC link to the parent resource, so the GC can still work despite these, as suggested by <span class=\"user-mention silent\" data-user-id=\"253994\">Alex Crichton</span></p>\n</blockquote>\n<p>That's a cool trick.  I should do that in <code>componentize-py</code>, too.</p>",
+        "id": 421741558,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1708031487
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"553681\">@Guy Bedford</span> any chance you could point me to where you are employing that trick?</p>",
+        "id": 421767725,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708044553
+    },
+    {
+        "content": "<blockquote>\n<p>this really shows that someone other than me, who knows very little of Python and Go, should be primarily maintaining wasmtime-{go,py}</p>\n</blockquote>\n<p>I will discuss this in the sig go subgroup to check interests for maintaining the wasmtime-go sdk.</p>",
+        "id": 422485610,
+        "sender_full_name": "Mossaka (Joe)",
+        "timestamp": 1708456518
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> a big thank you. Testing now.</p>",
+        "id": 422708927,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708551514
+    },
+    {
+        "content": "<p>No more memory exhaustion AFAICT. <span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span></p>",
+        "id": 422727983,
+        "sender_full_name": "Geoff Goodman",
+        "timestamp": 1708562891
+    }
+]

@@ -1,0 +1,740 @@
+[
+    {
+        "content": "<p>I know I can use <code>wasmtime compile -o expr2.cwasm expr2.wasm</code>, which will generate native machine code, however it is not a standalone binary that I can just run, it seems it still requires some kind of a runtime or other infrastructure to actually run.</p>\n<p>How can I create a standalone native binary?</p>\n<p>We use WASM as one of the backends in the LFortran/LPython compilers. And we wrote our own WASM-&gt;x64 binary generator that generates standalone binaries, here it is: <a href=\"https://github.com/lcompilers/lpython/blob/5b51c3cf8879bdd8f3c567ed38262e6b9ea55126/src/libasr/codegen/wasm_to_x64.cpp\">https://github.com/lcompilers/lpython/blob/5b51c3cf8879bdd8f3c567ed38262e6b9ea55126/src/libasr/codegen/wasm_to_x64.cpp</a>. It works great, for the subset that we currently support, and it generates a native binary that you just run.</p>\n<p>However, instead of us maintaining such a WASM to binary compiler, is there some tool that can do this that we could just use and collaborate on?</p>",
+        "id": 393495888,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695823181
+    },
+    {
+        "content": "<p>I can at least confirm that Wasmtime doesn't support this feature. (it'd be neat to add though!) I'll let others chime in though if they know of tools to do this.</p>",
+        "id": 393504323,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695824672
+    },
+    {
+        "content": "<p>It would be nice if you could deserialize a module/component by mmaping from a text section.</p>",
+        "id": 393506488,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1695825170
+    },
+    {
+        "content": "<p>Yeah, I was just going to suggest using <code>include_bytes!(\"path/to/cwasm\")</code> in a Rust program that embeds Wasmtime.  You could do that today, but an mmap capability would make it more efficient.</p>",
+        "id": 393506886,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695825271
+    },
+    {
+        "content": "<p>Ideally, there would be a way to do it without requiring a Rust compiler or linker to be installed, but I don't know of any such tool.  Certainly would be a fun thing to build, though.</p>",
+        "id": 393508236,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695825615
+    },
+    {
+        "content": "<p>if you want to take this to the limit I think it would be possible to create a very stripped down Wasmtime build which support purely a single instance being created. We could probably use ELF sections to reserve space for linear memory and everything. In that sense it'd be theoretically possible to have a tiny <code>libwasmtime-exe.a</code> (or whatever) which is linked with a native linker to the <code>*.cwasm</code> we produce and then there's a whole bunch of static calls between everything.</p>\n<p>That all being said it would still require a native linker and support like wasmtime-wasi so there's still a mess of runtime bits involved, and producing this artifact would be somewhat nontrivial, so probably much better to instead have a program with <code>wasmtime</code>-the-crate and the cwasm already mapped in in theory</p>",
+        "id": 393508867,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695825766
+    },
+    {
+        "content": "<p>For our compiler, we need to create native binaries. We are happy to create a standalone library out of our WASM-&gt;x64 backend, I think it doesn't depend on anything, which would allow us to collaborate on it with you. We still need to add Apple M1 support, right now we only support 64bit x86.</p>\n<p>In the meantime, to get started, is there some example in Rust that uses the <code>include_bytes!(\"path/to/cwasm\")</code> trick? My understanding is that it would include the native code (<code>cwasm</code>) and then somehow run it via the wasmtime rust library? So if I compile it with cargo/rust, it will create a standalone binary? That would indeed be a big step forward to what we need, and we might be able to take it and iterate further on it.</p>",
+        "id": 393512396,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695826755
+    },
+    {
+        "content": "<p>If you have a Rust compiler on-hand it's possible to construct a project that includes the <code>*.cwasm</code>, excludes Cranelift, and includes Wasmtime, and runs the wasm binary. My guess though is what you're looking for is probably a precompiled <code>*.a</code> which is linked with the <code>*.cwasm</code> or similar to create an executable, and that hasn't been done yet.</p>",
+        "id": 393514100,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695827195
+    },
+    {
+        "content": "<blockquote>\n<p>My guess though is what you're looking for is probably a precompiled *.a which is linked with the *.cwasm or similar to create an executable, and that hasn't been done yet.</p>\n</blockquote>\n<p>Yes, that's what I am looking for ultimately, but because it has not been done yet, the first approach is a good start:</p>\n<blockquote>\n<p>If you have a Rust compiler on-hand it's possible to construct a project that includes the *.cwasm, excludes Cranelift, and includes Wasmtime, and runs the wasm binary.</p>\n</blockquote>\n<p>Is there some example that does this?</p>",
+        "id": 393524277,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695830328
+    },
+    {
+        "content": "<p>I just started putting an example together.  I have a meeting now, but I should be able to post a GitHub link in a couple of hours.</p>",
+        "id": 393524787,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695830475
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> awesome, thank you, much appreciated!</p>",
+        "id": 393531764,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695832856
+    },
+    {
+        "content": "<p>A thought: ELF allows for the concept of an \"interpreter\"; in the usual Linux use-case, a dynamically-linked binary names <code>/lib64/ld-linux.so</code> or whatever (the dynamic linker) as its interpreter, and the kernel leaves all the processing of the actual program ELF to that. (One can actually do <code>/lib64/ld-linux.so my-program</code>, i.e. invoke the dynamic linker as a command, and this will work.) Could we make the interpreter field in the <code>.cwasm</code> (which is actually an ELF) be wasmtime itself, and make that work somehow?</p>",
+        "id": 393532360,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695833081
+    },
+    {
+        "content": "<p>Another variant of the idea could be to have a \"CLI stub\" that we prepend to the cwasm, and depend on a <a href=\"http://libwasmtime.so\">libwasmtime.so</a></p>",
+        "id": 393532591,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695833167
+    },
+    {
+        "content": "<p>oh man that'd be slick if you could <code>./foo.cwasm</code></p>",
+        "id": 393533127,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695833393
+    },
+    {
+        "content": "<p>I don't think you can use a binary as its own <code>.interp</code>... <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 393535948,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1695834413
+    },
+    {
+        "content": "<p>You could point at a system e.g. <code>/lib/wasmtime-ld.so</code>, but if you have that control you're probably better off using <code>binfmt_misc</code> (on linux anyway)</p>",
+        "id": 393536906,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1695834768
+    },
+    {
+        "content": "<p>ah, no, \"binary as its own interpreter\" isn't the suggestion, rather the .interp section in the .cwasm file</p>",
+        "id": 393536991,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695834800
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"654165\">@Ondřej Čertík</span> here's the example I threw together: <a href=\"https://github.com/dicej/cwasm-standalone\">https://github.com/dicej/cwasm-standalone</a>.  It uses Wasmtime 13's snapshot of WASI Preview 2, based on the component model.  You could alternatively do the same thing using WASI Preview 1 with a cwasm based on a core module if you preferred.  Happy to answer any questions about it.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/cwasm-standalone\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/6bbfc8cde89dd03f4396906fddd3b01359105e40\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316630363564313138353162356461663738643534303937383339343063666361306430643865376435313038626635653338663264386566626132623234632f646963656a2f637761736d2d7374616e64616c6f6e65)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/cwasm-standalone\" title=\"GitHub - dicej/cwasm-standalone\">GitHub - dicej/cwasm-standalone</a></div><div class=\"message_embed_description\">Contribute to dicej/cwasm-standalone development by creating an account on GitHub.</div></div></div>",
+        "id": 393537069,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695834839
+    },
+    {
+        "content": "<p>Right but what would you put in the .cwasm's <code>.interp</code> for wasmtime?</p>",
+        "id": 393537222,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1695834897
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"480579\">@Lann Martin</span> the interp field in the .cwasm would be <code>/usr/bin/wasmtime</code> or similar (perhaps <code>libwasmtime.so</code> if it has to be a shared object, though I think PIE executables are also technically shared objects these days)</p>",
+        "id": 393541236,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695836536
+    },
+    {
+        "content": "<p>One annoying thing about using <code>.interp</code> is that that would mean you don't get to use the usual ld-linux*.so, which means you can't easily dynamically link to any other libraries.</p>",
+        "id": 393548609,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1695839289
+    },
+    {
+        "content": "<p>An alternative would be to just make .cwasm files depend on <code>libwasmtime.so</code> as a normal dynamic library.</p>",
+        "id": 393548713,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1695839328
+    },
+    {
+        "content": "<p>It sounds like the two major things we'd need to do that are (i) have a main() stub that we prepend, basically <span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> 's thing above; and (ii) emit PLT relocs for libcalls?</p>",
+        "id": 393555956,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695842253
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> beautiful, thank you! That's exactly what I wanted. I tried it, it works. I then tried my own WASM file, so far I didn't succeed, here is exactly what I tried: <a href=\"https://github.com/dicej/cwasm-standalone/issues/1\">https://github.com/dicej/cwasm-standalone/issues/1</a>, if you see what I am doing wrong, let me know.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/cwasm-standalone/issues/1\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/7ce31a9ff89f66de38a9f3a12ef221f3c71eadb6\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f303662616439383939653137353235633039626236353763383333643561623230303938646139653338343264633430643433663533373061313866333435622f646963656a2f637761736d2d7374616e64616c6f6e652f6973737565732f31)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/cwasm-standalone/issues/1\" title=\"Using a custom wasm program · Issue #1 · dicej/cwasm-standalone\">Using a custom wasm program · Issue #1 · dicej/cwasm-standalone</a></div><div class=\"message_embed_description\">Here is what I tried: diff --git a/src/main.rs b/src/main.rs index 9f17a93..e4c0ec4 100644 --- a/src/main.rs +++ b/src/main.rs @@ -97,7 +97,8 @@ fn main() -&gt; Result&lt;()&gt; { &amp;unsafe { Component::deser...</div></div></div>",
+        "id": 393572581,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695849811
+    },
+    {
+        "content": "<p>I assume the g2.wasm in your example is a core module rather than a component (i.e. a file conforming to <a href=\"https://github.com/WebAssembly/component-model\">https://github.com/WebAssembly/component-model</a>)?  They both use the .wasm file extension, but the latter is a superset of the former.  My example involves pre-compiling a component at build time, and the runtime code expects a cwasm file containing a pre-compiled component.  If it gets a core module, it won't accept it.  If you change the runtime code to use the Wasmtime module API instead of the component API, you can make it run a core module instead.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/component-model\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/4242dad949c379ea56878049272ce424aad15ebc\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f656666323132363238623237393530313963663432356639396635396664353662643139653730616130303138376535326161653962333262383863366337622f576562417373656d626c792f636f6d706f6e656e742d6d6f64656c)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/component-model\" title=\"GitHub - WebAssembly/component-model: Repository for design and specification of the Component Model\">GitHub - WebAssembly/component-model: Repository for design and specification of the Component Model</a></div><div class=\"message_embed_description\">Repository for design and specification of the Component Model - GitHub - WebAssembly/component-model: Repository for design and specification of the Component Model</div></div></div>",
+        "id": 393573196,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695850120
+    },
+    {
+        "content": "<p>When I get a chance, I can create a branch that uses WASI Preview 1 and a core module instead of a component.</p>",
+        "id": 393573448,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695850218
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> here is our code: <a href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738103929\">https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738103929</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738103929\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/3ad698a35a765fe487c0e5736bc58708c84c9fdd\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f366437393265633161326365623530633335396334373130643563616164366262356234346230633239666561336136336431383932336238353465623133632f646963656a2f637761736d2d7374616e64616c6f6e652f6973737565732f31)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738103929\" title=\"Using a custom wasm program · Issue #1 · dicej/cwasm-standalone\">Using a custom wasm program · Issue #1 · dicej/cwasm-standalone</a></div><div class=\"message_embed_description\">Here is what I tried: diff --git a/src/main.rs b/src/main.rs index 9f17a93..e4c0ec4 100644 --- a/src/main.rs +++ b/src/main.rs @@ -97,7 +97,8 @@ fn main() -&gt; Result&lt;()&gt; { &amp;unsafe { Component::deser...</div></div></div>",
+        "id": 393573457,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695850220
+    },
+    {
+        "content": "<p>yeah, that's a core module</p>",
+        "id": 393573540,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695850247
+    },
+    {
+        "content": "<p>I am not well-versed in WASM, we just read the spec, produced the binary ourselves and then used wasmtime and nodejs in our tests, and we use WASI preview1. So we are using \"core module\" it seems. What should we be using?</p>",
+        "id": 393573602,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695850272
+    },
+    {
+        "content": "<p>Core module is fine -- it's just that I've been working on WASI Preview 2 and the component model lately, so that's what I defaulted to.  I'll post a link to a version that uses core modules.</p>",
+        "id": 393573744,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695850330
+    },
+    {
+        "content": "<p>Very good, thank you.</p>",
+        "id": 393573784,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695850350
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> we use our custom WASM backend in order to have quick compilation and runtime at <a href=\"https://dev.lfortran.org/\">https://dev.lfortran.org/</a> and <a href=\"https://dev.lpython.org/\">https://dev.lpython.org/</a>. That would not be possible with using LLVM (too big and slow).</p>",
+        "id": 393573861,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695850401
+    },
+    {
+        "content": "<p>Separately we also want a direct x86 (and arm) binary generation, not using LLVM, for Debug builds which require very fast compilation. So we thought why not use our WASM backend and just write the WASM-&gt;binary part? So we did exactly that, so far it seems very simple and maintainable.</p>",
+        "id": 393574035,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695850480
+    },
+    {
+        "content": "<p>Are you saying that the \"component\" is a subset of the \"core module\"? So it seems we should be using a \"component\"? For our use case (see my last comment), our main goal is to piggyback (and be compatible) with the state-of-the-art and all the WASM tooling, that way we only have to maintain what is specific to our compilers, the rest we can maintain collaboratively with the WASM community, which seems like a win-win.</p>",
+        "id": 393574697,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695850829
+    },
+    {
+        "content": "<p>Components are a <em>superset</em> of core modules. Some relatively easy reading here: <a href=\"https://github.com/WebAssembly/component-model/tree/main/design/high-level\">https://github.com/WebAssembly/component-model/tree/main/design/high-level</a></p>",
+        "id": 393575276,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1695851183
+    },
+    {
+        "content": "<p>(less-easy reading elsewhere in that repo <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>)</p>",
+        "id": 393575292,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1695851196
+    },
+    {
+        "content": "<p>First: yes, I've read about LFortran and LPython and I think they're super exciting projects.  I'm especially eager to see SciPy, OpenBLAS, etc. supported.</p>\n<p>The component model can be considered a superset of the core WebAssembly specification.  There's a tool called <code>wit-component</code> (part of <code>wasm-tools</code>) that will automatically convert from a WASI Preview 1 core module to a WASI Preview 2 component.  For the time being, it's totally fine if your toolchain only targets WASI Preview 1, since you (or your users) can always use <code>wit-component</code> to turn that Preview 1 module into a Preview 2 component.  Eventually, you'll want to consider targetting Preview 2 and the component model directly, but it's not released yet, so no hurry :)</p>",
+        "id": 393575327,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695851221
+    },
+    {
+        "content": "<p>Ah, so let me install wit-component, and try it!</p>",
+        "id": 393575402,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695851263
+    },
+    {
+        "content": "<p>If you have Rust, you can <code>cargo install wasm-tools</code></p>",
+        "id": 393575485,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695851302
+    },
+    {
+        "content": "<p>When using <code>wit-component</code>, you'll need to specify which WASI adapter to use.  You'll want to use <a href=\"https://github.com/bytecodealliance/wasmtime/releases/download/v13.0.0/wasi_snapshot_preview1.command.wasm\">https://github.com/bytecodealliance/wasmtime/releases/download/v13.0.0/wasi_snapshot_preview1.command.wasm</a> in order to make the component compatible with Wasmtime 13, which is what my example above uses.</p>",
+        "id": 393575604,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695851388
+    },
+    {
+        "content": "<p>Since Preview 2 hasn't stabilized yet, it's still changing from one release to the next, so the adapter needs to match the host implementation in Wasmtime.</p>",
+        "id": 393575719,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695851445
+    },
+    {
+        "content": "<p>More introductory docs, for reference: <a href=\"https://component-model.bytecodealliance.org/\">https://component-model.bytecodealliance.org/</a></p>",
+        "id": 393575795,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695851508
+    },
+    {
+        "content": "<p>On it!</p>",
+        "id": 393576336,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695851834
+    },
+    {
+        "content": "<p>(Yes, we are making excellent progress with compiling SciPy, can now fully compile several of the Fortran modules via our LLVM backend, and all SciPy tests pass.)</p>",
+        "id": 393576378,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695851865
+    },
+    {
+        "content": "<p>Ok, I have <code>.cargo/bin/wasm-tools</code> but not <code>.cargo/bin/wit-component</code></p>",
+        "id": 393576505,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695851928
+    },
+    {
+        "content": "<p>ok, figured it out: <a href=\"https://crates.io/crates/wit-component\">https://crates.io/crates/wit-component</a>, <code>wasm-tools component new core.wasm -o component.wasm</code></p>",
+        "id": 393577312,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695852436
+    },
+    {
+        "content": "<p>The <code>wit-component</code> gives me an error message: <a href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738151203\">https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738151203</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738151203\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/20434c631ea31de586224c1453d5e9d6e09eef1b\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f356436613031316661386230313762393263626164343336643866613837313464636238623030303734633832373835303661303438373734326530623836312f646963656a2f637761736d2d7374616e64616c6f6e652f6973737565732f31)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738151203\" title=\"Using a custom wasm program · Issue #1 · dicej/cwasm-standalone\">Using a custom wasm program · Issue #1 · dicej/cwasm-standalone</a></div><div class=\"message_embed_description\">Here is what I tried: diff --git a/src/main.rs b/src/main.rs index 9f17a93..e4c0ec4 100644 --- a/src/main.rs +++ b/src/main.rs @@ -97,7 +97,8 @@ fn main() -&gt; Result&lt;()&gt; { &amp;unsafe { Component::deser...</div></div></div>",
+        "id": 393577727,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695852708
+    },
+    {
+        "content": "<p>That's what I was saying about the adapter above.  Download that wasi_snapshot_preview1.command.wasm file I linked to and pass it as an <code>--adapter</code> argument to <code>wasm-tools component new</code>.<br>\nI'm almost finished with the module version of <code>cwasm-standalone</code>, BTW.</p>",
+        "id": 393578114,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695852954
+    },
+    {
+        "content": "<p>The conversion worked, thanks!</p>",
+        "id": 393578394,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695853104
+    },
+    {
+        "content": "<p>The modules branch uses WASI Preview 1 modules: <a href=\"https://github.com/dicej/cwasm-standalone/tree/modules\">https://github.com/dicej/cwasm-standalone/tree/modules</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/cwasm-standalone/tree/modules\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/da659ffd2136a09b8196e894539c8c64aa425b1f\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f633664613365343631396161323335653632373635373038393533623133393738653163386363343339393234383633616239323863383230376166616138662f646963656a2f637761736d2d7374616e64616c6f6e65)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/cwasm-standalone/tree/modules\" title=\"GitHub - dicej/cwasm-standalone at modules\">GitHub - dicej/cwasm-standalone at modules</a></div><div class=\"message_embed_description\">Contribute to dicej/cwasm-standalone development by creating an account on GitHub.</div></div></div>",
+        "id": 393579297,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695853648
+    },
+    {
+        "content": "<p>Let me try it. I can't figure out how to compile the component to cwasm: <a href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738177031\">https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738177031</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738177031\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/05d778469e6787d517db4759b55dec6830e87a03\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f356566613666386261343665626430373232376565633762626163633432306135666334393336343137393163323731643961313165616637356634396130622f646963656a2f637761736d2d7374616e64616c6f6e652f6973737565732f31)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/cwasm-standalone/issues/1#issuecomment-1738177031\" title=\"Using a custom wasm program · Issue #1 · dicej/cwasm-standalone\">Using a custom wasm program · Issue #1 · dicej/cwasm-standalone</a></div><div class=\"message_embed_description\">Here is what I tried: diff --git a/src/main.rs b/src/main.rs index 9f17a93..e4c0ec4 100644 --- a/src/main.rs +++ b/src/main.rs @@ -97,7 +97,8 @@ fn main() -&gt; Result&lt;()&gt; { &amp;unsafe { Component::deser...</div></div></div>",
+        "id": 393579796,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695853927
+    },
+    {
+        "content": "<p>You'll probably need a build of Wasmtime with the \"component-model\" feature enabled (e.g. <code>cargo install wasmtime-cli --features component-model</code>) in order to compile components to cwasm files.</p>",
+        "id": 393580194,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695854216
+    },
+    {
+        "content": "<p>I did.</p>",
+        "id": 393580239,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854250
+    },
+    {
+        "content": "<p>hmm, maybe the CLI doesn't support it yet</p>",
+        "id": 393580262,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695854266
+    },
+    {
+        "content": "<p>Regarding your <code>modules</code> branch, here are my results: <a href=\"https://github.com/dicej/cwasm-standalone/issues/2\">https://github.com/dicej/cwasm-standalone/issues/2</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/cwasm-standalone/issues/2\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/e55a2ebb496b7afb995e811ed7b53889aaa49fd6\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f373133393263376635373233353839333534613839623337356361313230383965613533653062326433306638623561313937626231383966313032386662612f646963656a2f637761736d2d7374616e64616c6f6e652f6973737565732f32)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/cwasm-standalone/issues/2\" title=\"Using preview1 core module · Issue #2 · dicej/cwasm-standalone\">Using preview1 core module · Issue #2 · dicej/cwasm-standalone</a></div><div class=\"message_embed_description\">Using the modules branch, commit 59c1481. diff --git a/src/main.rs b/src/main.rs index 9f17a93..e4c0ec4 100644 --- a/src/main.rs +++ b/src/main.rs @@ -97,7 +97,8 @@ fn main() -&gt; Result&lt;()&gt; { &amp;unsaf...</div></div></div>",
+        "id": 393580267,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854268
+    },
+    {
+        "content": "<p>ah, that should be easy to address.  An exit status of zero should just be ignored.  I'll take a look</p>",
+        "id": 393580383,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695854341
+    },
+    {
+        "content": "<p>The wasm module works in wasmtime, so it should be good.</p>",
+        "id": 393580412,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854367
+    },
+    {
+        "content": "<p>Yeah, I just pushed a change.  Please try the latest on the <code>modules</code> branch.</p>",
+        "id": 393580561,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695854473
+    },
+    {
+        "content": "<p>checking...</p>",
+        "id": 393580601,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854509
+    },
+    {
+        "content": "<p>It works!!</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">$</span><span class=\"w\"> </span><span class=\"n\">cargo</span><span class=\"w\"> </span><span class=\"n\">run</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">release</span>\n<span class=\"w\">   </span><span class=\"n\">Compiling</span><span class=\"w\"> </span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"w\"> </span><span class=\"n\">v0</span><span class=\"p\">.</span><span class=\"mf\">1.0</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">/</span><span class=\"n\">Users</span><span class=\"o\">/</span><span class=\"n\">ondrej</span><span class=\"o\">/</span><span class=\"n\">repos</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"p\">)</span>\n<span class=\"w\">    </span><span class=\"n\">Finished</span><span class=\"w\"> </span><span class=\"n\">release</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">optimized</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">target</span><span class=\"p\">(</span><span class=\"n\">s</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"mf\">4.27</span><span class=\"n\">s</span>\n<span class=\"w\">     </span><span class=\"n\">Running</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"o\">/</span><span class=\"n\">Users</span><span class=\"o\">/</span><span class=\"n\">ondrej</span><span class=\"o\">/</span><span class=\"n\">repos</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"err\">`</span>\n<span class=\"mi\">25</span>\n</code></pre></div>",
+        "id": 393580665,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854544
+    },
+    {
+        "content": "<p>Thank you so much for this <span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> ! I think this is solid:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">$</span><span class=\"w\"> </span><span class=\"n\">otool</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">L</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">Users</span><span class=\"o\">/</span><span class=\"n\">ondrej</span><span class=\"o\">/</span><span class=\"n\">repos</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span>\n<span class=\"o\">/</span><span class=\"n\">Users</span><span class=\"o\">/</span><span class=\"n\">ondrej</span><span class=\"o\">/</span><span class=\"n\">repos</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span>:\n    <span class=\"o\">/</span><span class=\"n\">usr</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">libiconv</span><span class=\"p\">.</span><span class=\"mf\">2.</span><span class=\"n\">dylib</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">compatibility</span><span class=\"w\"> </span><span class=\"n\">version</span><span class=\"w\"> </span><span class=\"mf\">7.0.0</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">current</span><span class=\"w\"> </span><span class=\"n\">version</span><span class=\"w\"> </span><span class=\"mf\">7.0.0</span><span class=\"p\">)</span>\n<span class=\"w\">    </span><span class=\"o\">/</span><span class=\"n\">usr</span><span class=\"o\">/</span><span class=\"n\">lib</span><span class=\"o\">/</span><span class=\"n\">libSystem</span><span class=\"p\">.</span><span class=\"n\">B</span><span class=\"p\">.</span><span class=\"n\">dylib</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">compatibility</span><span class=\"w\"> </span><span class=\"n\">version</span><span class=\"w\"> </span><span class=\"mf\">1.0.0</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">current</span><span class=\"w\"> </span><span class=\"n\">version</span><span class=\"w\"> </span><span class=\"mf\">1311.0.0</span><span class=\"p\">)</span>\n</code></pre></div>\n<p>and</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">$</span><span class=\"w\"> </span><span class=\"n\">ll</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">h</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">Users</span><span class=\"o\">/</span><span class=\"n\">ondrej</span><span class=\"o\">/</span><span class=\"n\">repos</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span>\n<span class=\"o\">-</span><span class=\"n\">rwxr</span><span class=\"o\">-</span><span class=\"n\">xr</span><span class=\"o\">-</span><span class=\"n\">x</span><span class=\"w\">  </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"n\">ondrej</span><span class=\"w\">  </span><span class=\"n\">staff</span><span class=\"w\">   </span><span class=\"mf\">4.6</span><span class=\"n\">M</span><span class=\"w\"> </span><span class=\"n\">Sep</span><span class=\"w\"> </span><span class=\"mi\">27</span><span class=\"w\"> </span><span class=\"mi\">16</span>:<span class=\"mi\">42</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">Users</span><span class=\"o\">/</span><span class=\"n\">ondrej</span><span class=\"o\">/</span><span class=\"n\">repos</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span>\n</code></pre></div>",
+        "id": 393580719,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854596
+    },
+    {
+        "content": "<p>I am on Apple M1 Max.</p>",
+        "id": 393580748,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854618
+    },
+    {
+        "content": "<p>could try using <code>strip</code> to get it a bit smaller, maybe</p>",
+        "id": 393580774,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695854641
+    },
+    {
+        "content": "<p>I think this is the first time that we created a binary out of LFortran on M1 without LLVM.</p>",
+        "id": 393580816,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854645
+    },
+    {
+        "content": "<p>And without our C backend.</p>",
+        "id": 393580823,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854654
+    },
+    {
+        "content": "<p>After <code>strip</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">$</span><span class=\"w\"> </span><span class=\"n\">ll</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">h</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">Users</span><span class=\"o\">/</span><span class=\"n\">ondrej</span><span class=\"o\">/</span><span class=\"n\">repos</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span>\n<span class=\"o\">-</span><span class=\"n\">rwxr</span><span class=\"o\">-</span><span class=\"n\">xr</span><span class=\"o\">-</span><span class=\"n\">x</span><span class=\"w\">  </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"n\">ondrej</span><span class=\"w\">  </span><span class=\"n\">staff</span><span class=\"w\">   </span><span class=\"mf\">3.3</span><span class=\"n\">M</span><span class=\"w\"> </span><span class=\"n\">Sep</span><span class=\"w\"> </span><span class=\"mi\">27</span><span class=\"w\"> </span><span class=\"mi\">16</span>:<span class=\"mi\">45</span><span class=\"w\"> </span><span class=\"o\">/</span><span class=\"n\">Users</span><span class=\"o\">/</span><span class=\"n\">ondrej</span><span class=\"o\">/</span><span class=\"n\">repos</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span><span class=\"o\">/</span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">release</span><span class=\"o\">/</span><span class=\"n\">cwasm</span><span class=\"o\">-</span><span class=\"n\">standalone</span>\n</code></pre></div>",
+        "id": 393580891,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854724
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> one more question --- for Debug builds that I just want as fast as possible to compile (but it's ok if it runs slower), this technology seems perfect. But for Release builds, where I want maximum performance at runtime --- can WASM, once the tooling is fully developed, match the performance of LLVM?</p>",
+        "id": 393581022,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854797
+    },
+    {
+        "content": "<p>Someone on the Cranelift team, e.g. <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> would be a better person to ask.  I imagine \"it depends\" <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 393581179,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695854915
+    },
+    {
+        "content": "<p>(I guess this cwasm-standalone is being compiled via rust, so it uses LLVM. However, the main code itself is just an ARM binary that wasmtime compiled from WASM, without any LLVM involved.)</p>",
+        "id": 393581209,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695854943
+    },
+    {
+        "content": "<p>right, it's the cwasm performance you care about, presumably</p>",
+        "id": 393581243,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695854966
+    },
+    {
+        "content": "<p>For Debug build I care about the performance of generating this small <code>/Users/ondrej/repos/cwasm-standalone/target/release/cwasm-standalone</code> binary.</p>",
+        "id": 393581334,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855012
+    },
+    {
+        "content": "<p>Right now it's slow, since rustc is involved, but that's only the first step (the initial prototype).</p>",
+        "id": 393581355,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855028
+    },
+    {
+        "content": "<p>This is nice, I think we can start testing with this at our CI.</p>",
+        "id": 393581408,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855081
+    },
+    {
+        "content": "<p>What is wasmtime doing in this cwasm \"driver\"? Is it just just supplying the WASI imports?</p>",
+        "id": 393581454,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855117
+    },
+    {
+        "content": "<p>And providing some \"main\" stub?</p>",
+        "id": 393581470,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855123
+    },
+    {
+        "content": "<p>Cranelift won't perform optimizatuons at this time such as loop unrolling, vectorization, or inlining, so it's expected that llvm binaries will generally be faster.</p>\n<p>Currently a lot of wasms are such that they are produced by llvm and cranelift takes optimized wasm and generates good code, and there we aim to be on the same level as llvm (somewhat). Definitely cranelift aims to match the optimizing tiers of peer jits like spidermonkey and v8</p>",
+        "id": 393581506,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695855131
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> awesome. LFortran will eventually be able to produce optimized WASM binary. We are implementing unrolling, vectorization and inlining right now.</p>",
+        "id": 393581550,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855174
+    },
+    {
+        "content": "<p>So I think with cranelift this might be quite competitive!</p>",
+        "id": 393581571,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855192
+    },
+    {
+        "content": "<blockquote>\n<p>can WASM, once the tooling is fully developed, match the performance of LLVM?</p>\n</blockquote>\n<p>Within some margin, yeah -- there are two separate sources of the perf gap:</p>\n<ul>\n<li>Fundamental sandboxing overhead -- this is due to the need to bounds-check memory accesses (either with explicit compare-and-branch, or by adding a base pointer to access offsets in a 4GiB region; both have costs, the latter much less), to ensure control-flow integrity (check every 'switch'; there are no indirect branches), to check for stack overflow</li>\n<li>Compiler quality: as Alex mentions, Cranelift is targeting a different point. Eventually we could have better optimizations, with enough effort, under an optional setting; but keep in mind that LLVM is thousands of person-years of work at this point and Cranelift is like... three to seven engineers in a trenchcoat with a faded Firefox logo</li>\n</ul>",
+        "id": 393581604,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695855218
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> thanks! Why not optionally turn off sandboxing when performance is required?</p>",
+        "id": 393581715,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855285
+    },
+    {
+        "content": "<p>The latter can be improved, the former will always be there as \"the cost of sandboxing\"; I've seen it estimated that the fundamental cost of that is something like 10-30%, as a ceiling to perf</p>",
+        "id": 393581716,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695855286
+    },
+    {
+        "content": "<blockquote>\n<p>What is wasmtime doing in this cwasm \"driver\"? Is it just just supplying the WASI imports?</p>\n</blockquote>\n<p>Wasmtime is setting up the WASI environment and doing (hopefully minimal) preparation of the cwasm bytes for execution, setting up linear memory, and calling into the guest.  It's doing more work than a normal executable since it's sandboxing the guest, limiting its access to the host.</p>",
+        "id": 393581755,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695855326
+    },
+    {
+        "content": "<p>We are planning to have two Release modes. One ReleaseSafe, which would correspond to WASM+sandboxing. And then ReleaseFast, where all bounds checking are turned off.</p>",
+        "id": 393581756,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855327
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"654165\">@Ondřej Čertík</span> because that... wouldn't be Wasm anymore. It's not that there are separate checks we can turn off, it's that the basic building blocks require it: for example, Wasm provides a separate heap, with offsets starting at 0, and the cost we pay is adding the base pointer. Once we do that, the bounds-checking is \"free\" (virtual memory)</p>",
+        "id": 393581765,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695855334
+    },
+    {
+        "content": "<p>I see, right.</p>",
+        "id": 393581785,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855353
+    },
+    {
+        "content": "<p>So sandboxing is in some sense fundamental to WASM.</p>",
+        "id": 393581848,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855371
+    },
+    {
+        "content": "<p>yes, exactly</p>",
+        "id": 393581870,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1695855392
+    },
+    {
+        "content": "<p>So WASM is ideal for our ReleaseSafe mode.</p>",
+        "id": 393581891,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855410
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"509936\">Joel Dice</span> <a href=\"#narrow/stream/206238-general/topic/Can.20WASM.20be.20compiled.20to.20a.20standalone.20binary.3F/near/393581755\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>What is wasmtime doing in this cwasm \"driver\"? Is it just just supplying the WASI imports?</p>\n</blockquote>\n<p>Wasmtime is setting up the WASI environment and doing (hopefully minimal) preparation of the cwasm bytes for execution, setting up linear memory, and calling into the guest.  It's doing more work than a normal executable since it's sandboxing the guest, limiting its access to the host.</p>\n</blockquote>\n<p>How hard would it be to do exactly this work, but without having to call rustc all the time? So that LFortran can do this quickly?</p>",
+        "id": 393582016,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855487
+    },
+    {
+        "content": "<p>I think that's what Alex and Chris were talking about above, e.g. adding stuff to the cwasm to make it a position-independent executable.  Again, I'm probably not the one to ask, since they know more about that stuff than I.</p>",
+        "id": 393582096,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695855569
+    },
+    {
+        "content": "<p>We do that in fact today, via our custom WASM-&gt;x64 backend. But I am hoping to find some solution that we can be compatible with the current WASM tooling.</p>",
+        "id": 393582112,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855587
+    },
+    {
+        "content": "<p>For example, I like that cwasm that wasmtime produces --- for example LFortran could produce it directly (for speed reasons), but we can still use wasmtime to check our work.</p>",
+        "id": 393582200,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855629
+    },
+    {
+        "content": "<p>Then we can collaborate on the final stub, the current cwasm-standalone that you just created, but in some ways that doesn't require constant rustc recompilation.</p>",
+        "id": 393582341,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855699
+    },
+    {
+        "content": "<p>If you're able to accept a precompiled *.a source file with source you control it should be not too hard to whip up an equivalent to what Joel has</p>",
+        "id": 393582387,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695855719
+    },
+    {
+        "content": "<p>We currently can't accept .a yet, but we will eventually.</p>",
+        "id": 393582468,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855750
+    },
+    {
+        "content": "<p>Where your build process would create a cwasm, postprocess it slightly, and then invoke the native linker</p>",
+        "id": 393582469,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695855751
+    },
+    {
+        "content": "<p>For the fast compilation mode we use our own linker.</p>",
+        "id": 393582488,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855765
+    },
+    {
+        "content": "<p>But I think this can be all solved.</p>",
+        "id": 393582502,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855780
+    },
+    {
+        "content": "<p>Step by step. :)</p>",
+        "id": 393582513,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855786
+    },
+    {
+        "content": "<p>As long as we are compatible at each step.</p>",
+        "id": 393582538,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855808
+    },
+    {
+        "content": "<p>I think we will focus on cwasm and see if we can be compatible with wasmtime, and for now we can use the rustc workaround to produce the final executable.</p>",
+        "id": 393582633,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855872
+    },
+    {
+        "content": "<p>I'm imagining that the easiest thing would basically be to precompile what Joel already wrote where the final step is taking the <code>*.cwasm</code> and shoving it in at link-time somehow. Unsure how well that could fit into your linking process</p>",
+        "id": 393582638,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695855877
+    },
+    {
+        "content": "<p>Yes, exactly.</p>",
+        "id": 393582660,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855894
+    },
+    {
+        "content": "<p>Essentially doing the linking of Joel's code and our generated binary ourselves.</p>",
+        "id": 393582711,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855928
+    },
+    {
+        "content": "<p>Effectively we just need to control the <code>include_bytes</code> macro ourselves, without invoking rustc. At the binary level once everything is compiled.</p>",
+        "id": 393582778,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855970
+    },
+    {
+        "content": "<p>I am imagining that the wasmtime rust library just needs a pointer to it, loaded in memory?</p>",
+        "id": 393582803,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695855997
+    },
+    {
+        "content": "<p>So if we can create some C interface that accepts this pointer, that might be all that is needed. We'll use rustc to create such a \"C\" library and then LFortran just links everything together, no rustc involved.</p>",
+        "id": 393582867,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695856038
+    },
+    {
+        "content": "<p>Do you think that's possible?</p>",
+        "id": 393582890,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695856062
+    },
+    {
+        "content": "<p>What format would this C library have?  A .a file?  A .so file?  Something else?</p>",
+        "id": 393583013,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695856149
+    },
+    {
+        "content": "<p>i.e. what format would LFortran expect?</p>",
+        "id": 393583038,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695856195
+    },
+    {
+        "content": "<p>I think .a would be the best for static linking, .so would also work. Right now we generate a static binary out of WASM, but I think we have to extend it anyway to be able to link .a and .so libraries.</p>",
+        "id": 393609296,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695872612
+    },
+    {
+        "content": "<blockquote>\n<p>I've seen it estimated that the fundamental cost of that is something like 10-30%, as a ceiling to perf</p>\n</blockquote>\n<p>FWIW I think that might be too high an estimate. While I can't find a source for it rioght now, IIRC RLBox as used in Firefox has a single-digit % overhead</p>",
+        "id": 393681127,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1695898814
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"654165\">Ondřej Čertík</span> <a href=\"#narrow/stream/206238-general/topic/Can.20WASM.20be.20compiled.20to.20a.20standalone.20binary.3F/near/393581848\">said</a>:</p>\n<blockquote>\n<p>So sandboxing is in some sense fundamental to WASM.</p>\n</blockquote>\n<p>Yeah, I'd emphasize this a bit. It simply isn't WebAssembly if it doesn't have the sandbox (though there are other requirements). So you can do this! And it could use the bytecode and the tooling you've discussed. It's possible. But you couldn't portray that as being \"webassembly\" -- no sandbox. It's really just native code processed through the spec in some sense, or it sure seems that way.... Still might be what you want to do technically, can't be sure.</p>",
+        "id": 393690377,
+        "sender_full_name": "Ralph",
+        "timestamp": 1695901032
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"654165\">Ondřej Čertík</span> <a href=\"#narrow/stream/206238-general/topic/Can.20WASM.20be.20compiled.20to.20a.20standalone.20binary.3F/near/393609296\">said</a>:</p>\n<blockquote>\n<p>I think .a would be the best for static linking, .so would also work. Right now we generate a static binary out of WASM, but I think we have to extend it anyway to be able to link .a and .so libraries.</p>\n</blockquote>\n<p>Sure, if a .a works then we could definitely produce a <code>libcwasm-standalone.a</code> that provides a C function which accepts a pointer to a cwasm (plus any environment variables, directory mounts, etc.) and runs it.  Should be quite easy.  Does LFortran have the ability to link .a files into a final executable now, or is that something you're planning to add eventually?</p>",
+        "id": 393723829,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1695908866
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> perfect, let's go the <code>.a</code> route. We use the system linker with our default LLVM backend, and we allow linking 3rd party libraries. Our WASM backend just produces the core module, and our WASM-&gt;x64 backend currently creates the executable directly, no linking. However, we need the ability to link 3rd party code anyway, so we'll have to implement it.</p>",
+        "id": 393738198,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695911686
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"268586\">@Ralph</span> we are considering at least three modes:</p>\n<ul>\n<li>Debug: fast compilation, slower runtime, and no segfaults, all checking on (bounds checking, stack, pointers etc.), nice stack traces</li>\n<li>ReleaseSafe: all checks on, but otherwise as fast code as possible, slower compilation</li>\n<li>ReleaseFast: no runtime checks, maximum runtime speed, slow compilation (this is not safe to run in a browser obviously, but for computational code that you run yourself this is perfect)</li>\n</ul>\n<p>Right now we only have two modes, Debug and ReleaseFast, and we use LLVM for both.</p>\n<p>WASM, with sandboxing, seems like a great fit for both Debug and ReleaseSafe modes. Based on the discussion above, it might do ok for ReleaseFast as well, but LLVM might end up being a better fit there.</p>",
+        "id": 393740121,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695912045
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> here I created a proof of concept how to create the <code>.a</code> library: <a href=\"https://github.com/dicej/cwasm-standalone/pull/3\">https://github.com/dicej/cwasm-standalone/pull/3</a>, it works!! If you have suggestions how to improve it, please let me know.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/dicej/cwasm-standalone/pull/3\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/08fb89fd7eb8d043d3417cb3ad0fc6c5ec2f9555\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f353134633632393539653434306161383737343733383664643066326239396439303437346132616564313731306534613765366239373333333139646265642f646963656a2f637761736d2d7374616e64616c6f6e652f70756c6c2f33)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/dicej/cwasm-standalone/pull/3\" title=\"A proof of concept to create standalone C library by certik · Pull Request #3 · dicej/cwasm-standalone\">A proof of concept to create standalone C library by certik · Pull Request #3 · dicej/cwasm-standalone</a></div><div class=\"message_embed_description\">This contains all kinds of hardwired details, but it creates a standalone .a library, that I then link with a C code in a clean manner. It creates a 9MB binary and it works:\n$ ll -h driver\n-rwxr-xr...</div></div></div>",
+        "id": 393825825,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695948107
+    },
+    {
+        "content": "<p>Question: does it make sense for LFortran to generate <code>.cwasm</code> directly? Is the interface API (conventions) how to call this binary relatively stable, or does it change with every wasmtime release? Is it documented somewhere? </p>\n<p>If it changes too much, then perhaps we should collaborate at the <code>.wasm</code> level, and we'll maintain our own binary generation, and we can check against the <code>cwasm-standalone</code> above to ensure correctness, as well as against just <code>wasmtime guest.wasm</code>.</p>",
+        "id": 393838756,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1695955154
+    },
+    {
+        "content": "<p><code>.cwasm</code> only works with a single wasmtime version. It has a header with tge wasmtime version and the exact abi between compiled wasm modules and the runtime changes all the time.</p>",
+        "id": 393937382,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1695996246
+    },
+    {
+        "content": "<p>Yes it would not make sense for LFortran to generate <code>*.cwasm</code> directly, you'll want to generate <code>*.wasm</code> if you can</p>",
+        "id": 393937618,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1695996331
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span>, <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> thank you. In that case, it seems the best way forward for us is to keep producing the <code>.wasm</code> files as we do today, and then we'll maintain three paths forward:</p>\n<ul>\n<li>Our own WASM-&gt;x64/arm backends that produce a binary; quick compilation, small binary, but possibly not all WASM safety guarantees</li>\n<li>cwasm-standalone (see above) way of creating binaries, which produces a reasonably small binary (currently 100x bigger) in a reasonable time (currently 10x - 100x slower), but it keeps all WASM guarantees, which is nice, and it can act as a \"reference implementation\", to ensure our generated <code>.wasm</code> binary (and native binary) + all dependencies all work together well with regards to the standard WASM ecosystem.</li>\n<li>It works with <code>wasmtime a.wasm</code>; this is the most common/standard usage in WASM, ensuring that it works well</li>\n</ul>\n<p>We also provide a JS file that makes exactly the same wasm binary run in a browser, which we also want.</p>",
+        "id": 393956061,
+        "sender_full_name": "Ondřej Čertík",
+        "timestamp": 1696002003
+    },
+    {
+        "content": "<p><code>wasm2c</code> (WABT) can produce files that can be built standalone-ish, at least you will get a native object file, it has a runtime which you'd need to link against.</p>",
+        "id": 394725836,
+        "sender_full_name": "Petr Penzin",
+        "timestamp": 1696376360
+    },
+    {
+        "content": "<p>I saw a video showing that wasmer can take a wasm file and make a \"native\" executable out of it (like an .exe) by bundling the wasmer runtime into the executable, so that you don't need to have wasmer installed to run it.</p>\n<p>Unfortunatelly, I cannot seem to find the video anymore or find any documentation on this.</p>",
+        "id": 410834839,
+        "sender_full_name": "Karel Hrkal (kajacx)",
+        "timestamp": 1704196400
+    }
+]

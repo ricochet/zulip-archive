@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>fitzgen opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978\">PR #8978</a> from <code>fitzgen:user-stack-maps-and-moving-gc</code> to <code>bytecodealliance:main</code>:</p>\n<blockquote>\n<p>This refactors the way that user stack maps work such that they are compatible with moving GCs. We now keep every GC value in a stack slot, spill to the stack slot on the value's definition, and reload from the stack slot on every use. This means that we can generate a bunch of redundant loads, but we let the mid-end's alias analysis clean that up. This has the added benefit of reducing the length of live ranges for GC values and also means we don't need to proactively spill every single live GC values at each safepoint, because we know they are already spilled. This latter bit actually helps us avoid an accidentally quadratic issue with many, long, overlapping live ranges where we would do <code>O(n^2)</code> spills for a series of safepoints that keep creating more GC refs.</p>\n<p>We also implement two further optimizations:</p>\n<ol>\n<li>\n<p>We lazily allocate slots for live GC values, which means that if a GC value is not ever live across a safepoint, then we do never allocate a stack slot for it and never spill it to the stack slot. If we didn't do this, then frames would be larger and we'd have a dead store to the stack slot that would otherwise require the mid-end to grow a dead-store-elimination pass.</p>\n</li>\n<li>\n<p>We keep a free list of available slots that will never be used again, and we reuse slots from here when possible. This means that a chain of non-overlapping live ranges, each of which still needs to appear in some safepoint's stack map, will all reuse the same stack slot, keeping frames from being bloated.</p>\n</li>\n</ol>\n<p>Finally, this commit also introduces some logs for the liveness analysis to ease future debugging.</p>\n<p>&lt;!--<br>\nPlease make sure you include the following information:</p>\n<ul>\n<li>\n<p>If this work has been discussed elsewhere, please include a link to that<br>\n  conversation. If it was discussed in an issue, just mention \"issue #...\".</p>\n</li>\n<li>\n<p>Explain why this change is needed. If the details are in an issue already,<br>\n  this can be brief.</p>\n</li>\n</ul>\n<p>Our development process is documented in the Wasmtime book:<br>\n<a href=\"https://docs.wasmtime.dev/contributing-development-process.html\">https://docs.wasmtime.dev/contributing-development-process.html</a></p>\n<p>Please ensure all communication follows the code of conduct:<br>\n<a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md\">https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md</a><br>\n--&gt;</p>\n</blockquote>",
+        "id": 452635445,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721413312
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/cfallin\">cfallin</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978\">PR #8978</a>.</p>",
+        "id": 452635447,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721413313
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-default-reviewers\">wasmtime-default-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978\">PR #8978</a>.</p>",
+        "id": 452635448,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721413313
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers\">wasmtime-compiler-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978\">PR #8978</a>.</p>",
+        "id": 452635449,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721413313
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#pullrequestreview-2188927974\">PR review</a>:</p>\n<blockquote>\n<p>I think this is correct, just some nits below -- I'm glad our idea to fall back to stackslots is working out!</p>\n<p>I think we can land as-is if you prefer, but I do have some thoughts spawned from the handling of blockparams. My original thought when I suggested this was that (perhaps naively, but...) it would operate closer to the level of the frontend's \"variables\" that we use to represent Wasm locals, so that somehow we wouldn't need to handle blockparams -- since by construction, we insert blockparams only to carry the same variable from source block to dest block. I worry that inserting reloads and respills (if I've understood the above correctly) could lead to unexpected worst-case behavior still. (In the <code>vars_block_params_and_needs_stack_map</code> test example, <code>x</code> would have one stackslot, we would overwrite it in both <code>block1</code> and <code>block2</code>, and we wouldn't need loads at those blocks' tails and a re-store at <code>block3</code>.)</p>\n<p>I think that if we have a closer correspondence between frontend variables (i.e. Wasm locals) and stackslots, we have a more understandable cost-model from the Wasm producer's point of view as well: at least in baseline compilers, locals generally become actual stack slots, so producers try to minimize local count and reuse them where possible. If we can carry over that consolidation to our IR, we have an understandable model of \"one store per write to a Wasm local, one load per use of a Wasm local\" which is great.</p>\n<p>As things are now I think we can still see higher-than-linear resulting code size from linear number of reads/writes to refs: imagine a <code>br_table</code> that fans out to N blocks, the first (innermost) of which overwrites a reftyped Wasm local with an existing def. Then when we process <code>end</code> opcodes and generate N merge-points in sequence, each merge point will have to reload and re-store the slot. Ideally we'd instead directly translate the update to the variable to a <code>stack_store</code> and the uses to <code>stack_load</code>s.</p>\n<p>I think that might point the way to an implementation solution that also avoids the need for the extra pass: branch in the variable-to-SSA-value translation to an alternate \"value just lives on stack\" path.</p>\n<p>Thoughts?</p>\n</blockquote>",
+        "id": 452641151,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721415155
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#pullrequestreview-2188927974\">PR review</a>:</p>\n<blockquote>\n<p>I think this is correct, just some nits below -- I'm glad our idea to fall back to stackslots is working out!</p>\n<p>I think we can land as-is if you prefer, but I do have some thoughts spawned from the handling of blockparams. My original thought when I suggested this was that (perhaps naively, but...) it would operate closer to the level of the frontend's \"variables\" that we use to represent Wasm locals, so that somehow we wouldn't need to handle blockparams -- since by construction, we insert blockparams only to carry the same variable from source block to dest block. I worry that inserting reloads and respills (if I've understood the above correctly) could lead to unexpected worst-case behavior still. (In the <code>vars_block_params_and_needs_stack_map</code> test example, <code>x</code> would have one stackslot, we would overwrite it in both <code>block1</code> and <code>block2</code>, and we wouldn't need loads at those blocks' tails and a re-store at <code>block3</code>.)</p>\n<p>I think that if we have a closer correspondence between frontend variables (i.e. Wasm locals) and stackslots, we have a more understandable cost-model from the Wasm producer's point of view as well: at least in baseline compilers, locals generally become actual stack slots, so producers try to minimize local count and reuse them where possible. If we can carry over that consolidation to our IR, we have an understandable model of \"one store per write to a Wasm local, one load per use of a Wasm local\" which is great.</p>\n<p>As things are now I think we can still see higher-than-linear resulting code size from linear number of reads/writes to refs: imagine a <code>br_table</code> that fans out to N blocks, the first (innermost) of which overwrites a reftyped Wasm local with an existing def. Then when we process <code>end</code> opcodes and generate N merge-points in sequence, each merge point will have to reload and re-store the slot. Ideally we'd instead directly translate the update to the variable to a <code>stack_store</code> and the uses to <code>stack_load</code>s.</p>\n<p>I think that might point the way to an implementation solution that also avoids the need for the extra pass: branch in the variable-to-SSA-value translation to an alternate \"value just lives on stack\" path.</p>\n<p>Thoughts?</p>\n</blockquote>",
+        "id": 452641153,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721415156
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#discussion_r1684806260\">PR review comment</a>:</p>\n<blockquote>\n<p>doesn't make a semantic difference here but style nit: semicolon after call?</p>\n</blockquote>",
+        "id": 452641154,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721415156
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#discussion_r1684818399\">PR review comment</a>:</p>\n<blockquote>\n<p>s/can clean these all up/should eventually be able to clean most of these up, when not needed/ (aspirational description is aspirational, hopefully we'll get there! but don't want to confuse in the meantime)</p>\n</blockquote>",
+        "id": 452641155,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721415156
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#discussion_r1684824436\">PR review comment</a>:</p>\n<blockquote>\n<p>Could we have a comment here describing why we need to back up? Is it that we need to pass over the stack-stores we just inserted for blockparams above?</p>\n<p>(And given that we do need this, is there any harm in making it unconditional, since it should be a no-op if we didn't insert anything?)</p>\n</blockquote>",
+        "id": 452641156,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721415156
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#discussion_r1684814841\">PR review comment</a>:</p>\n<blockquote>\n<p>perhaps abstract out to an analogous <code>process_use</code> lambda here to make things a bit clearer, as above for defs?</p>\n</blockquote>",
+        "id": 452641157,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721415156
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#discussion_r1684809610\">PR review comment</a>:</p>\n<blockquote>\n<p>If it's not too bad to do, could we have an enum for stack-slot size rather than a bare <code>u32</code>? Something like <code>enum StackSlotSize { Slot4, Slot8 }</code> and perhaps <code>.bytes()</code> and <code>.align()</code> methods as needed; and a <code>TryFrom&lt;ir::Type&gt;</code> impl maybe too...</p>\n<p>(To be clear, I'm suggesting this as a refactor wherever slot-sizes appear, the hashmap key here just prompted the thought)</p>\n</blockquote>",
+        "id": 452641158,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721415156
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#pullrequestreview-2189076764\">PR review</a>.</p>",
+        "id": 452652133,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721417879
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#discussion_r1684906830\">PR review comment</a>:</p>\n<blockquote>\n<p>We would actually need quite a few slot sizes, since we have types like <code>f64x8</code> in CLIF. I'm not fully convinced that we would actually benefit from such an <code>enum</code>, and even if we do want to go down that route, I'd want to do it in a separate PR.</p>\n<p>I did waffle back and forth between a full hash map here vs an array indexed by <code>log2(size)</code> like the old approach did all over the place. I opted to just go for the simplest, most-obvious implementation approach and figured we can come back and optimize if it is ever a perf bottleneck, but I suspect it really isn't.</p>\n<p>So given all that: are you okay with keeping this as-is for now at least?</p>\n</blockquote>",
+        "id": 452652134,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721417879
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#pullrequestreview-2189080729\">PR review</a>.</p>",
+        "id": 452652584,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721418068
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#discussion_r1684909392\">PR review comment</a>:</p>\n<blockquote>\n<p>Sure, it doesn't need to happen as part of this PR. (The reason for <code>TryFrom&lt;ir::Type&gt;</code> rather than <code>From</code> was exactly to address this -- I don't think we need to define a slot size for every type, only for types that the <code>cranelift-frontend</code> user puts into stackmaps -- and in general I find bare integers pretty error-prone; but happy to discuss further!)</p>\n</blockquote>",
+        "id": 452652585,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721418068
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978\">PR #8978</a>.</p>",
+        "id": 452660190,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721420154
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#issuecomment-2240058857\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978\">PR #8978</a>:</p>\n<blockquote>\n<blockquote>\n<p>operate closer to the level of the frontend's \"variables\"</p>\n</blockquote>\n<p>I also thought about creating a new entity for these things but I thought through how it would be used in <code>cranelift-wasm</code> and <code>wasmtime-cranelift</code> and my conclusion was that it would be a bit of a mess. First, we aren't <em>just</em> dealing with wasm locals, which are <code>Variable</code>s; we are also dealing with the results of calls and things like that, which produce <code>Value</code>s. So we have to have a solution for <code>Value</code>s either way. Second, <code>cranelift-wasm</code> doesn't make the decision whether certain types are managed by the GC or not, it is agnostic of runtime structures and implementation, <code>wasmtime-cranelift</code> makes those decisions based on its Wasmtime-specific knowledge. That means that <code>cranelift-wasm</code> would have to have some kind of <code>enum</code> of either a GC-managed <code>Variable</code> (or other new entity) or a plain <code>Value</code> and use that for its abstract operand stack, at which point the whole crate, essentially, is infected with this change and things are getting really hairy.</p>\n<p>For this reason, we decided it was better, at least for now, to play nice with the existing system and its existing entities, rather than overhaul everything.</p>\n<blockquote>\n<p>I think that might point the way to an implementation solution that also avoids the need for the extra pass: branch in the variable-to-SSA-value translation to an alternate \"value just lives on stack\" path.</p>\n</blockquote>\n<p>Unfortunately this won't work because the stack slots and liveness and all that are not created until we are finishing the function builder, long after calls to <code>builder.use_var</code>.</p>\n<p>Trevor and I talked about another solution for this specific problem though: if we maintain a backwards map from <code>Value</code> to the <code>Variable</code> that it is associated with (if any) then we can force all <code>Value</code>s for the same <code>Variable</code> to use the same stack slot. For <code>Value</code>s that are not associated with a <code>Variable</code>, they would use the same approach we have in this PR. But this is work for the future.</p>\n</blockquote>",
+        "id": 452662182,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721420858
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#issuecomment-2240085084\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978\">PR #8978</a>:</p>\n<blockquote>\n<blockquote>\n<p>I think we can land as-is if you prefer</p>\n</blockquote>\n<p>I'm going to go ahead and enqueue this for merging, but I am still interested in your responses above and in the inline thread!</p>\n</blockquote>",
+        "id": 452664919,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721422186
+    },
+    {
+        "content": "<p>fitzgen merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978\">PR #8978</a>.</p>",
+        "id": 453238912,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721670401
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#pullrequestreview-2192424030\">PR review</a>.</p>",
+        "id": 453264181,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721677574
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8978#discussion_r1687064138\">PR review comment</a>:</p>\n<blockquote>\n<p>Did this in <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8991\">https://github.com/bytecodealliance/wasmtime/pull/8991</a></p>\n</blockquote>",
+        "id": 453264182,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1721677574
+    }
+]

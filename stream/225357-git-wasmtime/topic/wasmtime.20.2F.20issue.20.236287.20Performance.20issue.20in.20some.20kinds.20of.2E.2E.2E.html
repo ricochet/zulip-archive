@@ -1,0 +1,395 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #6287 Performance issue in some kinds of... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html">wasmtime / issue #6287 Performance issue in some kinds of...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="352797082"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/352797082" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#352797082">(Apr 26 2023 at 13:16)</a>:</h4>
+<p>hungryzzz opened <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<h3>Description</h3>
+<p>Hi, I run the following case in different Wasm runtimes(after being compiled by <code>Emscripten</code>), and I find some performance differences between <code>wasmtime</code> and other 3 runtimes.</p>
+<div class="codehilite" data-code-language="C"><pre><span></span><code><span class="c1">// random.c</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10000000</span><span class="p">,</span><span class="w"> </span><span class="n">last</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">N</span><span class="o">--</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">last</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">last</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">33</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">13</span><span class="p">;</span><span class="w">  </span><span class="c1">// compound operations are + and %.</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">"%d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">last</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>Test Case</h3>
+<p><a href="https://github.com/bytecodealliance/wasmtime/files/11331076/random.wasm.txt">random.wasm.txt</a></p>
+<h3>Steps to Reproduce</h3>
+<ol>
+<li>
+<p>Compile the above C case using Emscripten<br>
+<code>emcc -sENVIRONMENT=shell -O2 -s WASM=1 -s TOTAL_MEMORY=512MB random.c -o random.wasm</code></p>
+</li>
+<li>
+<p>Execute the wasm file in different wasm runtimes and collect the execution time, all the compilation and execution options are default.</p>
+</li>
+</ol>
+<h3>Actual Results</h3>
+<p>The execution time(collected by <code>perf-tool</code>, probe begins when starting to execute the wasm code(<code>invoke_func</code> in <code>wasmtime</code>) and end in <code>sched:sched_process_exit</code>) in <code>wasmtime</code> is 3x slower than that in other 3 runtimes.</p>
+<p>And if I replace compound operations to other combinations, I find that in some situations, the execution time in <code>wasmtime</code> is 3x slower than that in other 3 runtimes, but sometimes not. The details are as follow:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: center;"></th>
+<th style="text-align: center;">\*/</th>
+<th style="text-align: center;">+%</th>
+<th style="text-align: center;">+/</th>
+<th style="text-align: center;">+\*</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;">wasmtime</td>
+<td style="text-align: center;">79362.79 us</td>
+<td style="text-align: center;">85006.50 us</td>
+<td style="text-align: center;">73508.21 us</td>
+<td style="text-align: center;">1577.37 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wasmer</td>
+<td style="text-align: center;">28642.15 us</td>
+<td style="text-align: center;">28935.57 us</td>
+<td style="text-align: center;">19977.13 us</td>
+<td style="text-align: center;">1965.65 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wasmedge</td>
+<td style="text-align: center;">22462.40 us</td>
+<td style="text-align: center;">24814.40 us</td>
+<td style="text-align: center;">74.27 us</td>
+<td style="text-align: center;">171.18 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wamr</td>
+<td style="text-align: center;">23018.67 us</td>
+<td style="text-align: center;">25328.92 us</td>
+<td style="text-align: center;">741.49 us</td>
+<td style="text-align: center;">856.79 us</td>
+</tr>
+</tbody>
+</table>
+<p>So I am wondering that there maybe some performance bugs when handling such compound operations.</p>
+<h3>Versions and Environment</h3>
+<ul>
+<li>Hardware Architecture: x86_64</li>
+<li>Operating system: Ubuntu 20.04</li>
+<li>CPU: Intel(R) Core(TM) i5-9500T CPU @ 2.20GHz</li>
+<li>Memory: 32GB</li>
+</ul>
+<h4>Emscripten</h4>
+<ul>
+<li>emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 3.1.24 (68a9f990429e0bcfb63b1cde68bad792554350a5)<br>
+clang version 16.0.0 (<a href="https://github.com/llvm/llvm-project">https://github.com/llvm/llvm-project</a> 277c382760bf9575cfa2eac73d5ad1db91466d3f)<br>
+Target: wasm32-unknown-emscripten<br>
+Thread model: posix</li>
+</ul>
+<h4>Wasm runtime version</h4>
+<ul>
+<li>wasmer: wasmer 3.2.0</li>
+<li>wasmtime: wasmtime-cli 8.0.0 (build from commit a3d9c2ca33a44220bbc82488e7064c6ae045a1dd)</li>
+<li>wasmedge: build from commit <a href="https://github.com/WasmEdge/WasmEdge/commit/381b7b28049b968297e6a585b92d1cba955def66">https://github.com/WasmEdge/WasmEdge/commit/381b7b28049b968297e6a585b92d1cba955def66</a></li>
+<li>wamr: iwasm 1.1.2</li>
+</ul>
+</blockquote>
+
+
+
+<a name="352797083"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/352797083" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#352797083">(Apr 26 2023 at 13:16)</a>:</h4>
+<p>hungryzzz labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<h3>Description</h3>
+<p>Hi, I run the following case in different Wasm runtimes(after being compiled by <code>Emscripten</code>), and I find some performance differences between <code>wasmtime</code> and other 3 runtimes.</p>
+<div class="codehilite" data-code-language="C"><pre><span></span><code><span class="c1">// random.c</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10000000</span><span class="p">,</span><span class="w"> </span><span class="n">last</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">N</span><span class="o">--</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">last</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">last</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">33</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">13</span><span class="p">;</span><span class="w">  </span><span class="c1">// compound operations are + and %.</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">"%d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">last</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>Test Case</h3>
+<p><a href="https://github.com/bytecodealliance/wasmtime/files/11331076/random.wasm.txt">random.wasm.txt</a></p>
+<h3>Steps to Reproduce</h3>
+<ol>
+<li>
+<p>Compile the above C case using Emscripten<br>
+<code>emcc -sENVIRONMENT=shell -O2 -s WASM=1 -s TOTAL_MEMORY=512MB random.c -o random.wasm</code></p>
+</li>
+<li>
+<p>Execute the wasm file in different wasm runtimes and collect the execution time, all the compilation and execution options are default.</p>
+</li>
+</ol>
+<h3>Actual Results</h3>
+<p>The execution time(collected by <code>perf-tool</code>, probe begins when starting to execute the wasm code(<code>invoke_func</code> in <code>wasmtime</code>) and end in <code>sched:sched_process_exit</code>) in <code>wasmtime</code> is 3x slower than that in other 3 runtimes.</p>
+<p>And if I replace compound operations to other combinations, I find that in some situations, the execution time in <code>wasmtime</code> is 3x slower than that in other 3 runtimes, but sometimes not. The details are as follow:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: center;"></th>
+<th style="text-align: center;">\*/</th>
+<th style="text-align: center;">+%</th>
+<th style="text-align: center;">+/</th>
+<th style="text-align: center;">+\*</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;">wasmtime</td>
+<td style="text-align: center;">79362.79 us</td>
+<td style="text-align: center;">85006.50 us</td>
+<td style="text-align: center;">73508.21 us</td>
+<td style="text-align: center;">1577.37 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wasmer</td>
+<td style="text-align: center;">28642.15 us</td>
+<td style="text-align: center;">28935.57 us</td>
+<td style="text-align: center;">19977.13 us</td>
+<td style="text-align: center;">1965.65 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wasmedge</td>
+<td style="text-align: center;">22462.40 us</td>
+<td style="text-align: center;">24814.40 us</td>
+<td style="text-align: center;">74.27 us</td>
+<td style="text-align: center;">171.18 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wamr</td>
+<td style="text-align: center;">23018.67 us</td>
+<td style="text-align: center;">25328.92 us</td>
+<td style="text-align: center;">741.49 us</td>
+<td style="text-align: center;">856.79 us</td>
+</tr>
+</tbody>
+</table>
+<p>So I am wondering that there maybe some performance bugs when handling such compound operations.</p>
+<h3>Versions and Environment</h3>
+<ul>
+<li>Hardware Architecture: x86_64</li>
+<li>Operating system: Ubuntu 20.04</li>
+<li>CPU: Intel(R) Core(TM) i5-9500T CPU @ 2.20GHz</li>
+<li>Memory: 32GB</li>
+</ul>
+<h4>Emscripten</h4>
+<ul>
+<li>emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 3.1.24 (68a9f990429e0bcfb63b1cde68bad792554350a5)<br>
+clang version 16.0.0 (<a href="https://github.com/llvm/llvm-project">https://github.com/llvm/llvm-project</a> 277c382760bf9575cfa2eac73d5ad1db91466d3f)<br>
+Target: wasm32-unknown-emscripten<br>
+Thread model: posix</li>
+</ul>
+<h4>Wasm runtime version</h4>
+<ul>
+<li>wasmer: wasmer 3.2.0</li>
+<li>wasmtime: wasmtime-cli 8.0.0 (build from commit a3d9c2ca33a44220bbc82488e7064c6ae045a1dd)</li>
+<li>wasmedge: build from commit <a href="https://github.com/WasmEdge/WasmEdge/commit/381b7b28049b968297e6a585b92d1cba955def66">https://github.com/WasmEdge/WasmEdge/commit/381b7b28049b968297e6a585b92d1cba955def66</a></li>
+<li>wamr: iwasm 1.1.2</li>
+</ul>
+</blockquote>
+
+
+
+<a name="352813781"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/352813781" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#352813781">(Apr 26 2023 at 14:13)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/6287#issuecomment-1523494797">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<p>Division and modulo are relatively slow on most cpu's. For small constant divisors there exist faster methods to perform these operations using multiplication and shifting which Cranelift doesn't currently support. This may be the reason that it is slower. I haven't looked at the disassembly of any of the other wasm engines though. By the way are you using the LLVM backend of Wasmer? Wasmer has a Cranelift backend too which should perform almost identically to Wasmtime.</p>
+</blockquote>
+
+
+
+<a name="353000871"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/353000871" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#353000871">(Apr 27 2023 at 00:33)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6287#issuecomment-1524295858">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<p>I thought I'd take a quick look at what code we generate for this program. It's interesting that LLVM has unrolled the loop four times, but that should be fine I think.</p>
+<p>In the wasm, the loop body is four copies of:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">      </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">33</span>
+<span class="w">      </span><span class="kt">i32</span><span class="p">.</span><span class="n">add</span>
+<span class="w">      </span><span class="kt">i32</span><span class="p">.</span><span class="k">const</span><span class="w"> </span><span class="mi">13</span>
+<span class="w">      </span><span class="kt">i32</span><span class="p">.</span><span class="n">rem_u</span>
+</code></pre></div>
+<p>We compile that to four copies of this sequence:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="mi">000000</span><span class="n">a6</span><span class="w">    </span><span class="mi">8</span><span class="n">d</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="mi">21</span><span class="w">                          </span><span class="n">lea</span><span class="w"> </span><span class="n">eax</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">rdx</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mh">0x21</span><span class="p">]</span>
+<span class="mi">000000</span><span class="n">a9</span><span class="w">    </span><span class="mi">48</span><span class="w"> </span><span class="mi">31</span><span class="w"> </span><span class="n">d2</span><span class="w">                          </span><span class="n">xor</span><span class="w"> </span><span class="n">rdx</span><span class="p">,</span><span class="w"> </span><span class="n">rdx</span>
+<span class="mi">000000</span><span class="n">ac</span><span class="w">    </span><span class="mi">41</span><span class="w"> </span><span class="n">f7</span><span class="w"> </span><span class="n">f3</span><span class="w">                          </span><span class="n">div</span><span class="w"> </span><span class="n">r11d</span>
+</code></pre></div>
+<p>(Except the first copy also loads the constant 13 into <code>%r11</code>. In this case, rematerialization is hurting us slightly since we have plenty of free registers.)</p>
+<p>I don't think we can do better than that except, as @bjorn3 says, by turning the division into multiplication by magic constants.</p>
+</blockquote>
+
+
+
+<a name="353006834"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/353006834" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#353006834">(Apr 27 2023 at 00:53)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6287#issuecomment-1524326877">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<p>Okay, that said, the bottom of the loop isn't ideal:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="mi">000000</span><span class="n">c1</span><span class="w">    </span><span class="mi">41</span><span class="w"> </span><span class="mi">83</span><span class="w"> </span><span class="n">ea</span><span class="w"> </span><span class="mi">04</span><span class="w">                       </span><span class="n">sub</span><span class="w"> </span><span class="n">r10d</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span>
+<span class="mi">000000</span><span class="n">c5</span><span class="w">    </span><span class="mi">45</span><span class="w"> </span><span class="mi">85</span><span class="w"> </span><span class="n">d2</span><span class="w">                          </span><span class="n">test</span><span class="w"> </span><span class="n">r10d</span><span class="p">,</span><span class="w"> </span><span class="n">r10d</span>
+<span class="mi">000000</span><span class="n">c8</span><span class="w">    </span><span class="mi">0</span><span class="n">f</span><span class="w"> </span><span class="mi">84</span><span class="w"> </span><span class="mi">08</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w"> </span><span class="mi">00</span><span class="w">                 </span><span class="n">je</span><span class="w"> </span><span class="mh">0xd6</span>
+<span class="mi">000000</span><span class="n">ce</span><span class="w">    </span><span class="mi">49</span><span class="w"> </span><span class="mi">89</span><span class="w"> </span><span class="n">d3</span><span class="w">                          </span><span class="n">mov</span><span class="w"> </span><span class="n">r11</span><span class="p">,</span><span class="w"> </span><span class="n">rdx</span>
+<span class="mi">000000</span><span class="n">d1</span><span class="w">    </span><span class="n">e9</span><span class="w"> </span><span class="n">c0</span><span class="w"> </span><span class="n">ff</span><span class="w"> </span><span class="n">ff</span><span class="w"> </span><span class="n">ff</span><span class="w">                    </span><span class="n">jmp</span><span class="w"> </span><span class="mh">0x96</span>
+</code></pre></div>
+<p>We have the value of <code>last</code> in <code>%r11</code> on entry to the loop, but during the first of the four unrolled copies of the loop body we switch over to keeping it in <code>%rdx</code>, due to the register constraint on the <code>div</code> instruction on x86. So at the end of the loop we have to copy it back to <code>%r11</code> if the loop is continuing. Since the move is only necessary on the critical edge, regalloc2 inserts it between the two branch instructions, which inhibits the machbuffer branch optimizations.</p>
+<p>cc @elliottt who might find this an interesting case to think about.</p>
+<p>I don't think this particular issue should have much of any effect on performance in anything other than the tiniest microbenchmarks, though. I suspect the cost of the division instruction is much more significant.</p>
+</blockquote>
+
+
+
+<a name="353167367"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/353167367" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#353167367">(Apr 27 2023 at 08:42)</a>:</h4>
+<p>hungryzzz <a href="https://github.com/bytecodealliance/wasmtime/issues/6287#issuecomment-1525142522">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<blockquote>
+<p>Division and modulo are relatively slow on most cpu's. For small constant divisors there exist faster methods to perform these operations using multiplication and shifting which Cranelift doesn't currently support. This may be the reason that it is slower. I haven't looked at the disassembly of any of the other wasm engines though. By the way are you using the LLVM backend of Wasmer? Wasmer has a Cranelift backend too which should perform almost identically to Wasmtime.</p>
+</blockquote>
+<p>Hi, I use the Cranelift backend of Wamser(default option), but the version(0.98) maybe different with Wasmtime. And I also use the LLVM backend of Wamser, I get the execution time is 25228.15 us, which is a little bit quicker than using Cranelift in Wamser.</p>
+</blockquote>
+
+
+
+<a name="353168619"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/353168619" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#353168619">(Apr 27 2023 at 08:44)</a>:</h4>
+<p>hungryzzz edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6287#issuecomment-1525142522">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<blockquote>
+<p>Division and modulo are relatively slow on most cpu's. For small constant divisors there exist faster methods to perform these operations using multiplication and shifting which Cranelift doesn't currently support. This may be the reason that it is slower. I haven't looked at the disassembly of any of the other wasm engines though. By the way are you using the LLVM backend of Wasmer? Wasmer has a Cranelift backend too which should perform almost identically to Wasmtime.</p>
+</blockquote>
+<p>Hi, I use the Cranelift backend of Wamser(default option), but the version(0.98) maybe different with Wasmtime. And I also get the execution time 25228.15 us under LLVM backend of Wamser, which is a little bit quicker than using Cranelift in Wamser.</p>
+</blockquote>
+
+
+
+<a name="354941366"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/354941366" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#354941366">(May 01 2023 at 18:04)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/6287#issuecomment-1530023710">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<p>It seems like we've bottomed this out as an issue in not doing the magic constant for divisions optimization anymore, and adding that back is tracked in <a href="https://github.com/bytecodealliance/wasmtime/issues/6049">https://github.com/bytecodealliance/wasmtime/issues/6049</a>, so I'm going to go ahead and close this issue. Thanks for bringing it to our attention @hungryzzz!</p>
+</blockquote>
+
+
+
+<a name="354941369"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236287%20Performance%20issue%20in%20some%20kinds%20of.../near/354941369" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236287.20Performance.20issue.20in.20some.20kinds.20of.2E.2E.2E.html#354941369">(May 01 2023 at 18:04)</a>:</h4>
+<p>fitzgen closed <a href="https://github.com/bytecodealliance/wasmtime/issues/6287">issue #6287</a>:</p>
+<blockquote>
+<h3>Description</h3>
+<p>Hi, I run the following case in different Wasm runtimes(after being compiled by <code>Emscripten</code>), and I find some performance differences between <code>wasmtime</code> and other 3 runtimes.</p>
+<div class="codehilite" data-code-language="C"><pre><span></span><code><span class="c1">// random.c</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10000000</span><span class="p">,</span><span class="w"> </span><span class="n">last</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">N</span><span class="o">--</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">last</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">last</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">33</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">13</span><span class="p">;</span><span class="w">  </span><span class="c1">// compound operations are + and %.</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">"%d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="w"> </span><span class="n">last</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>Test Case</h3>
+<p><a href="https://github.com/bytecodealliance/wasmtime/files/11331076/random.wasm.txt">random.wasm.txt</a></p>
+<h3>Steps to Reproduce</h3>
+<ol>
+<li>
+<p>Compile the above C case using Emscripten<br>
+<code>emcc -sENVIRONMENT=shell -O2 -s WASM=1 -s TOTAL_MEMORY=512MB random.c -o random.wasm</code></p>
+</li>
+<li>
+<p>Execute the wasm file in different wasm runtimes and collect the execution time, all the compilation and execution options are default.</p>
+</li>
+</ol>
+<h3>Actual Results</h3>
+<p>The execution time(collected by <code>perf-tool</code>, probe begins when starting to execute the wasm code(<code>invoke_func</code> in <code>wasmtime</code>) and end in <code>sched:sched_process_exit</code>) in <code>wasmtime</code> is 3x slower than that in other 3 runtimes.</p>
+<p>And if I replace compound operations to other combinations, I find that in some situations, the execution time in <code>wasmtime</code> is 3x slower than that in other 3 runtimes, but sometimes not. The details are as follow:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: center;"></th>
+<th style="text-align: center;">\*/</th>
+<th style="text-align: center;">+%</th>
+<th style="text-align: center;">+/</th>
+<th style="text-align: center;">+\*</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;">wasmtime</td>
+<td style="text-align: center;">79362.79 us</td>
+<td style="text-align: center;">85006.50 us</td>
+<td style="text-align: center;">73508.21 us</td>
+<td style="text-align: center;">1577.37 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wasmer</td>
+<td style="text-align: center;">28642.15 us</td>
+<td style="text-align: center;">28935.57 us</td>
+<td style="text-align: center;">19977.13 us</td>
+<td style="text-align: center;">1965.65 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wasmedge</td>
+<td style="text-align: center;">22462.40 us</td>
+<td style="text-align: center;">24814.40 us</td>
+<td style="text-align: center;">74.27 us</td>
+<td style="text-align: center;">171.18 us</td>
+</tr>
+<tr>
+<td style="text-align: center;">wamr</td>
+<td style="text-align: center;">23018.67 us</td>
+<td style="text-align: center;">25328.92 us</td>
+<td style="text-align: center;">741.49 us</td>
+<td style="text-align: center;">856.79 us</td>
+</tr>
+</tbody>
+</table>
+<p>So I am wondering that there maybe some performance bugs when handling such compound operations.</p>
+<h3>Versions and Environment</h3>
+<ul>
+<li>Hardware Architecture: x86_64</li>
+<li>Operating system: Ubuntu 20.04</li>
+<li>CPU: Intel(R) Core(TM) i5-9500T CPU @ 2.20GHz</li>
+<li>Memory: 32GB</li>
+</ul>
+<h4>Emscripten</h4>
+<ul>
+<li>emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 3.1.24 (68a9f990429e0bcfb63b1cde68bad792554350a5)<br>
+clang version 16.0.0 (<a href="https://github.com/llvm/llvm-project">https://github.com/llvm/llvm-project</a> 277c382760bf9575cfa2eac73d5ad1db91466d3f)<br>
+Target: wasm32-unknown-emscripten<br>
+Thread model: posix</li>
+</ul>
+<h4>Wasm runtime version</h4>
+<ul>
+<li>wasmer: wasmer 3.2.0</li>
+<li>wasmtime: wasmtime-cli 8.0.0 (build from commit a3d9c2ca33a44220bbc82488e7064c6ae045a1dd)</li>
+<li>wasmedge: build from commit <a href="https://github.com/WasmEdge/WasmEdge/commit/381b7b28049b968297e6a585b92d1cba955def66">https://github.com/WasmEdge/WasmEdge/commit/381b7b28049b968297e6a585b92d1cba955def66</a></li>
+<li>wamr: iwasm 1.1.2</li>
+</ul>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

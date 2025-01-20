@@ -1,0 +1,554 @@
+[
+    {
+        "content": "<p>Hello everybody. I'm new to the community, although I've been following WebAssembly for quite some time. I just started a new project that is going to be using WebAssembly. One of the requirements I have is to be able to use sockets. I know the support for sockets is not yet there so I thought I could help with that.</p>\n<p>This is the initial WASI additions, this only covers connect for the moment. I just wanted to get a feeling as to if this is the right direction or not before I continue and do the implementation on wasi-common.</p>\n<p>typenames.witx</p>\n<div class=\"codehilite\"><pre><span></span><code>;;; Socket type\n(typename $socktype\n  (enum\n    ;;; The file descriptor or file refers to a datagram socket.\n    $socket_dgram\n    ;;; The file descriptor or file refers to a byte-stream socket.\n    $socket_stream\n  )\n)\n\n;;; IP port number\n(typename $ipport u16)\n\n;;; An IPv4 address is a 32-bit number that uniquely identifies a network interface on a machine.\n(typename $ipaddr4\n  (struct\n    (field $n0 u8)\n    (field $n1 u8)\n    (field $h0 u8)\n    (field $h1 u8)\n  )\n)\n(typename $ipaddr4_array (array $ipaddr4))\n\n;;; An IPv6 address is a 128-bit number that uniquely identifies a network interface on a machine.\n(typename $ipaddr6\n  (struct\n    (field $n0 u16)\n    (field $n1 u16)\n    (field $n2 u16)\n    (field $n3 u16)\n    (field $h0 u16)\n    (field $h1 u16)\n    (field $h2 u16)\n    (field $h3 u16)\n  )\n)\n(typename $ipaddr6_array (array $ipaddr6))\n</code></pre></div>\n\n\n<p>wasi_snapshot_preview1.witx</p>\n<div class=\"codehilite\"><pre><span></span><code>;;; Resolves a hostname to one or more IPv4 addresses\n  ;;; Note: This is similar to `getaddrinfo` in POSIX\n  (@interface func (export &quot;addr_resolve_ip4&quot;)\n    ;;; Host to resolve\n    (param $host string)\n    (result $ipaddr4 $ipaddr4_array)\n    (result $error $errno)\n  )\n\n  ;;; Resolves a hostname to one or more IPv6 addresses\n  ;;; Note: This is similar to `getaddrinfo` in POSIX\n  (@interface func (export &quot;addr_resolve_ip6&quot;)\n    ;;; Host to resolve\n    (param $host string)\n    (result $ipaddr6 $ipaddr6_array)\n    (result $error $errno)\n  )\n\n  ;;; Open a local socket\n  ;;; Note: This is similar to `socket` in POSIX using PF_UNIX\n  (@interface func (export &quot;sock_open&quot;)\n    ;;; Socket type, either datagram or stream\n    (param $type $socktype)\n    ;;; The opened socket\n    (result $fd $fd)\n    (result $error $errno)\n  )\n\n  ;;; Open a IPv4 socket\n  ;;; Note: This is similar to `socket` in POSIX using PF_INET\n  (@interface func (export &quot;sock_open_ip4&quot;)\n    ;;; Socket type, either datagram or stream\n    (param $type $socktype)\n    ;;; The opened socket\n    (result $fd $fd)\n    (result $error $errno)\n  )\n\n  ;;; Open a IPv4 socket\n  ;;; Note: This is similar to `socket` in POSIX using PF_INET6\n  (@interface func (export &quot;sock_open_ip6&quot;)\n    ;;; Socket type, either datagram or stream\n    (param $type $socktype)\n    ;;; The opened socket\n    (result $fd $fd)\n    (result $error $errno)\n  )\n\n  ;;; Initiate a connection on a local socket\n  ;;; Note: This is similar to `connect` in POSIX, though rather than receiving a sockaddr\n  ;;; we splitted it into separate functions with different arguments.\n  (@interface func (export &quot;sock_connect&quot;)\n    ;;; Socket descriptor\n    (param $fd $fd)\n    ;;; Address of the local socket (ex &#39;/dev/tmp&#39;)\n    (param $addr string)\n    (result $error $errno)\n  )\n\n  ;;; Initiate a connection on a network socket using IPv4\n  ;;; Note: This is similar to `connect` in POSIX when the sockaddr uses AF_INET\n  (@interface func (export &quot;sock_connect_ip4&quot;)\n    ;;; Socket descriptor\n    (param $fd $fd)\n    ;;; Address of the network socket\n    (param $addr $ip4)\n    ;;; Port number to connect to\n    (param $port $ipport)\n    (result $error $errno)\n  )\n\n  ;;; Initiate a connection on a network socket using IPv4\n  ;;; Note: This is similar to `connect` in POSIX when the sockaddr uses AF_INET6\n  (@interface func (export &quot;sock_connect_ip6&quot;)\n    ;;; Socket descriptor\n    (param $fd $fd)\n    ;;; Address of the network socket\n    (param $addr $ip6)\n    ;;; Port number to connect to\n    (param $port $ipport)\n    (result $error $errno)\n  )\n</code></pre></div>\n\n\n<p>I tried to keep the spirit of other parts of WASI such as file functions, not sure that I got it right.</p>",
+        "id": 198607394,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590367411
+    },
+    {
+        "content": "<p>I just realized that wiggle doesn't support array result elements. So I copy the approach taken for fd_readdir. </p>\n<p>Here is the revised witx.</p>\n<div class=\"codehilite\"><pre><span></span><code>  ;;; Resolves a hostname to one or more IPv4 addresses.\n  ;;; Note: This is similar to `getaddrinfo` in POSIX\n  ;;;\n  ;;; When successful, the contents of the output buffer consist of a sequence of\n  ;;; IPv4 addresses. Each address entry consists of a ipaddr4_t object.\n  ;;\n  ;;; This function fills the output buffer as much as possible, potentially\n  ;;; truncating the last address entry. It is advisable that the buffer is\n  ;;; always multiple of ipaddr4_t size.\n  (@interface func (export &quot;addr_resolve_ip4&quot;)\n    ;;; Host to resolve\n    (param $host string)\n    ;;; The buffer where IP address are stored\n    (param $buf (@witx pointer u8))\n    (param $buf_len $size)\n    (result $error $errno)\n    ;;; The number of bytes stored in the buffer. If less than the size of the buffer, no more IP addresses are available.\n    (result $bufused $size)\n  )\n\n  ;;; Resolves a hostname to one or more IPv6 addresses.\n  ;;; Note: This is similar to `getaddrinfo` in POSIX\n  ;;;\n  ;;; When successful, the contents of the output buffer consist of a sequence of\n  ;;; IPv4 addresses. Each address entry consists of a ipaddr6_t object.\n  ;;\n  ;;; This function fills the output buffer as much as possible, potentially\n  ;;; truncating the last address entry. It is advisable that the buffer is\n  ;;; always multiple of ipaddr5_t size.\n  (@interface func (export &quot;addr_resolve_ip6&quot;)\n    ;;; Host to resolve\n    (param $host string)\n    ;;; The buffer where IP address are stored\n    (param $buf (@witx pointer u8))\n    (param $buf_len $size)\n    (result $error $errno)\n    ;;; The number of bytes stored in the buffer. If less than the size of the buffer, no more IP addresses are available.\n    (result $bufused $size)\n  )\n\n  ;;; Open a local socket\n  ;;; Note: This is similar to `socket` in POSIX using PF_UNIX\n  (@interface func (export &quot;sock_open&quot;)\n    ;;; Socket type, either datagram or stream\n    (param $type $socktype)\n    ;;; The opened socket\n    (result $fd $fd)\n    (result $error $errno)\n  )\n\n  ;;; Open a IPv4 socket\n  ;;; Note: This is similar to `socket` in POSIX using PF_INET\n  (@interface func (export &quot;sock_open_ip4&quot;)\n    ;;; Socket type, either datagram or stream\n    (param $type $socktype)\n    ;;; The opened socket\n    (result $fd $fd)\n    (result $error $errno)\n  )\n\n  ;;; Open a IPv4 socket\n  ;;; Note: This is similar to `socket` in POSIX using PF_INET6\n  (@interface func (export &quot;sock_open_ip6&quot;)\n    ;;; Socket type, either datagram or stream\n    (param $type $socktype)\n    ;;; The opened socket\n    (result $fd $fd)\n    (result $error $errno)\n  )\n\n  ;;; Initiate a connection on a local socket\n  ;;; Note: This is similar to `connect` in POSIX, though rather than receiving a sockaddr\n  ;;; we splitted it into separate functions with different arguments.\n  (@interface func (export &quot;sock_connect&quot;)\n    ;;; Socket descriptor\n    (param $fd $fd)\n    ;;; Address of the local socket (ex &#39;/dev/tmp&#39;)\n    (param $addr string)\n    (result $error $errno)\n  )\n\n  ;;; Initiate a connection on a network socket using IPv4\n  ;;; Note: This is similar to `connect` in POSIX when the sockaddr uses AF_INET\n  (@interface func (export &quot;sock_connect_ip4&quot;)\n    ;;; Socket descriptor\n    (param $fd $fd)\n    ;;; Address of the network socket\n    (param $addr $ipaddr4)\n    ;;; Port number to connect to\n    (param $port $ipport)\n    (result $error $errno)\n  )\n\n  ;;; Initiate a connection on a network socket using IPv4\n  ;;; Note: This is similar to `connect` in POSIX when the sockaddr uses AF_INET6\n  (@interface func (export &quot;sock_connect_ip6&quot;)\n    ;;; Socket descriptor\n    (param $fd $fd)\n    ;;; Address of the network socket\n    (param $addr $ipaddr6)\n    ;;; Port number to connect to\n    (param $port $ipport)\n    (result $error $errno)\n  )\n</code></pre></div>",
+        "id": 198627349,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590370459
+    },
+    {
+        "content": "<p>I would like to also add timeout for <code>connect</code> somehow, altho I am not sure as what would be the best approach for that except to make it always mandatory to provide a timeout. I guess the most natural approach would be to add a u16 there with zero being wait forever. Another note, still missing setsockopt equivalent too.</p>",
+        "id": 198627401,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590370591
+    },
+    {
+        "content": "<p>Hi! This is cool! I don't have a lot of time today or tomorrow to dig into this, but I wanted to quickly pop in here and say this is something we're interested in, and to feel free to ask questions and post ideas like this</p>",
+        "id": 198627574,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590370968
+    },
+    {
+        "content": "<p>at a quick glance, one idea: instead of having separate _ip4, _ip6, etc. variants of the functions, another option is to define <code>union</code> type with fields for each address type, so that applications wanting to support multiple address families don't need to have as many code paths</p>",
+        "id": 198627644,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590371065
+    },
+    {
+        "content": "<p>Yeah, I wasn't sure about splitting them up which is why I ask for feedback. I definitely didn't want to bring addrinfo, sockaddr, etc complexity. Didn't knew we had unions. I'll look into it.</p>",
+        "id": 198627699,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590371187
+    },
+    {
+        "content": "<p>Also as a heads up, I'll want to talk about how to fit this into WASI's capability-based security model, and I'll be happy to help figure that out when we're ready.</p>",
+        "id": 198627703,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590371213
+    },
+    {
+        "content": "<p>I have to head out now, but feel free to ask questions here, and I or others will answer them when we can!</p>",
+        "id": 198627749,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590371309
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> Thank you. I'll be happy to chat some more. Of course we need security features. My current line of thought is a basic feature gate, either you can connect or can't. After which we need some sort of whitelisting \"what\" you can connect to.  That one is more trickier. I mean is easy to whitelist and bunch of IP addresses, or even ranges but the problem lies on host address resolution, how can we avoid DNS spoofing I am not sure.</p>",
+        "id": 198628375,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590372656
+    },
+    {
+        "content": "<p>Ok. I've been working on this some more. Here is the revised WITX.</p>\n<p>typenames.witx</p>\n<div class=\"codehilite\"><pre><span></span><code>;;; Socket type\n(typename $sock_type\n  (enum u8\n    ;;; The file descriptor or file refers to a datagram socket.\n    $socket_dgram\n    ;;; The file descriptor or file refers to a byte-stream socket.\n    $socket_stream\n  )\n)\n\n;;; IP port number\n(typename $ip_port u16)\n\n;;; Address type\n(typename $addr_type\n  (enum u8\n    ;;; Unix local address\n    $local\n    ;;; IPv4 address\n    $ip4\n    ;;; IPv6 address\n    $ip6\n  )\n)\n\n;;; A local socket address such as /dev/sock\n(typename $addr_local\n  (struct\n    ;;; Pointer to the name of the socket\n    (field $path (@witx pointer u8))\n    ;;; The length of the name of the socket\n    (field $path_len $size)\n  )\n)\n\n;;; An IPv4 address is a 32-bit number that uniquely identifies a network interface on a machine.\n(typename $addr_ip4\n  (struct\n    (field $n0 u8)\n    (field $n1 u8)\n    (field $h0 u8)\n    (field $h1 u8)\n  )\n)\n\n;;; An IPv6 address is a 128-bit number that uniquely identifies a network interface on a machine.\n(typename $addr_ip6\n  (struct\n    (field $n0 u16)\n    (field $n1 u16)\n    (field $n2 u16)\n    (field $n3 u16)\n    (field $h0 u16)\n    (field $h1 u16)\n    (field $h2 u16)\n    (field $h3 u16)\n  )\n)\n\n;;; Union of all possible addresses type\n(typename $addr\n  (union $addr_type\n    (field $local $addr_local)\n    (field $ip4 $addr_ip4)\n    (field $ip6 $addr_ip6)\n  )\n)\n</code></pre></div>\n\n\n<p>wasi_snapshot_preview1.witx</p>\n<div class=\"codehilite\"><pre><span></span><code>  ;;; Resolves a hostname to one or more IP addresses.\n  ;;; Note: This is similar to `getaddrinfo` in POSIX\n  ;;;\n  ;;; When successful, the contents of the output buffer consist of a sequence of\n  ;;; IPv4 and/or IPv6 addresses. Each address entry consists of a addr_t object.\n  ;;\n  ;;; This function fills the output buffer as much as possible, potentially\n  ;;; truncating the last address entry. It is advisable that the buffer is\n  ;;; always multiple of addr_t size.\n  (@interface func (export &quot;addr_resolve&quot;)\n    ;;; Host to resolve\n    (param $host string)\n    ;;; The buffer where IP address are stored\n    (param $buf (@witx pointer u8))\n    (param $buf_len $size)\n    (result $error $errno)\n    ;;; The number of bytes stored in the buffer. If less than the size of the buffer, no more IP addresses are available.\n    (result $bufused $size)\n  )\n  ;;; Open a socket\n  ;;; Note: This is similar to `socket` in POSIX using PF_INET\n  (@interface func (export &quot;sock_open&quot;)\n    ;;; Address type\n    (param $addrtype $addr_type)\n    ;;; Socket type, either datagram or stream\n    (param $socktype $sock_type)\n    (result $error $errno)\n    ;;; The opened socket\n    (result $fd $fd)\n  )\n\n  ;;; Initiate a connection on a socket to the specified address\n  ;;; Note: This is similar to `connect` in POSIX\n  (@interface func (export &quot;sock_connect&quot;)\n    ;;; Socket descriptor\n    (param $fd $fd)\n    ;;; Address of the local socket (ex &#39;/dev/tmp&#39;)\n    (param $addr $addr)\n    (result $error $errno)\n  )\n</code></pre></div>",
+        "id": 198671079,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590414785
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> Given our discussion about passing unions. You still think that the union is the better choice vs having individual calls per protocol? I am even not sure that we should support local sockets vs just TCP/UDP. I'm intrigued about what others think on that subject.</p>",
+        "id": 198802839,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590518101
+    },
+    {
+        "content": "<p>I'm curious, what would a just-TCP/UDP API look like?</p>",
+        "id": 198802936,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590518160
+    },
+    {
+        "content": "<p>Berkeley sockets API is so pervasive, I myself don't know what an alternative would look like.</p>",
+        "id": 198803122,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590518254
+    },
+    {
+        "content": "<p>If we do go with sockets, then yes, I still think pointer to union (or union, if the witx tooling adds support for it) is the way to go.</p>",
+        "id": 198803246,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590518304
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> I meant higher level, akin to TcpStream in Rust. I agree with you about Sockets API, and I worry about C/C++ folks targeting WebAssembly that depend on that kind of API.</p>",
+        "id": 198803309,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590518346
+    },
+    {
+        "content": "<p>Even Rust's <code>TcpStream</code> is just a thin abstraction around Berkeley sockets.</p>",
+        "id": 198803519,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590518449
+    },
+    {
+        "content": "<p>Eg. <code>SocketAddr</code> is a Rust enum, which is just a more type-safe version of union :-)</p>",
+        "id": 198803544,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590518466
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> I know it is thanks to trait magic, but you can do <code>TcpStream::connect(\"rust-lang.org\")</code>. That looks high level, in the sense I don't have to go fetch addresses, open the socket, then connect, etc etc. That is what I mean by higher level. I'll keep on the current path don't worry.</p>",
+        "id": 198804245,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590518781
+    },
+    {
+        "content": "<p>Rust's API may be valuable to look at, because native socket APIs have accumulated a lot of flags and options, and Rust has done a lot of work to figure out which things are important</p>",
+        "id": 198804417,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590518861
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> Understood. Once I have something decent and tested. What would be my next step? Should I construct a PR? What is the process?</p>",
+        "id": 198804821,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1590519037
+    },
+    {
+        "content": "<p>Ah, I see. I think what we can say there is, even Rust retains the ability to do each of the steps separately if you want to, so we should focus on enabling that, and then we can talk about how to provide convenience functions that combine multiple steps into one</p>",
+        "id": 198804840,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590519050
+    },
+    {
+        "content": "<p>as a followup</p>",
+        "id": 198804880,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590519069
+    },
+    {
+        "content": "<p>Yeah, I think a PR would be a good next step</p>",
+        "id": 198804926,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590519089
+    },
+    {
+        "content": "<p>I don't know how well witx supports this yet, but I feel like it would be possible to use an object that \"remembers\" the type of the socket.</p>",
+        "id": 202196722,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1593279494
+    },
+    {
+        "content": "<p>As in, you can't mismatch the socket family and the address you use.</p>",
+        "id": 202196738,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1593279539
+    },
+    {
+        "content": "<p>I think that makes more sense than a union.</p>",
+        "id": 202196743,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1593279550
+    },
+    {
+        "content": "<p>The C API lets you do things like pass a sockaddr_un to a TCP socket or vice versa. That seems likely to provoke unsafe bugs in implementations, to the point that we will have to make sure callers can't do that via validation before calling the underlying socket library.</p>",
+        "id": 202196907,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1593279799
+    },
+    {
+        "content": "<p>And if we have to remember that anyway, let's encode it in the type system.</p>",
+        "id": 202196920,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1593279816
+    },
+    {
+        "content": "<p>I can <em>very easily</em> imagine ways that the interface allowing mismatched calls to connect vs socket could bypass capability security.</p>",
+        "id": 202197051,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1593279977
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> I finally managed to complete the implementation. I would appreciate if you can give it a quick review before I start assembling the PR.</p>\n<p>The repo for the WASI spec changes is here:<br>\n<a href=\"https://github.com/Kong/WASI/tree/feat/wasi-sockets\">https://github.com/Kong/WASI/tree/feat/wasi-sockets</a></p>\n<p>And the reference implementation for it, is here:<br>\n<a href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\">https://github.com/Kong/wasmtime/tree/feat/wasi-sockets</a></p>\n<p><code>sock_open</code> and <code>addr_resolve</code> now receive an address pool as we discussed.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/Kong/WASI/tree/feat/wasi-sockets\" style=\"background-image: url(https://avatars3.githubusercontent.com/u/962416?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/Kong/WASI/tree/feat/wasi-sockets\" title=\"Kong/WASI\">Kong/WASI</a></div><div class=\"message_embed_description\">WebAssembly System Interface. Contribute to Kong/WASI development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\" style=\"background-image: url(https://avatars3.githubusercontent.com/u/962416?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\" title=\"Kong/wasmtime\">Kong/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - Kong/wasmtime</div></div></div>",
+        "id": 202702296,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1593703064
+    },
+    {
+        "content": "<p>Sure. I'm in meeting atm, but I can take a look a little later today</p>",
+        "id": 202702410,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1593703104
+    },
+    {
+        "content": "<p>Finally taking a look here; the wasmtime changes look like a good start!</p>",
+        "id": 202824007,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1593796939
+    },
+    {
+        "content": "<p>Before submitting a PR, it's worth rebasing on main to avoid the testsuite diffs</p>",
+        "id": 202824023,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1593796973
+    },
+    {
+        "content": "<p>Yeah, of course. All the changes are on snapshot. Should I move them to ephemeral? Or should I leave them in snapshot? Also, this would need to be split into two PRs. One for WASI spec, and the other for wasmtime.</p>",
+        "id": 202824363,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1593797250
+    },
+    {
+        "content": "<p>Yeah, the WASI changes should be in ephemeral</p>",
+        "id": 202826187,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1593798884
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> So, the procedure would be:</p>\n<ol>\n<li>Send PR for WASI spec into ephemeral</li>\n<li>Wait for merge, and then wait for snapshot</li>\n<li>Wait for release of WASI binding for Rust</li>\n<li>Send PR for wasi-common and test-programs<br>\nCorrect?</li>\n</ol>",
+        "id": 203026080,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1594061137
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"305220\">@Emiliano Lesende</span> Yes</p>",
+        "id": 203218496,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1594167052
+    },
+    {
+        "content": "<p>One thing to be aware of is that ephemeral is currently blocked on some big modularization changes, so the timeline for the next snapshot is unclear.</p>",
+        "id": 203218529,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1594167104
+    },
+    {
+        "content": "<p>However, I think we can go ahead and put experimental APIs in wasi-common without waiting for a snapshot. We can use different names for now, to avoid conflicts if there are changes during the standardization process.</p>",
+        "id": 203218621,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1594167182
+    },
+    {
+        "content": "<p>I think we can put experimental APIs in the WASI bindings too, again without waiting for a snapshot. Possibly by putting them behind a feature flag.</p>",
+        "id": 203218644,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1594167213
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"305220\">@Emiliano Lesende</span> What is the \"address pool\" fd? I don't think I understand that.</p>",
+        "id": 203627467,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1594528473
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254178\">@Josh Triplett</span> The address pool fd is a pool of IP addresses and ports. You need to configure that at WASI for you to be able to use the socket calls. When you create the WASI ctx you can pass in address pools which the program can then use to issue socket calls. Is a way to have some security control to know who you can connect to/listen to, without overblowing the whole system into a fully featured firewall.</p>",
+        "id": 204449542,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595265372
+    },
+    {
+        "content": "<p>Ah, that makes sense.</p>",
+        "id": 204449575,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595265399
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> Ok. I'll see if I can make the change this week.</p>",
+        "id": 204449701,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595265457
+    },
+    {
+        "content": "<p>Following up on a question from earlier in this thread, what happens if you attempt to pass a mismatched address family and address?</p>",
+        "id": 204449848,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595265518
+    },
+    {
+        "content": "<p>(deleted)</p>",
+        "id": 204449985,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595265597
+    },
+    {
+        "content": "<p>Mismatched as in? What you mean?</p>",
+        "id": 204450230,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595265708
+    },
+    {
+        "content": "<p>Wrong branch of the union.</p>",
+        "id": 204450435,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595265817
+    },
+    {
+        "content": "<p>What happens if you pass an IPv6 address and a UNIX socket family, or vice versa?</p>",
+        "id": 204450568,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595265875
+    },
+    {
+        "content": "<p>With the interface posted much earlier in this thread, it seems like that would not get caught, and would get as far as the underlying library/system call.</p>",
+        "id": 204450697,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595265942
+    },
+    {
+        "content": "<p>At the moment there is no UNIX socket support, but having said that if you pass an IPv6 pool and you try to use an IPv4 address you will get a not capable response.</p>",
+        "id": 204450933,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595266077
+    },
+    {
+        "content": "<p>Is that what you where asking about?</p>",
+        "id": 204451017,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595266117
+    },
+    {
+        "content": "<p>Or you mean if I sock_open to an IPv6 address family and then sock_connect to an IPv4? In that case we will pass is along to the OS which in turn it will return you a EAFNOSUPPORT.</p>",
+        "id": 204451253,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595266268
+    },
+    {
+        "content": "<p>That's one possibility, and probably a more innocuous one.</p>",
+        "id": 204451428,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595266378
+    },
+    {
+        "content": "<p>I'm thinking of things like trying to create a UNIX socket but passing an IPv4 or IPv6 address.</p>",
+        "id": 204451508,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595266433
+    },
+    {
+        "content": "<p>A Unix socket address is a string-like buffer with some really strange semantics.</p>",
+        "id": 204451720,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595266527
+    },
+    {
+        "content": "<p>We likely need to do some extra validation there, but if someone can just pass an IPv6 address and have the octets interpreted as the bytes of a UNIX socket address...</p>",
+        "id": 204451859,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595266594
+    },
+    {
+        "content": "<p>I had been wondering if we could enforce a match between the address family used at <code>sock_open</code> and the address passed to things like connect or bind.</p>",
+        "id": 204452037,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595266695
+    },
+    {
+        "content": "<p>So that it never gets to the OS call if you try to play games like that, which means a much smaller attack surface.</p>",
+        "id": 204452139,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595266762
+    },
+    {
+        "content": "<p>Oh, not sure that can happen thou. Unions at WASI are tagged, which means that sock_connect knows what that address is for and when it converts it to <code>sockaddr</code> it will set the correct address family. Yeah granted, it will set the correct address family at the <code>sockaddr</code> struct level but not at the <code>sock_open</code>.</p>",
+        "id": 204452420,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595266902
+    },
+    {
+        "content": "<p>I missed that it was using a tagged union. I thought WITX had both tagged and untagged.</p>",
+        "id": 204452545,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595266966
+    },
+    {
+        "content": "<p>But yes, I also mean a mismatch between open and later calls like connect.</p>",
+        "id": 204452625,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267016
+    },
+    {
+        "content": "<p>I don't particularly like the Berkeley socket interface either, and we could delay opening the socket until we know the address family. The reason I didn't go this route is because I was worried what it could mean when we try to implement the C calls in WASI.</p>",
+        "id": 204452649,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595267032
+    },
+    {
+        "content": "<p>I could easily imagine an OS socket implementation ignoring the mismatch between the two calls and just interpreting the buffer passed into the later call using the address family from the open call.</p>",
+        "id": 204452747,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267065
+    },
+    {
+        "content": "<p>No, I don't think that we should delay opening the socket.</p>",
+        "id": 204452846,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267136
+    },
+    {
+        "content": "<p>I'm more wondering if we can remember the address family that was given when opening the socket, and enforce a match ourselves, rather than relying on the operating system to do so.</p>",
+        "id": 204452868,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267153
+    },
+    {
+        "content": "<p>I see. Good point. We could add that extra check, is there an OS API call to retrieve the AF? if not we could store it ourselves in the handle.</p>",
+        "id": 204452873,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595267157
+    },
+    {
+        "content": "<p>I think we should store it ourselves, perhaps by using different types of handle.</p>",
+        "id": 204452917,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267179
+    },
+    {
+        "content": "<p>Agreed.</p>",
+        "id": 204452971,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595267197
+    },
+    {
+        "content": "<p>That would avoid making an extra OS call. We don't want to slow down the common case of programs behaving correctly.</p>",
+        "id": 204452988,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267210
+    },
+    {
+        "content": "<p>Makes sense</p>",
+        "id": 204453016,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595267229
+    },
+    {
+        "content": "<p>Thank you. I appreciate you hearing out the concern. :)</p>",
+        "id": 204453061,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267257
+    },
+    {
+        "content": "<p>Of course. Always.</p>",
+        "id": 204453088,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595267277
+    },
+    {
+        "content": "<p>Because the Berkeley sockets interface is so very C-oriented, and the sockaddr structure in particular is one of the most horrible things that people need to deal with on a regular basis in common programs, I didn't want to just trust the underlying OS to do the right thing for security.</p>",
+        "id": 204453221,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267339
+    },
+    {
+        "content": "<p>I would be happy to review the updated patch series as soon as you have it available. Send me a link?</p>",
+        "id": 204453476,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595267484
+    },
+    {
+        "content": "<p>You can find the link the repos above. I'll repost it here.</p>",
+        "id": 204453944,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595267740
+    },
+    {
+        "content": "<p>The repo for the WASI spec changes is here:<br>\n<a href=\"https://github.com/Kong/WASI/tree/feat/wasi-sockets\">https://github.com/Kong/WASI/tree/feat/wasi-sockets</a></p>\n<p>And the reference implementation for it, is here:<br>\n<a href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\">https://github.com/Kong/wasmtime/tree/feat/wasi-sockets</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/Kong/WASI/tree/feat/wasi-sockets\" style=\"background-image: url(https://avatars3.githubusercontent.com/u/962416?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/Kong/WASI/tree/feat/wasi-sockets\" title=\"Kong/WASI\">Kong/WASI</a></div><div class=\"message_embed_description\">WebAssembly System Interface. Contribute to Kong/WASI development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\" style=\"background-image: url(https://avatars3.githubusercontent.com/u/962416?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\" title=\"Kong/wasmtime\">Kong/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - Kong/wasmtime</div></div></div>",
+        "id": 204453968,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595267753
+    },
+    {
+        "content": "<p>I meant a link when you have a new patch that enforces the match, and I'd be happy to review that. :)</p>",
+        "id": 204457876,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595269673
+    },
+    {
+        "content": "<p>I already read the patches so far.</p>",
+        "id": 204457881,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1595269676
+    },
+    {
+        "content": "<p>Oh sure.</p>",
+        "id": 204458090,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1595269766
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> <span class=\"user-mention\" data-user-id=\"254178\">@Josh Triplett</span> I noticed that there is a main branch now, should I switch to main for rebasing or keep it on master?</p>",
+        "id": 206058891,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1596651407
+    },
+    {
+        "content": "<p>for all Bytecode Alliance repos use <code>main</code></p>",
+        "id": 206058968,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1596651445
+    },
+    {
+        "content": "<p>ok</p>",
+        "id": 206058991,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1596651459
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> it looks that main points to 0.11.0 of wasi, but the most recent published version of it is still 0.10.0+wasi-snapshot-preview1</p>",
+        "id": 206063111,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1596653447
+    },
+    {
+        "content": "<p>Ah, it looks like we should publish a new version then</p>",
+        "id": 206071653,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1596657925
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254178\">@Josh Triplett</span> the changes you requested are in :)</p>",
+        "id": 206283424,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1596820203
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"305220\">@Emiliano Lesende</span> Awesome, thanks!</p>",
+        "id": 206291903,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1596824281
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254178\">@Josh Triplett</span> <span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> The PR for the socket API is in. I cannot send the PR for the implementation yet. I tried to put it behind a feature flag, but there is some work which is complicated as I cannot put feature flags inside match expressions in Rust. I cannot wall everything up properly. Any idea how long it will take to make the sock API into snapshot?</p>",
+        "id": 207285306,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1597769905
+    },
+    {
+        "content": "<p><a href=\"https://github.com/WebAssembly/WASI/pull/312\">https://github.com/WebAssembly/WASI/pull/312</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/WASI/pull/312\" style=\"background-image: url(https://avatars3.githubusercontent.com/u/11578470?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/WASI/pull/312\" title=\"feat(socket): berkeley socket API by 3miliano · Pull Request #312 · WebAssembly/WASI\">feat(socket): berkeley socket API by 3miliano · Pull Request #312 · WebAssembly/WASI</a></div><div class=\"message_embed_description\">This PR adds new functions for socket operations such as sock_listen, sock_bind, sock_connect, etc. It also includes a new addr_resolve function for performing DNS resolution. The PR introduces a n...</div></div></div>",
+        "id": 207285327,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1597769919
+    },
+    {
+        "content": "<p>That sounds like great progress! \\o/</p>\n<p>Would it make sense to open a PR for the implementation in its current state and then have people weigh in on how best to do the feature flag?</p>",
+        "id": 207291277,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1597772726
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"234973\">@Till Schneidereit</span> I could do that. I guess you can also take a look here: <a href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\">https://github.com/Kong/wasmtime/tree/feat/wasi-sockets</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\" style=\"background-image: url(https://avatars3.githubusercontent.com/u/962416?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/Kong/wasmtime/tree/feat/wasi-sockets\" title=\"Kong/wasmtime\">Kong/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - Kong/wasmtime</div></div></div>",
+        "id": 207300316,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1597777111
+    },
+    {
+        "content": "<p>My issue right now, is on this match:<br>\n<a href=\"https://github.com/Kong/wasmtime/blob/feat/wasi-sockets/crates/wasi-common/src/sys/unix/mod.rs#L117\">https://github.com/Kong/wasmtime/blob/feat/wasi-sockets/crates/wasi-common/src/sys/unix/mod.rs#L117</a><br>\nI need to gate that case expression since AddressPool ain't available yet until ephemeral gets merged.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/Kong/wasmtime/blob/feat/wasi-sockets/crates/wasi-common/src/sys/unix/mod.rs#L117\" style=\"background-image: url(https://avatars3.githubusercontent.com/u/962416?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/Kong/wasmtime/blob/feat/wasi-sockets/crates/wasi-common/src/sys/unix/mod.rs#L117\" title=\"Kong/wasmtime\">Kong/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - Kong/wasmtime</div></div></div>",
+        "id": 207300568,
+        "sender_full_name": "Emiliano Lesende",
+        "timestamp": 1597777237
+    }
+]

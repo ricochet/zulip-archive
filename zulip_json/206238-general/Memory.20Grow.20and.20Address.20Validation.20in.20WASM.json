@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>Hi, currently we saw that the heap of the WASM module is grown by compiler emitted function <code>__builtin_wasm_memory_grow()</code>, and I'm curious what happens after the module calls this. How does the runtime handle this request and allocate more memory?</p>\n<p>Also, I want to know where and how the address checking happens for WASM module. When the module try to access an address above the linear memory's current size, how is this detected and gets errored?</p>",
+        "id": 445147575,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718634789
+    },
+    {
+        "content": "<p>Are you asking about Wasmtime or wasm runtimes in general?</p>",
+        "id": 445151271,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1718635728
+    },
+    {
+        "content": "<p>In general: <code>__builtin_wasm_memory_grow</code> is referring to the wasm core <code>memory.grow</code> <a href=\"https://webassembly.github.io/spec/core/syntax/instructions.html#syntax-instr-memory\">instruction</a></p>",
+        "id": 445151851,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1718635894
+    },
+    {
+        "content": "<p>Regarding memory management in Wasmtime, this may be helpful: <a href=\"https://docs.wasmtime.dev/contributing-architecture.html#linear-memory\">https://docs.wasmtime.dev/contributing-architecture.html#linear-memory</a></p>",
+        "id": 445151887,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1718635902
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"480579\">@Lann Martin</span> I'm curious about how does the compiler/runtime handle this instruction</p>",
+        "id": 445153197,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718636258
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span>  Thank you this is helpful! I'm also curious what's stopping WASM to have memory shrink.<br>\nI'm thinking if it's possible implement posix style heap semantics like brk and sbrk as host functions exposed to the module, if I modify wasmtime's implementation of linear memory.</p>",
+        "id": 445154061,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718636462
+    },
+    {
+        "content": "<p>A <code>memory.shrink</code> (or <code>memory.discard</code>) instruction has been discussed (e.g. <a href=\"https://github.com/WebAssembly/design/issues/1397\">https://github.com/WebAssembly/design/issues/1397</a>),  I don't know if anyone's actively working on it, though.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/design/issues/1397\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/0be5a01f4501c382c16d968c4888eb7d175cb49f/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343038653337373238373038303064396336646135633432373661386230373761336134643532353037363663386133353862313335363238643237653434372f576562417373656d626c792f64657369676e2f6973737565732f31333937&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/design/issues/1397\" title=\"Wasm needs a better memory management story · Issue #1397 · WebAssembly/design\">Wasm needs a better memory management story · Issue #1397 · WebAssembly/design</a></div><div class=\"message_embed_description\">Hi all, after a video call with google last week, I was encouraged to raise a conversation here around issues we at Unity have with Wasm memory allocation. The short summary is that currently Wasm ...</div></div></div>",
+        "id": 445155573,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1718636813
+    },
+    {
+        "content": "<p>I think part of the reason we haven't seen a <code>memory.shrink</code> is that for <em>many</em> systems using Wasm it is acceptable - or even desirable - to have short-lived instances recreated for each unit of work (e.g. request) rather than having long-running instances that need memory reclamation.</p>",
+        "id": 445156870,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1718637120
+    },
+    {
+        "content": "<p>So I saw there are 4 types of <code>RuntimeLinearMemory</code>,<br>\n<code>MmapMemory</code> <code>StaticMemory</code> <code>MmapMemoryProxy</code> <code>SharedMemory</code>, usually is a wasm module attached to one or more than one of these RuntimeLinearMemory instances? <br>\nI saw in wasi-libc, when memory.grow is called, the first argument (memory index) is always <code>0</code>, so I suppose the 0 th memory instance is always the main <code>MmapMemory</code></p>\n<p>Also, I might need some help to find the heap bound checking code in wasmtime <span aria-label=\"joy\" class=\"emoji emoji-1f602\" role=\"img\" title=\"joy\">:joy:</span></p>",
+        "id": 445191598,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718646995
+    },
+    {
+        "content": "<p>The specifics there are <code>MmapMemory</code> is what most modules use as it's the default, <code>StaticMemory</code> is used with the pooling allocator, <code>MmapMemoryProxy</code> IIRC is used for the embedder API as an opt-in for host-defined memories, and <code>SharedMemory</code> is used for shared memories (e.g. memory for threads). Each linear memory is only one of these, and most modules have a single linear memory. If a module has multiple linear memories each one could be backed by a unique one though.</p>\n<blockquote>\n<p>I suppose the 0 th memory instance is always the main <code>MmapMemory</code></p>\n</blockquote>\n<p>More-or-less: yes. The 0 here is \"memory 0\" where 0 is the index of memory in the module memory index space. The Rust/C/C++ memory model doesn't support more than one memory most of the time, so typically there's only a single memory at index 0. And yes it's most of the time <code>MmapMemory</code> as that's the default.</p>\n<blockquote>\n<p>Also, I might need some help to find the heap bound checking code in wasmtime</p>\n</blockquote>\n<p>This is intertwined in a few places. Throughout the host API bounds-checks happen as the Rust view of linear memory is <code>&amp;[u8]</code> which is bounds-checked by default. In compiled code however there's a few different ways that bounds are represented and it could be compiled a number of different ways.</p>\n<p>Put another way there's not a single place for bounds checks in wasmtime, it's spread all over as-needed. Do you have a particular bounds-check in mind or an area you were thinking of focusing on?</p>",
+        "id": 445194680,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1718648032
+    },
+    {
+        "content": "<p>Oh yeah thank you for the explanations! I'm really interested in the case, say the c program just call malloc or sbrk to grow the linear memory to X, then the program try to access an address higher than X, how is this error caught.?</p>",
+        "id": 445201125,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718649997
+    },
+    {
+        "content": "<p>Those sorts of errors are caught via segfaults and signal handling. If wasm accesses memory outside of its bounds then that's, by default, guaranteed to be unmapped memory. Cranelift translation for bounds checks happens in <a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator/bounds_checks.rs\">this file</a>, but I'll note that this is a tricky part of Wasmtime since we implement a few strategies for bounds checks in compiled code.</p>\n<p>By default though there are no bounds checks. We reserve 8G of virtual memory as \"unmapped\" to start out for all linear memories. Starting 2G into this region is where the linear memory itself resides, often starting around a size of ~1M. Growth happens by mapping pages in. Out-of-bounds is done by the wasm actually does the load/store and it ends up being unmapped memory, triggering a segfault, and then the segfault is translated to an out-of-bounds error</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator/bounds_checks.rs\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/a38ee297ea3e850898e0089eff3500621ab72d0b/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f396533663430386537396136303634643634666134313664316233623865626161626463393533623134643334613161656232393765393131363463613932392f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator/bounds_checks.rs\" title=\"wasmtime/cranelift/wasm/src/code_translator/bounds_checks.rs at main · bytecodealliance/wasmtime\">wasmtime/cranelift/wasm/src/code_translator/bounds_checks.rs at main · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to bytecodealliance/wasmtime development by creating an account on GitHub.</div></div></div>",
+        "id": 445201714,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1718650166
+    },
+    {
+        "content": "<p>Thanks, I see how this works. I think I don't need to change this bound_ckecking part of cranelift,  I just want to know what are the LinearMemory metadata the bound checker looks for to know which region is valid.<br>\nAs you said, I guess the bound checker know this info by the metadata of the RuntimeLinearMemory instance. So when memory.grow is called, the MmapMemory increase its size, and then the bound checker know the update bound. I'm digging deeper to see if this is true.</p>",
+        "id": 445204639,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718651196
+    },
+    {
+        "content": "<p>That's basically correct yeah, although one thing I can clarify is that we're trying to keep two pieces of data in sync, what's mapped and what the length of the linear memory is. The \"source of truth\" depends on who's asking.  For example if compiled code is asking then the source of truth is what's mapped and what isn't. For embedder/host things the source of truth is the length field. The job of <code>RuntimeLinearMemory</code> is basically to keep these two in sync</p>",
+        "id": 445204965,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1718651323
+    },
+    {
+        "content": "<p>This makes perfect sense, thank you!</p>",
+        "id": 445207094,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718652044
+    },
+    {
+        "content": "<blockquote>\n<p><a href=\"#narrow/stream/206238-general/topic/Memory.20Grow.20and.20Address.20Validation.20in.20WASM/near/445156870\">https://bytecodealliance.zulipchat.com/#narrow/stream/206238-general/topic/Memory.20Grow.20and.20Address.20Validation.20in.20WASM/near/445156870</a> this! for example, for a typical serverless function even GC just slows you down, as you'll recycle the memory at the end of invocation. The things that like to shrink memory are longer running functions -- once you get to changing wasm spec to support an older runtime style you should be thinking if there's a way to lean into the feature, not change it.</p>\n</blockquote>",
+        "id": 445326672,
+        "sender_full_name": "Ralph",
+        "timestamp": 1718707916
+    },
+    {
+        "content": "<p>doesn't mean you can't! it's possible to shrink, of course. However, if you think about other features of wasm, such as the lack of readonly memory inside the module, you suddenly realize that an \"OS-like\" long running module is more problematic than running a container. You still might do it!!! When you really need the portability above all, for example.</p>",
+        "id": 445326911,
+        "sender_full_name": "Ralph",
+        "timestamp": 1718708012
+    },
+    {
+        "content": "<p>ymmv</p>",
+        "id": 445326913,
+        "sender_full_name": "Ralph",
+        "timestamp": 1718708014
+    }
+]

@@ -1,0 +1,98 @@
+[
+    {
+        "content": "<p>Hi! Currently I'm compiling a lot of tiny wasm modules across multiple threads. They all use the same <code>Store</code> type, so I was looking at the optimization mentioned in the <code>Linker</code> documentation that mentions sharing one <code>Linker</code> between modules. The problem I'm noticing is that putting a <code>Linker</code> behind a <code>Mutex</code> (or <code>RwLock</code>, etc.) actually seems to regress performance a bit because of the thread contention, so I was thinking of having one <code>Linker</code> per thread or something.</p>\n<p>The reason I need a mutable <code>Linker</code> today is because each module may register some new functions that I haven't encountered before, so it might call e.g., <code>linker.func_wrap</code> to lazily add those host functions. I could try to do all of these upfront to build a list of all possible functions to register, but the lazy <code>func_wrap</code>s are really convenient so I was hoping to avoid a separate pass.</p>\n<p>Has anyone done anything similar and could recommend a strategy here? Maybe there's a way to avoid putting the <code>Linker</code> behind a <code>Mutex</code>?</p>",
+        "id": 418277934,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1706276720
+    },
+    {
+        "content": "<p>You can just clone the <code>Linker</code>,  which does copy symbols internally but avoids reprocessing e.g. <code>add_to_linker</code> calls</p>",
+        "id": 418286109,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1706279279
+    },
+    {
+        "content": "<p>Interesting, that sounds like it could be a good path to try too. I'm currently testing out finer grained locking now too (e.g., right before I use <code>func_wrap</code>) in case I might reduce thread contention in general (the trade-off being more locking/unlocking). A lot of the modules are similar and don't need a lot of <code>func_wrap</code>s so maybe this will help.</p>",
+        "id": 418288124,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1706279923
+    },
+    {
+        "content": "<p>Actually, looking at the code it appears that <code>Linker</code> uses <code>Arc&lt;str&gt;</code> internally, so you aren't even copying all that much. I doubt you'll beat copying with lock contention.</p>",
+        "id": 418293829,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1706281737
+    },
+    {
+        "content": "<p>Yeah definitely possible. I would be concerned about some of the types in there though, e.g. the hashmaps on <code>Linker</code> might add up quickly for thousands of modules</p>",
+        "id": 418294177,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1706281857
+    },
+    {
+        "content": "<p>another way you could reduce contention, if it applies to your use case, is to link a module into an InstancePre once, and then clone the InstancePre to instantiate on many threads</p>",
+        "id": 418321175,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1706290565
+    },
+    {
+        "content": "<p>InstancePre is basically amortizing out the linker resolution for modules that get instantiated with the same linker many times</p>",
+        "id": 418321232,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1706290583
+    },
+    {
+        "content": "<p>I apologize for the name InstancePre, we couldnt come up with a better word for a thing that is halfway between a module and an instance</p>",
+        "id": 418321752,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1706290790
+    },
+    {
+        "content": "<p>its got all the imports resolved, it just needs a store for the mutable state</p>",
+        "id": 418321849,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1706290811
+    },
+    {
+        "content": "<p>Some other possible help I can offer:</p>\n<blockquote>\n<p>They all use the same Store type</p>\n</blockquote>\n<p>One thing to be aware of with this is that if you never destroy a <code>Store</code> it keeps all wasm instances alive so you'd never deallocate anything that's short lived. <code>Store</code>, however, is intended to be pretty cheap to create/destroy, but if that's a problem for you let us know and we can help investigate perf.</p>\n<hr>\n<p>Also one idea we talked about a long time ago was the idea of hierarchical linkers, where you have a global linker with base functionality and then you can cheaply extend that with further linkers in per-module situations. That never materialized though, so it's not implemented today. We generally recommend having one linker for the whole program if you can with a static set of functions, but that doesn't work for use cases which need to perform instantiations with different sets of imported functions</p>",
+        "id": 418323026,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1706291212
+    },
+    {
+        "content": "<p>You could pass around an <code>Arc&lt;Linker&gt;</code> and use it to lazily init thread local clones. I wouldn't personally go that route without compelling benchmarks <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span></p>",
+        "id": 418323475,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1706291377
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253992\">@Pat Hickey</span> thanks for the suggestion! I do cache <code>InstancePre</code> where possible, but the modules can be different which is where I end up needing to use the <code>Linker</code> again (e.g., I run into a module with a function that I haven't set up yet)</p>",
+        "id": 418324443,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1706291699
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> Yeah it's just the <code>Store</code> type that is the same, but every instantiation gets its own <code>Store</code> and destroys it afterwards</p>",
+        "id": 418324870,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1706291851
+    },
+    {
+        "content": "<p>Yeah the modules may have different sets of imported functions, although I could look through all modules to union all sets together ahead of time, it's just not very convenient to do that vs. lazily defining imported functions as modules request them</p>",
+        "id": 418325581,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1706292125
+    },
+    {
+        "content": "<p>Ah ok makes sense, and <code>RwLock&lt;Linker&lt;T&gt;&gt;</code> has too much overhead?</p>",
+        "id": 418328626,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1706293250
+    },
+    {
+        "content": "<p><code>RwLock&lt;Linker&lt;T&gt;&gt;</code> seems to be ok. I ended up using <code>RwLock</code> with finer-grained write locking whenever I need to add import functions. The sharing one linker with <code>RwLock</code> seems to improve performance slightly (vs. creating or cloning new linkers per module) but not by very much. The <code>RwLock</code> changes might be bottlenecked by my thread contention though, so I'll work on improving that separately</p>",
+        "id": 418329765,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1706293692
+    }
+]

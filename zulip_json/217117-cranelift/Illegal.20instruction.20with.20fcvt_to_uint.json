@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>Before I dig into this, does anybody why I'm getting an illegal instruction when using fcvt_to_uint? On aarch64 I'm getting this code:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">  </span><span class=\"mi\">48</span>:   <span class=\"nc\">d2e83e09</span><span class=\"w\">        </span><span class=\"n\">mov</span><span class=\"w\">     </span><span class=\"n\">x9</span><span class=\"p\">,</span><span class=\"w\"> </span>#<span class=\"mh\">0x41f0000000000000</span><span class=\"w\">         </span><span class=\"c1\">// #4751297606875873280</span>\n<span class=\"w\">  </span><span class=\"mi\">4</span><span class=\"n\">c</span>:   <span class=\"mf\">9e670123</span><span class=\"w\">        </span><span class=\"n\">fmov</span><span class=\"w\">    </span><span class=\"n\">d3</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">x9</span>\n<span class=\"w\">  </span><span class=\"mi\">50</span>:   <span class=\"mf\">1e6323</span><span class=\"n\">c0</span><span class=\"w\">        </span><span class=\"n\">fcmp</span><span class=\"w\">    </span><span class=\"n\">d30</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">d3</span>\n<span class=\"w\">  </span><span class=\"mi\">54</span>:   <span class=\"mi\">5400014</span><span class=\"n\">a</span><span class=\"w\">        </span><span class=\"n\">b</span><span class=\"p\">.</span><span class=\"n\">ge</span><span class=\"w\">    </span><span class=\"mh\">0x7c</span><span class=\"w\">  </span><span class=\"c1\">// b.tcont</span>\n<span class=\"w\">  </span><span class=\"mi\">58</span>:   <span class=\"mf\">1e7903</span><span class=\"n\">cf</span><span class=\"w\">        </span><span class=\"n\">fcvtzu</span><span class=\"w\">  </span><span class=\"n\">w15</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">d30</span>\n</code></pre></div>\n<p>which looks like a range check, but the jump target is</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">  </span><span class=\"mi\">7</span><span class=\"n\">c</span>:   <span class=\"mi\">0000</span><span class=\"n\">c11f</span><span class=\"w\">        </span><span class=\"n\">udf</span><span class=\"w\">     </span>#<span class=\"mi\">49439</span>\n</code></pre></div>",
+        "id": 399949043,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1698935143
+    },
+    {
+        "content": "<p><code>fcvt_to_uint</code> traps if the value would overflow the integer type, i suspect that's the bounds check that you are seeing.</p>",
+        "id": 399949520,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1698935268
+    },
+    {
+        "content": "<p>We have a non trapping version in <code>fcvt_to_uint_sat</code>, that insted emits INT_MAX or INT_MIN</p>",
+        "id": 399949727,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1698935318
+    },
+    {
+        "content": "<p><code>fcvt_to_uint</code> also traps on NaN values</p>",
+        "id": 399949881,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1698935363
+    },
+    {
+        "content": "<p>what happend to the trap code? is the undefined instruction a trap instruction or did that code not get linked into the module?</p>",
+        "id": 399950404,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1698935502
+    },
+    {
+        "content": "<p>does the saturating version also insert bounds checks (and just saturates instead of traps) or is saturating the native behavior? (I guess that's arch specific)</p>",
+        "id": 399950881,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1698935623
+    },
+    {
+        "content": "<p>I think udf is the trap instruction on AArch64, and i would guess #49439 to be the integer overflow trap code, but i'm not 100% sure</p>",
+        "id": 399951223,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1698935718
+    },
+    {
+        "content": "<p>49439 is <code>0xc11f</code> which looks like \"clif\"</p>",
+        "id": 399951435,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1698935770
+    },
+    {
+        "content": "<p>otherwise holds no significance</p>",
+        "id": 399951507,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1698935789
+    },
+    {
+        "content": "<blockquote>\n<p>does the saturating version also insert bounds checks (and just saturates instead of traps) or is saturating the native behavior? (I guess that's arch specific)</p>\n</blockquote>\n<p>Yeah, that's arch specific, on AArch64 we do emit some <a href=\"https://github.com/bytecodealliance/wasmtime/blob/e0bfa7336de20f76048edbdc0157ee637a2c5fea/cranelift/codegen/src/isa/aarch64/inst.isle#L3593-L3619\">extra code for I8 and I16, but not for I32 / I64</a></p>",
+        "id": 399952185,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1698935972
+    },
+    {
+        "content": "<p>Hm, ok, and there's no way to get a \"undefined behavior but not traps\" semantic? I suppose I could emit the same checks manually and jump past the instruction in case of overflow and then hope cranelift will recognize the trap checks and optimize them away...</p>",
+        "id": 399962795,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1698938020
+    },
+    {
+        "content": "<p>We don't have undefined behavior in Cranelift, by design (*this is sometimes only aspirationally true, but it is a key design difference vs. e.g. LLVM)</p>",
+        "id": 399981074,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1698942852
+    },
+    {
+        "content": "<p>and likewise we don't optimize away code based on traps (the reasoning chain for that typically relies on having UB and knowing that it \"can't\" occur, at least in compilers like LLVM)</p>",
+        "id": 399981157,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1698942881
+    },
+    {
+        "content": "<p>this may seem like a strange restriction but it actually unlocks a ton of goodness in ability to fuzz/test/verify, and avoids a whole class of bugs, so we're unlikely to loosen it</p>",
+        "id": 399981291,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1698942925
+    },
+    {
+        "content": "<p>Alright, thanks for all the feedback, useful and prompt as always.<br>\nDesign choices make sense, but I wasn't suggesting to optimize code out base on traps but rather, if the generated code for fcvt looks like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">fcvt</span><span class=\"p\">(</span><span class=\"n\">value</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">value</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">range</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">  </span><span class=\"n\">native_fcvt</span><span class=\"p\">(</span><span class=\"n\">value</span><span class=\"p\">)</span>\n<span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">  </span><span class=\"n\">trap</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>I could generate</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">value</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">range</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">  </span><span class=\"n\">fcvt</span><span class=\"p\">(</span><span class=\"n\">value</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"c1\">// expands to the if above</span>\n<span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">  </span><span class=\"mi\">42</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>to evalutate to 42 on overflow and when the fcvt gets inlined, the inner range check (with the trap in the else block) gets optimized out since it's already in a basic block where the value is in range.</p>",
+        "id": 400020727,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1698960002
+    },
+    {
+        "content": "<p>But on closer inspection, it looks like saturating fcvt is what I want anyway, so it's all good</p>",
+        "id": 400021011,
+        "sender_full_name": "Kristian H. Kristensen",
+        "timestamp": 1698960125
+    },
+    {
+        "content": "<p>Currently Cranelift doesn't do this kind of analysis, e.g. keeping a known range of values and updating that within blocks after an <code>if</code> condition, so no there's not currently a way for Cranelift to omit the native bounds checks if they aren't actually necessary</p>",
+        "id": 400021283,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1698960284
+    },
+    {
+        "content": "<p>for anyone wanting this, the keyword to track is \"sparse conditional constant propagation\" -- that's what would do the \"x is 1 on this branch, 2 on that branch\" style of cprop. We've talked about how to incorporate it but it's nontrivial, so unfortunately not yet</p>",
+        "id": 400026195,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1698963025
+    }
+]

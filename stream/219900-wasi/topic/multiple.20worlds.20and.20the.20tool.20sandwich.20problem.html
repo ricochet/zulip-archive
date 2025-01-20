@@ -1,0 +1,88 @@
+<html>
+<head><meta charset="utf-8"><title>multiple worlds and the tool sandwich problem · wasi · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/index.html">wasi</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/multiple.20worlds.20and.20the.20tool.20sandwich.20problem.html">multiple worlds and the tool sandwich problem</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="472732495"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/multiple%20worlds%20and%20the%20tool%20sandwich%20problem/near/472732495" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Randy Reddig <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/multiple.20worlds.20and.20the.20tool.20sandwich.20problem.html#472732495">(Sep 25 2024 at 16:12)</a>:</h4>
+<p>This is an extraction from a longer thread with <span class="user-mention" data-user-id="487764">@Mossaka (Joe)</span> while working on the Go bindings generator for WIT (<code>wit-bindgen-go</code>). The problem described here applies to Go, but I believe this may apply more broadly, so this is an attempt to surface the issue in a forum where we can collaborate on a solution.</p>
+<p>The "tool sandwich" problem:</p>
+<p>WIT is needed at two distinct stages of development: (1) to generate bindings called directly or indirectly by a user program, and (2) used later to convert a compiled wasm module into a component via <code>wasm-tools component embed</code> and <code>wasm-tools component new</code>.</p>
+<p>The "sandwich" refers to WIT as "bread" and the contents of the sandwich being the normal development activities by an end-user developer writing a program that depends on the underlying WIT interfaces, with or without their knowledge.</p>
+<p>Phases 1 and 2 may be performed by two distinct, unrelated parties, and at different times. For example, (1) could be performed by an open-source maintainer who develops a Go package that wraps WIT interfaces with standard Go semantics (e.g. wrapping <code>wasi:http</code>). That Go package is eventually used by an end-user developer (2), with no knowledge or necessarily any understanding of the underlying system call layer provided by the WIT / WASI interfaces.</p>
+<p>Right now, the "tool sandwich" problem leaks the abstraction of WIT down to the end-user developer, who must synthesize a WASI world that accommodates each of the packages their program uses.</p>
+<p>Hypothetical Proposal</p>
+<ol>
+<li>Allow <code>wasm-tools component embed|new</code> to accept multiple WIT worlds, and fuse them at build time (implying a synthetic WIT world with a number of <code>include</code> statements).</li>
+<li>Standardize a mechanism for language libraries/packages to embed WIT, suitable for downstream tool consumption.</li>
+<li>Allow (1) and (2) to work together to mitigate the tool sandwich problem, so end users do not have to know or care about the underlying system interfaces, WIT, or WASI at all.</li>
+</ol>
+
+
+
+<a name="472737668"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/multiple%20worlds%20and%20the%20tool%20sandwich%20problem/near/472737668" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/multiple.20worlds.20and.20the.20tool.20sandwich.20problem.html#472737668">(Sep 25 2024 at 16:44)</a>:</h4>
+<p>This is a very good problem to discuss, thanks for bringing this up and typing this out!</p>
+<p>I can perhaps start by describing the shape of how this was solved in Rust/C and then answer your questions after. The expected workflow for part (1) is:</p>
+<ul>
+<li>A library author decides to use some WIT</li>
+<li>The author uses <code>wit-bindgen</code> to generate bindings</li>
+<li>The author's code using these generated bindings uses language-specific checks to only get compiled on the <code>wasm32-wasip2</code> target (e.g. in Rust that's <code>#[cfg(target_env = "p2")]</code>)</li>
+<li>The bindings generator additionally generates an object file that contains type information which is linked into the final executable automatically (how exactly it's "automatic" depends on the language, it's a bit more manual in C than Rust)</li>
+</ul>
+<p>For part (2) it then looks like:</p>
+<ul>
+<li>The linker, wasm-ld, is invoked. That takes in a bunch of user code plus these custom object files with type information</li>
+<li>The linker passes through the custom sections in the custom object files as-is to the final executable</li>
+<li>Next <code>wasm-tools component new</code> runs which reads all these custom sections, concatenates all the worlds, and then generates the final component.</li>
+</ul>
+<p>The imporatant part here is basically these object files smuggling type information from (1) to (2) without anyone in the middle being any the wiser. Bundling <code>wasm-ld</code> and <code>wasm-tools component new</code> is what <code>wasm-component-ld</code> is tasked with doing.</p>
+<hr>
+<p>So with all that in mind, what you're proposing I believe basically aligns with how this is done today in Rust and C. For (1) that's already done by <code>wasm-tools component new</code> in the sense that if you run <code>embed</code> multiple times those worlds are all concatenated together for the final component (possibly producing a world no one has ever written down berfore). For (2) the mechanism is custom sections in the final wasm module where each custom section is the wasm-encoded WIT world that was used to generate bindings. Then (3) works via language-specific mechanisms for automatic inclusion of the object files to go to the linker.</p>
+
+
+
+<a name="472739980"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/multiple%20worlds%20and%20the%20tool%20sandwich%20problem/near/472739980" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joel Dice <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/multiple.20worlds.20and.20the.20tool.20sandwich.20problem.html#472739980">(Sep 25 2024 at 16:59)</a>:</h4>
+<p>FWIW, <code>wasm-component-ld</code> accepts an arbitrary number of <code>--component-type</code> options, each accepting the path to a WIT file; those WIT files are then merged (along with any binary component types passed via custom sections, as Alex described) together, and the result is used as the component type for componentization via <code>wit-component</code>.  The .NET component tooling uses this mechanism via <code>-Wl</code> flags to the linker.</p>
+
+
+
+<a name="472742457"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/multiple%20worlds%20and%20the%20tool%20sandwich%20problem/near/472742457" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Randy Reddig <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/multiple.20worlds.20and.20the.20tool.20sandwich.20problem.html#472742457">(Sep 25 2024 at 17:14)</a>:</h4>
+<p>We’re currently prototyping WASI 0.2 on TinyGo, so we have some degree of control over the entire toolchain. In theory, what we do with TinyGo can inform a plan for mainline (e.g. "big") Go.</p>
+<ol>
+<li>We can adapt <code>wasm-tools-go</code> and <code>wit-bindgen-go</code> to emit WIT or other metadata in the generated code.</li>
+<li>We can adapt TinyGo to embed that metadata in custom sections in the compiled wasm.</li>
+</ol>
+<p>If <code>wasm-tools component new</code> can consume that metadata without needing a sidecar of WIT, I think we’ve solved the tool sandwich problem.</p>
+
+
+
+<a name="472745577"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/multiple%20worlds%20and%20the%20tool%20sandwich%20problem/near/472745577" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/multiple.20worlds.20and.20the.20tool.20sandwich.20problem.html#472745577">(Sep 25 2024 at 17:35)</a>:</h4>
+<p>Yeah that should work! If you'd like I can detail a bit more about the exact format of the custom section too. It's not something super well documented at this moment</p>
+
+
+
+<a name="472928765"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/multiple%20worlds%20and%20the%20tool%20sandwich%20problem/near/472928765" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Randy Reddig <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/multiple.20worlds.20and.20the.20tool.20sandwich.20problem.html#472928765">(Sep 26 2024 at 15:57)</a>:</h4>
+<p>Great!</p>
+<p>Next question: can we smuggle WIT text (instead of binary) in a custom section that wasm-tools could interpret?</p>
+
+
+
+<a name="472933910"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/multiple%20worlds%20and%20the%20tool%20sandwich%20problem/near/472933910" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/multiple.20worlds.20and.20the.20tool.20sandwich.20problem.html#472933910">(Sep 26 2024 at 16:24)</a>:</h4>
+<p>That's not implemented at this time, and we've tried to avoid it due to the more-stable-nature of the binary format as opposed to the text format, but there's also no reason we couldn't support it as an option!</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

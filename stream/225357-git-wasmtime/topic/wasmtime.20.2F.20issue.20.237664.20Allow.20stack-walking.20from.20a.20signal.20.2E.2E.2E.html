@@ -1,0 +1,50 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #7664 Allow stack-walking from a signal ... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237664.20Allow.20stack-walking.20from.20a.20signal.20.2E.2E.2E.html">wasmtime / issue #7664 Allow stack-walking from a signal ...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="406840660"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237664%20Allow%20stack-walking%20from%20a%20signal%20.../near/406840660" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237664.20Allow.20stack-walking.20from.20a.20signal.20.2E.2E.2E.html#406840660">(Dec 08 2023 at 21:30)</a>:</h4>
+<p><a href="https://github.com/jameysharp">jameysharp</a> added the wasmtime label to <a href="https://github.com/bytecodealliance/wasmtime/issues/7664">Issue #7664</a>.</p>
+
+
+
+<a name="406840661"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237664%20Allow%20stack-walking%20from%20a%20signal%20.../near/406840661" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237664.20Allow.20stack-walking.20from.20a.20signal.20.2E.2E.2E.html#406840661">(Dec 08 2023 at 21:30)</a>:</h4>
+<p><a href="https://github.com/jameysharp">jameysharp</a> added the enhancement label to <a href="https://github.com/bytecodealliance/wasmtime/issues/7664">Issue #7664</a>.</p>
+
+
+
+<a name="406840663"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237664%20Allow%20stack-walking%20from%20a%20signal%20.../near/406840663" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237664.20Allow.20stack-walking.20from.20a.20signal.20.2E.2E.2E.html#406840663">(Dec 08 2023 at 21:30)</a>:</h4>
+<p>jameysharp opened <a href="https://github.com/bytecodealliance/wasmtime/issues/7664">issue #7664</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>We can currently only walk the wasm stack after exiting from the guest, whether because of a trap, a host-call, or an epoch or fuel interruption. I would like to be able to walk the wasm stack from a signal handler, such as a timer.</p>
+<h4>Benefit</h4>
+<p>Wasmtime's guest profiler can currently only take samples on guest exits because it can't collect a stack trace at any other time. When used with epoch interruptions, that biases it to observing execution only at function calls and loop back-edges. It would produce less biased profiles if it could sample at any time with equal probability. However, even if we're not waiting for a guest exit, we still need the guest to stop mutating the stack while we walk it, which suggests doing the work from a signal handler.</p>
+<h4>Implementation</h4>
+<p>This is tricky since signal handlers can't take locks or allocate memory. So we need to be able to walk the stack, record program counters, and pass the list of PCs somewhere else, without doing either of those things. All storage and any indications of where to send the results need to be accessible by the signal handler from thread-local storage.</p>
+<p>Some possible implementations:</p>
+<ul>
+<li>Pre-allocate a ring-buffer to share between the signal handler and consumer. Use atomics to manipulate the head and tail, and to ensure that writes into the buffer are visible to the consumer before it sees the tail move. Preferably, wake the consumer thread after each write.</li>
+<li>Write program counters to a file descriptor, such as a pipe or socket-pair. Avoid using Rust standard library I/O since it may take locks.</li>
+</ul>
+<p>I'm not sure how any of this could work on Windows, but it would be preferable to have it work on all platforms.</p>
+<h4>Alternatives</h4>
+<p>When profiling, we could add a trampoline around every wasm call which maintains some call-stack data structure that can be cloned from a signal handler without taking locks. (An <code>Arc&lt;Vec&gt;</code> might work.) Using the guest profiler normally already requires specific codegen options (such as enabling epoch interruption) so it's reasonable to require special codegen for this case.</p>
+<p>The trampoline would record the PC of its caller before calling the real callee, then pop that PC before returning. If there are other references when the guest needs to update the stack, then it must allocate a new copy of the current stack trace, but that's okay because it's not running in signal-handler context.</p>
+<p>Then the signal handler just needs to record the PC of the instruction it interrupted, plus the pointer to the cloned stack, passing these to the consumer via a wait-free single-producer queue. Making the stack traces make sense when the signal handler interrupts the trampoline is a tricky detail here.</p>
+<p>The trade-off of this alternative is that it makes function calls slower and so has a larger impact on the profiled guest's performance.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

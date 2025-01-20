@@ -1,0 +1,116 @@
+[
+    {
+        "content": "<p>I'm experimenting with Kotlin as a Wasm guest. It requires Wasm GC proposal to be implemented by the runtime. The only version that works currently is the prerelease one so I apologize if this is an issue related to the code that is WIP. </p>\n<p>I'm embedding <code>Wasmtime</code> in Go (I've updated Wasmtime version in <code>wasmtime-go</code> manually) and running a benchmark that calls a simple guest function multiple times:</p>\n<div class=\"codehilite\" data-code-language=\"Kotlin\"><pre><span></span><code><span class=\"nd\">@OptIn</span><span class=\"p\">(</span><span class=\"n\">UnsafeWasmMemoryApi</span><span class=\"o\">::</span><span class=\"n\">class</span><span class=\"p\">)</span>\n<span class=\"nd\">@WasmExport</span><span class=\"p\">(</span><span class=\"s\">\"test\"</span><span class=\"p\">)</span>\n<span class=\"kd\">fun</span><span class=\"w\"> </span><span class=\"nf\">memSimple4IntsVoid</span><span class=\"p\">(</span><span class=\"n\">callId</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"n\">ULong</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">dataSize</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kt\">Int</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">withScopedMemoryAllocator</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">allocator</span><span class=\"w\"> </span><span class=\"o\">-&gt;</span>\n<span class=\"w\">            </span><span class=\"kd\">val</span><span class=\"w\"> </span><span class=\"nv\">ptr</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">allocator</span><span class=\"p\">.</span><span class=\"na\">allocate</span><span class=\"p\">(</span><span class=\"n\">dataSize</span><span class=\"p\">)</span>\n<span class=\"w\">            </span><span class=\"kd\">val</span><span class=\"w\"> </span><span class=\"nv\">result</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">requestHostToStoreArguments</span><span class=\"p\">(</span><span class=\"n\">callId</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ptr</span><span class=\"p\">.</span><span class=\"na\">address</span><span class=\"p\">)</span>\n<span class=\"w\">           </span><span class=\"c1\">// ... error handling</span>\n\n<span class=\"w\">            </span><span class=\"kd\">val</span><span class=\"w\"> </span><span class=\"nv\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">ptr</span><span class=\"p\">.</span><span class=\"na\">loadInt</span><span class=\"p\">()</span>\n<span class=\"w\">            </span><span class=\"n\">println</span><span class=\"p\">(</span><span class=\"s\">\"Received </span><span class=\"si\">$</span><span class=\"n\">x</span><span class=\"s\">\"</span><span class=\"p\">)</span>\n<span class=\"w\">        </span><span class=\"p\">}</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>After several successful calls of this function from the host, <code>GC heap out of memory</code> error happens which I assume is a <code>Wasmtime</code> error.  Kotlin's <code>withScopedMemoryAllocator</code> is supposed to free all the memory allocated, <code>instance.GetExport(store, \"memory\").Memory().Size(store)</code> shows that at the time when the error happens there is still just 1 page allocated so memory doesn't grow during the test.</p>\n<p>Memory section of the guest looks like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">Memory</span><span class=\"p\">[</span><span class=\"mi\">1</span><span class=\"p\">]:</span>\n<span class=\"w\"> </span><span class=\"o\">-</span><span class=\"w\"> </span><span class=\"n\">memory</span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">pages</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">initial</span><span class=\"o\">=</span><span class=\"mi\">1</span>\n</code></pre></div>\n<p>Max memory is not limited in the module, nor do I use Wasmtime <code>Limitter</code>.</p>\n<p>I'm not sure where exactly the error happens, I've attempted to <code>catch(e: Throwable)</code> in the guest and print it to stdout but it doesn't catch anything. </p>\n<p>Is this a Kotlin issue, Wasmtime issue or this is some sort of bug/misconfiguration on my side? Thank you!</p>",
+        "id": 483025916,
+        "sender_full_name": "Alex",
+        "timestamp": 1731937401
+    },
+    {
+        "content": "<p>Ok, I see now that Wasm GC memory is supposed to be separate from linear memory according to the proposal. Is its size configurable?</p>",
+        "id": 483060609,
+        "sender_full_name": "Alex",
+        "timestamp": 1731945657
+    },
+    {
+        "content": "<p>You might have to wait for <span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> to get back from vacation to get much help on GC; there aren't many of us that understand Wasmtime GC yet as (afaik) it is still a work in progress.</p>",
+        "id": 483061910,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1731945959
+    },
+    {
+        "content": "<p>Yes wasm gc memory is separate from linear memory. What'll need to happen here is either:</p>\n<ul>\n<li>Wasmtime is missing an automatic call to a GC somewhere which it needs to implement</li>\n<li>The embedder needs to invoke the gc operation manually</li>\n</ul>\n<p>What you're running into is most likely an instance of the first here where a GC should be performed but it's not being performed automatically. (Nick would know more). The second point here isn't currently possible from Go I believe as the GC operation isn't exposed in the C API which is what wasmtime-go builds on.</p>",
+        "id": 483067006,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1731947192
+    },
+    {
+        "content": "<p>Ok, got it, thank you!</p>",
+        "id": 483078739,
+        "sender_full_name": "Alex",
+        "timestamp": 1731950366
+    },
+    {
+        "content": "<blockquote>\n<p>GC heap out of memory</p>\n</blockquote>\n<p>Looks like an issue on wasmtime side -- it seems like you are out of heap (GCed) memory.</p>\n<p>Kotlin's <code>withScopedMemoryAllocator </code>uses Wasm linear memory, which is separate from the GC heap in terms of wasm. </p>\n<blockquote>\n<p>I've attempted to catch(e: Throwable) in the guest and print it to stdout but it doesn't catch anything.</p>\n</blockquote>\n<p>It's not an error from Kotlin, so you can't catch it. <br>\nAdditionally, wasmtime doesn't support Exception Handling proposal yet, which is used for exceptions in Kotlin, so if you try to throw an exception from Kotlin code you will get a trap at that point at runtime, which basically means that execution of wasm module will be stopped.</p>",
+        "id": 483344944,
+        "sender_full_name": "Zalim Bashorov (Kotlin_, JetBrains)",
+        "timestamp": 1732047127
+    },
+    {
+        "content": "<p>Thanks, I'll retest when Wasm GC is officially released in Wasmtime.</p>",
+        "id": 483477482,
+        "sender_full_name": "Alex",
+        "timestamp": 1732107326
+    },
+    {
+        "content": "<p>I'm also seeing these errors in the released wasmtime 27, so this is not resolved yet it seems. I'm running a small function about 120 times per second that creates like 3 small GC objects each time (not retained in any way). After about 2:15 minutes wasmtime runs out of memory. (To clarify, this is not the null GC and there are no cycles)<br>\n<a href=\"/user_uploads/15107/mtJiINlb6M1abYgiN1M2lBqU/image.png\">image.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/mtJiINlb6M1abYgiN1M2lBqU/image.png\" title=\"image.png\"><img data-original-dimensions=\"475x188\" src=\"/user_uploads/thumbnail/15107/mtJiINlb6M1abYgiN1M2lBqU/image.png/840x560.webp\"></a></div>",
+        "id": 485213782,
+        "sender_full_name": "CryZe",
+        "timestamp": 1732961254
+    },
+    {
+        "content": "<p>So what seems to happen is that the GC heap runs out of memory, but before erroring out, it tries to collect all the garbage and tries allocating again. So it seems like the problem is that the GC (DRC) does not find all garbage properly (there's no cycles, so this should not happen).</p>",
+        "id": 485487956,
+        "sender_full_name": "CryZe",
+        "timestamp": 1733064767
+    },
+    {
+        "content": "<p>hey -- just got back from vacation, still working on catching up with my inbox and everything that's happened while I was off</p>",
+        "id": 486143097,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1733332790
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"387451\">CryZe</span> <a href=\"#narrow/channel/217126-wasmtime/topic/How.20to.20deal.20with.20.22GC.20heap.20out.20of.20memory.22.20errors.3F/near/485487956\">said</a>:</p>\n<blockquote>\n<p>So what seems to happen is that the GC heap runs out of memory, but before erroring out, it tries to collect all the garbage and tries allocating again. So it seems like the problem is that the GC (DRC) does not find all garbage properly (there's no cycles, so this should not happen).</p>\n</blockquote>\n<p>FYI: the DRC collector still only does ref-counting operations shallowly (i.e. it will not transitively decrement reference counts) which means that even most acyclic garbage will lead to leaks (currently; this is not fundamental and not intended long term, this is all still just a very WIP implementation)</p>",
+        "id": 486143235,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1733332835
+    },
+    {
+        "content": "<p>I'm not sure that is necessarily it, because afair these objects were all shallow to begin with. But I guess we can check again after that's addressed.</p>",
+        "id": 486152567,
+        "sender_full_name": "CryZe",
+        "timestamp": 1733336054
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"387451\">CryZe</span> <a href=\"#narrow/channel/217126-wasmtime/topic/How.20to.20deal.20with.20.22GC.20heap.20out.20of.20memory.22.20errors.3F/near/486152567\">said</a>:</p>\n<blockquote>\n<p>I'm not sure that is necessarily it, because afair these objects were all shallow to begin with. But I guess we can check again after that's addressed.</p>\n</blockquote>\n<p>if you can construct a small <code>.wat</code> that shows memory exhaustion under the DRC collector despite not needing transitive decrementing, that would be super useful</p>",
+        "id": 486155567,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1733337166
+    },
+    {
+        "content": "<p>I've reduced it to a minimal WAT file now... and indeed shallow objects are all you need. In fact, I'm not even sure it's collecting anything at all considering I can't even really make the reproduction much smaller than that: <a href=\"https://gist.github.com/CryZe/951bc9fa0dc265adbac3d883484e43a0\">https://gist.github.com/CryZe/951bc9fa0dc265adbac3d883484e43a0</a></p>\n<p>After around ~16500 calls to <code>update</code> it runs out of memory, which weirdly enough has consistently been exactly this number throughout the last 1.5 weeks of me using wasmtime with GC, almost regardless of how much I allocate on the GC heap. Could it be that there's some general per call garbage left behind that is independent of the actual <a href=\"http://struct.new\">struct.new</a> that I do?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://gist.github.com/CryZe/951bc9fa0dc265adbac3d883484e43a0\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/91f9baed8f4fc08c462d1a4de5a8c23942d45e97/68747470733a2f2f6769746875622e6769746875626173736574732e636f6d2f6173736574732f676973742d6f672d696d6167652d3534666437646330373133652e706e67&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://gist.github.com/CryZe/951bc9fa0dc265adbac3d883484e43a0\" title=\"Wasmtime GC Heap Out Of Memory Reproduction\">Wasmtime GC Heap Out Of Memory Reproduction</a></div><div class=\"message_embed_description\">Wasmtime GC Heap Out Of Memory Reproduction. GitHub Gist: instantly share code, notes, and snippets.</div></div></div>",
+        "id": 486803220,
+        "sender_full_name": "CryZe",
+        "timestamp": 1733691861
+    },
+    {
+        "content": "<p>And yes it's the DRC GC as I'm also getting panics like these occasionally: <br>\n<a href=\"/user_uploads/15107/YGk5JTMOjnwZXm1xJLPBrGD2/image.png\">image.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/YGk5JTMOjnwZXm1xJLPBrGD2/image.png\" title=\"image.png\"><img data-original-dimensions=\"579x111\" src=\"/user_uploads/thumbnail/15107/YGk5JTMOjnwZXm1xJLPBrGD2/image.png/840x560.webp\"></a></div>",
+        "id": 486803558,
+        "sender_full_name": "CryZe",
+        "timestamp": 1733692166
+    },
+    {
+        "content": "<p>Actually if the GC heap is 512 KiB then the ~16500 is probably actually 16384, which would mean each call to <code>update</code> leaks exactly 32 bytes of memory.</p>",
+        "id": 486805192,
+        "sender_full_name": "CryZe",
+        "timestamp": 1733693714
+    },
+    {
+        "content": "<p>I've just now tried different sizes and it seems like it always allocates in multiples of 32 bytes... and leaks them entirely. (The 32 bytes rounding also would explain why different types always all errored out after the same amount of update calls)</p>",
+        "id": 486806018,
+        "sender_full_name": "CryZe",
+        "timestamp": 1733694440
+    },
+    {
+        "content": "<p>Thanks for the reduction! these things help a ton</p>\n<p>fwiw, it is probably 16383 since the first slot is always empty so that all GC refs are \"non-null\"</p>\n<p>fyi, I probably won't get to this for a couple weeks, maybe not until the new year, since I need to write up Wasmtime's end-of-year recap blog post and all that kind of stuff</p>",
+        "id": 487258132,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1733839579
+    },
+    {
+        "content": "<p>and yes, we have minimum alignment and block size for all GC objects in the DRC:  <a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/gc/enabled/free_list.rs#L15-L21\">https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/gc/enabled/free_list.rs#L15-L21</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/gc/enabled/free_list.rs#L15-L21\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/283c8c8af1dd4f068a8eab3358d5d354440ea17b/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343635663239613439303337393730653535623332646430613737373761353335653037303036323839313035396364613362323363393937636337393633312f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/gc/enabled/free_list.rs#L15-L21\" title=\"wasmtime/crates/wasmtime/src/runtime/vm/gc/enabled/free_list.rs at main · bytecodealliance/wasmtime\">wasmtime/crates/wasmtime/src/runtime/vm/gc/enabled/free_list.rs at main · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A lightweight WebAssembly runtime that is fast, secure, and standards-compliant - bytecodealliance/wasmtime</div></div></div>",
+        "id": 487258590,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1733839697
+    }
+]

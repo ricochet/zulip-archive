@@ -1,0 +1,132 @@
+<html>
+<head><meta charset="utf-8"><title>Adding a new syscall to WASI and implement in Wasmtime · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Adding.20a.20new.20syscall.20to.20WASI.20and.20implement.20in.20Wasmtime.html">Adding a new syscall to WASI and implement in Wasmtime</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="192348026"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Adding%20a%20new%20syscall%20to%20WASI%20and%20implement%20in%20Wasmtime/near/192348026" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Radu Matei <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Adding.20a.20new.20syscall.20to.20WASI.20and.20implement.20in.20Wasmtime.html#192348026">(Mar 31 2020 at 06:00)</a>:</h4>
+<p>Hi, everyone!</p>
+<p>I've been playing around with trying to define a new syscall in <code>wasi_snapshot_preview1</code> that I could import in modules.<br>
+I've added the function interface in the <code>witx</code> file from <code>WASI/phases/snapshot</code>:</p>
+<div class="codehilite"><pre><span></span>  ;;; Print a greeting message.
+  (@interface func (export &quot;print_greeting&quot;)
+    (result $error $errno)
+  )
+</pre></div>
+
+
+<p>Which updated <code>wasi_common::snapshots::WasiSnapshotPreview1</code>, so had to add the implementation for <code>WasiCtx</code>:</p>
+<div class="codehilite"><pre><span></span>    fn print_greeting(&amp;self) -&gt; Result&lt;()&gt; {
+        debug!(&quot;DEBUG PRINT_GREETING&quot;);
+        log::warn!(&quot;WARN PRINT_GREETING&quot;);
+        println!(&quot;Hello World from the new print_greeting syscall in WASI&quot;);
+        Ok(())
+    }
+</pre></div>
+
+
+<p>At this point I can write a simple module that tries to import the newly added syscall, and _it doesn't fail_, but the actual function doesn't get executed:</p>
+<div class="codehilite"><pre><span></span>(module
+    ;; (import &quot;wasi_snapshot_preview1&quot; &quot;print_greeting&quot; (func $print_greeting))
+    (import &quot;wasi_snapshot_preview1&quot; &quot;print_greeting&quot; (func $print_greeting (result i32)))
+    (func $main (export &quot;_start&quot;)
+
+        (call $print_greeting)
+        return
+    )
+)
+</pre></div>
+
+
+<div class="codehilite"><pre><span></span>$ RUST_LOG=info ./target/debug/wasmtime run examples/new-syscall.wat -g
+ INFO  faerie::elf &gt; strtab: 0x271 symtab 0x358 relocs 0x4a8 sh_offset 0x658
+</pre></div>
+
+
+<p>The function itself does get wired up in the functions Wasmtime links - for example trying to import a non-existing function:</p>
+<div class="codehilite"><pre><span></span>    import `non-existing-function` was not found in module `wasi_snapshot_preview1`
+</pre></div>
+
+
+<p>So my questions are whether the above is reasonable (keep in mind all this is educational) and what are the other places where the actual execution should be wired up.</p>
+<p>Thanks!</p>
+
+
+
+<a name="192353019"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Adding%20a%20new%20syscall%20to%20WASI%20and%20implement%20in%20Wasmtime/near/192353019" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Konka <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Adding.20a.20new.20syscall.20to.20WASI.20and.20implement.20in.20Wasmtime.html#192353019">(Mar 31 2020 at 07:28)</a>:</h4>
+<p>Hey <span class="user-mention" data-user-id="269505">@Radu M</span>! You're actually on the right track. The thing you're missing is memory export directive. This WAT should work:</p>
+<div class="codehilite"><pre><span></span>(module
+    ;; (import &quot;wasi_snapshot_preview1&quot; &quot;print_greeting&quot; (func $print_greeting))
+    (import &quot;wasi_snapshot_preview1&quot; &quot;print_greeting&quot; (func $print_greeting (result i32)))
+
+    (memory 1)
+    (export &quot;memory&quot; (memory 0))
+
+    (func $main (export &quot;_start&quot;)
+
+        (call $print_greeting)
+        return
+    )
+)
+</pre></div>
+
+
+
+<a name="192353177"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Adding%20a%20new%20syscall%20to%20WASI%20and%20implement%20in%20Wasmtime/near/192353177" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Konka <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Adding.20a.20new.20syscall.20to.20WASI.20and.20implement.20in.20Wasmtime.html#192353177">(Mar 31 2020 at 07:30)</a>:</h4>
+<p>Oh, and if you run with the following invocation in your shell (assuming you've got the latest master built)</p>
+<div class="codehilite"><pre><span></span>env RUST_LOG=wasi_common=trace wasmtime new-syscall.wat
+</pre></div>
+
+
+<p>You should get auto-generated traces for all invoked syscalls. So you should see something like this:</p>
+<div class="codehilite"><pre><span></span> DEBUG wasi_common::ctx &gt; WasiCtx inserting entry PendingEntry::Thunk(0x7ffee4071978)
+ DEBUG wasi_common::sys::unix::entry &gt; Host fd 0 is a char device
+ DEBUG wasi_common::ctx              &gt; WasiCtx inserted at Fd(0)
+ DEBUG wasi_common::ctx              &gt; WasiCtx inserting entry PendingEntry::Thunk(0x7ffee4071978)
+ DEBUG wasi_common::sys::unix::entry &gt; Host fd 1 is a char device
+ DEBUG wasi_common::ctx              &gt; WasiCtx inserted at Fd(1)
+ DEBUG wasi_common::ctx              &gt; WasiCtx inserting entry PendingEntry::Thunk(0x7ffee4071978)
+ DEBUG wasi_common::sys::unix::entry &gt; Host fd 2 is a char device
+ DEBUG wasi_common::ctx              &gt; WasiCtx inserted at Fd(2)
+ DEBUG wasi_common::old::snapshot_0::ctx &gt; WasiCtx inserting (0, Some(PendingEntry::Thunk(0x7ffee4072fa0)))
+ DEBUG wasi_common::old::snapshot_0::sys::unix::entry_impl &gt; Host fd 0 is a char device
+ DEBUG wasi_common::old::snapshot_0::ctx                   &gt; WasiCtx inserting (1, Some(PendingEntry::Thunk(0x7ffee4072fb0)))
+ DEBUG wasi_common::old::snapshot_0::sys::unix::entry_impl &gt; Host fd 1 is a char device
+ DEBUG wasi_common::old::snapshot_0::ctx                   &gt; WasiCtx inserting (2, Some(PendingEntry::Thunk(0x7ffee4072fc0)))
+ DEBUG wasi_common::old::snapshot_0::sys::unix::entry_impl &gt; Host fd 2 is a char device
+ TRACE wasi_common::wasi::wasi_snapshot_preview1           &gt; print_greeting()
+ TRACE wasi_common::snapshots::wasi_snapshot_preview1      &gt; Hmm
+ TRACE wasi_common::wasi::wasi_snapshot_preview1           &gt;      | errno=No error occurred. System call completed successfully. (Errno::Success(0))
+</pre></div>
+
+
+
+<a name="192353202"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Adding%20a%20new%20syscall%20to%20WASI%20and%20implement%20in%20Wasmtime/near/192353202" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Konka <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Adding.20a.20new.20syscall.20to.20WASI.20and.20implement.20in.20Wasmtime.html#192353202">(Mar 31 2020 at 07:31)</a>:</h4>
+<p>Hope this helps! If things are still amiss, lemme know and I'll try to help!</p>
+
+
+
+<a name="192353215"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Adding%20a%20new%20syscall%20to%20WASI%20and%20implement%20in%20Wasmtime/near/192353215" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Radu Matei <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Adding.20a.20new.20syscall.20to.20WASI.20and.20implement.20in.20Wasmtime.html#192353215">(Mar 31 2020 at 07:31)</a>:</h4>
+<p>Ah!<br>
+That works, thank you so much, <span class="user-mention" data-user-id="263195">@Jakub Konka</span> !</p>
+
+
+
+<a name="192353223"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Adding%20a%20new%20syscall%20to%20WASI%20and%20implement%20in%20Wasmtime/near/192353223" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Konka <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Adding.20a.20new.20syscall.20to.20WASI.20and.20implement.20in.20Wasmtime.html#192353223">(Mar 31 2020 at 07:31)</a>:</h4>
+<p>No probs!</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

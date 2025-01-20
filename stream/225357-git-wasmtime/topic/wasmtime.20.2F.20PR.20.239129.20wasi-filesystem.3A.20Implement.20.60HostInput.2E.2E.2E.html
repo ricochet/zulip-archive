@@ -1,0 +1,211 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #9129 wasi-filesystem: Implement `HostInput... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html">wasmtime / PR #9129 wasi-filesystem: Implement `HostInput...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="462377954"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462377954" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462377954">(Aug 14 2024 at 16:10)</a>:</h4>
+<p>badeend opened <a href="https://github.com/bytecodealliance/wasmtime/pull/9129">PR #9129</a> from <code>badeend:file-hostinputstream</code> to <code>bytecodealliance:main</code>:</p>
+<blockquote>
+<p>Fixes #9058</p>
+<hr>
+<p>All input streams are implemented using the <code>HostInputStream</code> trait. Except files. They got special treatment. This can be seen in the definition of <code>InputStream</code>:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/ba864e987ef1ab87c439ca6b396264547d2425e1/crates/wasi/src/stream.rs#L165-L168">https://github.com/bytecodealliance/wasmtime/blob/ba864e987ef1ab87c439ca6b396264547d2425e1/crates/wasi/src/stream.rs#L165-L168</a></p>
+<p>The special case was introduced to work around the fact that OS'es don't actually provide any _true_ async APIs for files. A more detailed explanation can be read in the PR that introduced this setup: <a href="https://github.com/bytecodealliance/wasmtime/pull/6556">https://github.com/bytecodealliance/wasmtime/pull/6556</a></p>
+<hr>
+<p>This PR properly implements the <code>HostInputStream</code> &amp; <code>HostOutputStream</code> traits for files. And with "properly" I mean:</p>
+<ul>
+<li>methods that shouldn't block (e.g. <code>read</code> &amp; <code>write</code>) now really don't block.</li>
+<li>methods that are allowed to block (e.g. <code>blocking_read</code> &amp; <code>blocking_write_and_flush</code>) continue to block and still take advantage of <code>allow_blocking_current_thread</code>.</li>
+</ul>
+<p>Primary changes:</p>
+<ul>
+<li><code>InputStream</code> has been changed from an enum to a type alias, just like <code>Outputstream</code> already is.</li>
+<li>The Host(Input/Output)Stream traits have been extended to allow implementors to provide specialized <code>blocking_*</code> implementations. In this PR, only the File streams actually override these.</li>
+<li>Added an <code>async fn cancel(&amp;mut self) {}</code> method to the Host(Input/Output)Stream traits. This is called right before the stream is dropped and can be used to wait for asynchronous cleanup.<ul>
+<li>On File streams, this is used to wait on any in flight read or write. Operating systems don't provide _real_ asynchronous APIs for files, so we end up spawning uncancellable blocking background tasks. In the new <code>cancel</code> method we wait for that read/write to run to completion. From the guest's point of view, <code>input/output-stream::drop</code> then appears to block. Certainly less than ideal, but arguably still better than letting the guest rack up an unbounded number of background tasks. Also, the guest is only blocked if the stream was dropped mid-read or mid-write, which is not expected to occur frequently.</li>
+<li>I also implemented it for <a href="https://github.com/bytecodealliance/wasmtime/commit/d1b891f30f389fd51e7c80a0297afff283e9b0fd">various other stream types</a>. Unlike Files, the background tasks of these stream types are truly async. So aborting _without_ awaiting them was probably already good enough in practice. Nonetheless, waiting for the background task to actually shut down feels more "hygienic" to me in terms of resource management.</li>
+</ul>
+</li>
+</ul>
+<p>Slightly related changes:</p>
+<ul>
+<li>In Preview1 adapter: ignore BlockingMode and always perform blocking I/O. That's what preview1 did anyway.</li>
+<li>Remove <code>[method]output-stream.forward</code> from bindgen config. That method does not exist.</li>
+<li>Refactor <code>blocking_splice</code> to take advantage of specialized <code>blocking_read</code> &amp; <code>blocking_write_and_flush</code> implementations</li>
+<li>Rename filesystem's <code>spawn_blocking</code> -&gt; <code>run_blocking</code></li>
+</ul>
+</blockquote>
+
+
+
+<a name="462377959"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462377959" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462377959">(Aug 14 2024 at 16:10)</a>:</h4>
+<p><strong>badeend</strong> requested <a href="https://github.com/pchickey">pchickey</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/9129">PR #9129</a>.</p>
+
+
+
+<a name="462377961"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462377961" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462377961">(Aug 14 2024 at 16:10)</a>:</h4>
+<p><strong>badeend</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers">wasmtime-core-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/9129">PR #9129</a>.</p>
+
+
+
+<a name="462573846"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462573846" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462573846">(Aug 15 2024 at 15:19)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#pullrequestreview-2240612103">PR review</a>:</p>
+<blockquote>
+<p>Thanks for taking on this refactoring, I really like how it's turned out! I think that this will work quite well.</p>
+<p>One thing I can note which I was originally worried about but am no longer is that it's still possible for guests to queue up a lot of tasks. For example if a guest queues a write and then cancels it that'll block the guest waiting to cancel that write. The host may then cancel the host guest which will cancel-the-cancel in a way meaning that the write's just sitting in the ether on a blocking thread waiting to be completed. That initially sounded bad to me but I think this is ok because Tokio has a fixed size of blocking calls which can be "in the ether" and otherwise cancellation of a job in the queue that hasn't actually run yet is successful. This means that it's not possible to get an unbounded number of writes pending at any point with this cancellation.</p>
+<p>I've got some minor stylistic thoughts below but otherwise this looks good-to-go to me <span aria-label="+1" class="emoji emoji-1f44d" role="img" title="+1">:+1:</span> </p>
+</blockquote>
+
+
+
+<a name="462573848"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462573848" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462573848">(Aug 15 2024 at 15:19)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#discussion_r1718548931">PR review comment</a>:</p>
+<blockquote>
+<p>The implementation of this seems a little subtle and while I see no issue with it I think it would be best to share as much as possible with the above code. Could something like this work?</p>
+<ul>
+<li>In <code>blocking_read</code> first resolve the <code>Waiting</code> state if any with a <code>.await</code></li>
+<li>Next handle the <code>Idle</code> state by performing a <code>run_blocking</code> but the result of that is handled in a shared way with what <code>wait_ready</code> does (setting <code>self.state</code> internall)</li>
+<li>Next handle the results of the read in the same way as <code>fn read</code> above (perhaps even just calling <code>self.read(size)</code>?)</li>
+</ul>
+<p>That I think will keep the <code>blocking_read</code> bits here deduplicated with the rest and the only responsibility of <code>blocking_read</code> vs <code>read</code> would be to filter the states that <code>read</code> can see by doing blocking work up front.</p>
+</blockquote>
+
+
+
+<a name="462573849"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462573849" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462573849">(Aug 15 2024 at 15:19)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#discussion_r1718542849">PR review comment</a>:</p>
+<blockquote>
+<p>Should this perhaps <code>await</code> the result of the read here inline?</p>
+</blockquote>
+
+
+
+<a name="462573850"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462573850" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462573850">(Aug 15 2024 at 15:19)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#discussion_r1718545333">PR review comment</a>:</p>
+<blockquote>
+<p>I'm a little confused by this, is it required? I would expect that reads are only initiated from the <code>read</code> method above (or blocking-read) and the <code>ready</code> bits here only wait for completion of an already pending read.</p>
+</blockquote>
+
+
+
+<a name="462612670"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462612670" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462612670">(Aug 15 2024 at 18:26)</a>:</h4>
+<p>badeend submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#pullrequestreview-2241062928">PR review</a>.</p>
+
+
+
+<a name="462612672"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462612672" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462612672">(Aug 15 2024 at 18:26)</a>:</h4>
+<p>badeend created <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#discussion_r1718823860">PR review comment</a>:</p>
+<blockquote>
+<blockquote>
+<p>is it required?</p>
+</blockquote>
+<p>Not sure, but the current wasmtime-wasi implementation would push me towards a hesitant "Yes?"<br>
+I kinda stole the idea from the stdin implementation that also initiates a new read if there's no data available:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/stdio/worker_thread_stdin.rs#L156-L175">https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/stdio/worker_thread_stdin.rs#L156-L175</a></p>
+<p>This, combined with the fact that there exist multiple places in the code that blindly assume that calling <code>.ready().await</code> will yield readable data:</p>
+<p><a href="https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/host/io.rs#L178-L182">https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/host/io.rs#L178-L182</a><br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/host/io.rs#L211-L214">https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/host/io.rs#L211-L214</a><br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/host/io.rs#L231-L234">https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/host/io.rs#L231-L234</a><br>
+<a href="https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/stream.rs#L153-L154">https://github.com/bytecodealliance/wasmtime/blob/c7756bd2654fe1ac795f9dd9d13de41a31cafbac/crates/wasi/src/stream.rs#L153-L154</a></p>
+</blockquote>
+
+
+
+<a name="462613047"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462613047" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462613047">(Aug 15 2024 at 18:28)</a>:</h4>
+<p>badeend created <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#discussion_r1718825976">PR review comment</a>:</p>
+<blockquote>
+<p>Hmm, this should've actually been <code>unreachable!()</code> as this state is awaited higher up in the function. </p>
+</blockquote>
+
+
+
+<a name="462613049"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462613049" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462613049">(Aug 15 2024 at 18:28)</a>:</h4>
+<p>badeend submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#pullrequestreview-2241066025">PR review</a>.</p>
+
+
+
+<a name="462619207"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462619207" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462619207">(Aug 15 2024 at 19:07)</a>:</h4>
+<p>badeend updated <a href="https://github.com/bytecodealliance/wasmtime/pull/9129">PR #9129</a>.</p>
+
+
+
+<a name="462619561"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462619561" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462619561">(Aug 15 2024 at 19:09)</a>:</h4>
+<p>badeend submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#pullrequestreview-2241140051">PR review</a>.</p>
+
+
+
+<a name="462619562"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462619562" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462619562">(Aug 15 2024 at 19:09)</a>:</h4>
+<p>badeend created <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#discussion_r1718873625">PR review comment</a>:</p>
+<blockquote>
+<p>Something like <a href="https://github.com/bytecodealliance/wasmtime/pull/9129/commits/7e2b7e9ec507313d13f877d6f7a1557577a2578a">this</a>?</p>
+</blockquote>
+
+
+
+<a name="462640966"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462640966" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462640966">(Aug 15 2024 at 21:04)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#pullrequestreview-2241330797">PR review</a>.</p>
+
+
+
+<a name="462640967"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462640967" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462640967">(Aug 15 2024 at 21:04)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#discussion_r1718992988">PR review comment</a>:</p>
+<blockquote>
+<p>Perfect!</p>
+</blockquote>
+
+
+
+<a name="462641700"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462641700" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462641700">(Aug 15 2024 at 21:10)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#pullrequestreview-2241342070">PR review</a>.</p>
+
+
+
+<a name="462641701"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462641701" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462641701">(Aug 15 2024 at 21:10)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#discussion_r1719000183">PR review comment</a>:</p>
+<blockquote>
+<p>Hm ok, I'm not sure if this will survive the test of time but following suit with stdin doesn't seem unreasonable. This shouldn't get hit most of the time for the time being as WASIp1 shouldn't use this. Let's go ahead and land it <span aria-label="+1" class="emoji emoji-1f44d" role="img" title="+1">:+1:</span> </p>
+</blockquote>
+
+
+
+<a name="462643660"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462643660" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462643660">(Aug 15 2024 at 21:25)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/9129">PR #9129</a>.</p>
+
+
+
+<a name="462651706"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239129%20wasi-filesystem%3A%20Implement%20%60HostInput.../near/462651706" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239129.20wasi-filesystem.3A.20Implement.20.60HostInput.2E.2E.2E.html#462651706">(Aug 15 2024 at 22:25)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/wasmtime/pull/9129#issuecomment-2292394761">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/9129">PR #9129</a>:</p>
+<blockquote>
+<p>@badeend sorry I didn't get time to review this before it landed, but thanks very much for working on it!</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

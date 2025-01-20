@@ -1,0 +1,149 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #3345 Add a new `Func::wrap_cabi` API · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233345.20Add.20a.20new.20.60Func.3A.3Awrap_cabi.60.20API.html">wasmtime / PR #3345 Add a new `Func::wrap_cabi` API</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="253133711"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233345%20Add%20a%20new%20%60Func%3A%3Awrap_cabi%60%20API/near/253133711" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233345.20Add.20a.20new.20.60Func.3A.3Awrap_cabi.60.20API.html#253133711">(Sep 13 2021 at 18:05)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/3345">PR #3345</a> from <code>add-c-api-func-wrap</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit adds a new API to the <code>wasmtime::Func</code> type for wrapping a<br>
+C-ABI function with a well-defined signature derived from a wasm type<br>
+signature. The purpose of this API is to add the-most-optimized-we-can<br>
+path for using the C API and having wasm call host functions. Previously<br>
+when wasm called a host function it would perform these steps:</p>
+<ol>
+<li>
+<p>Using a trampoline, place all arguments into a <code>u128*</code> array on the<br>
+   stack.</p>
+</li>
+<li>
+<p>Call <code>Func::invoke</code> which uses the type of the function (dynamically)<br>
+   to read values from this <code>u128*</code>.</p>
+</li>
+<li>
+<p>Values are placed within a <code>Vec&lt;Val&gt;</code> after being read.</p>
+</li>
+<li>
+<p>The C API receives <code>&amp;[Val]</code> and translates this to<br>
+<code>&amp;[wasmtime_val_t]</code>, iterating over each value and copying its<br>
+   contents into a new vector.</p>
+</li>
+<li>
+<p>Then the host function is actually called.</p>
+</li>
+<li>The above argument-shuffling steps are all performed in reverse for<br>
+   the results, shipping everything through <code>wasmtime_val_t</code> and <code>Val</code>.</li>
+</ol>
+<p>PRs such as #3319 and related attempts have made this sequence faster,<br>
+but the numbers on #3319 show that even after we get all the allocation<br>
+and such bits out of the way we're still spending quite a lot of time<br>
+shuffling arguments back-and-forth relative to the <code>Func::wrap</code> API that<br>
+Rust can use.</p>
+<p>This commit fixes the issue by eliminating all steps except 1/5 above.<br>
+Although we still place all arguments on the stack and read them out<br>
+again to call the C-defined function with it's much faster than pushing<br>
+this all through the <code>Val</code> and <code>wasmtime_val_t</code> machinery. This overall<br>
+gets the cost of a wasm-&gt;host call basically on-par with <code>Func::wrap</code>,<br>
+although it's still not as optimized. Benchmarking the overhead of<br>
+wasm-&gt;host calls, where <code>i64</code> returns one i64 value and <code>many</code> takes 5<br>
+<code>i32</code> parameters and returns one <code>i64</code> value, the numbers I get are:</p>
+<table>
+<thead>
+<tr>
+<th>Import</th>
+<th>Rust</th>
+<th>C before</th>
+<th>C after</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>i64</code></td>
+<td>1ns</td>
+<td>40ns</td>
+<td>7ns</td>
+</tr>
+<tr>
+<td><code>many</code></td>
+<td>1ns</td>
+<td>91ns</td>
+<td>10ns</td>
+</tr>
+</tbody>
+</table>
+<p>This commit is a clear win over the previous implementation, but it's<br>
+even still somewhat far away from Rust. That being said I think I'm out<br>
+of ideas of how to make this better. Without open-coding much larger<br>
+portions of <code>wasmtime</code> I'm not sure how much better we can get here. The<br>
+time in C after this commit is almost entirely spent in trampolines<br>
+storing the arguments to the stack and loading them later, and at this<br>
+point I'm not sure how much more optimized we can get than that since<br>
+Rust needs to enter the picture here somehow to handle the Wasmtime<br>
+fiddly-bits of calling back into C. I'm hopeful, though, that this is<br>
+such a large improvement from before that the question of optimizing<br>
+this further in C is best left for another day.</p>
+<p>The new <code>Func::wrap_cabi</code> method is unlikely to ever get used from Rust,<br>
+but a <code>wasmtime_func_wrap</code> API was added to the C API to mirror<br>
+<code>Func::wrap</code> where if the host function pointer has a specific ABI this<br>
+function can be called instead of <code>wasmtime_func_new</code>.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="253135110"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233345%20Add%20a%20new%20%60Func%3A%3Awrap_cabi%60%20API/near/253135110" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233345.20Add.20a.20new.20.60Func.3A.3Awrap_cabi.60.20API.html#253135110">(Sep 13 2021 at 18:15)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3345">PR #3345</a> from <code>add-c-api-func-wrap</code> to <code>main</code>.</p>
+
+
+
+<a name="253150297"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233345%20Add%20a%20new%20%60Func%3A%3Awrap_cabi%60%20API/near/253150297" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233345.20Add.20a.20new.20.60Func.3A.3Awrap_cabi.60.20API.html#253150297">(Sep 13 2021 at 19:58)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3345">PR #3345</a> from <code>add-c-api-func-wrap</code> to <code>main</code>.</p>
+
+
+
+<a name="253152304"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233345%20Add%20a%20new%20%60Func%3A%3Awrap_cabi%60%20API/near/253152304" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233345.20Add.20a.20new.20.60Func.3A.3Awrap_cabi.60.20API.html#253152304">(Sep 13 2021 at 20:10)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3345">PR #3345</a> from <code>add-c-api-func-wrap</code> to <code>main</code>.</p>
+
+
+
+<a name="253317170"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233345%20Add%20a%20new%20%60Func%3A%3Awrap_cabi%60%20API/near/253317170" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233345.20Add.20a.20new.20.60Func.3A.3Awrap_cabi.60.20API.html#253317170">(Sep 14 2021 at 20:18)</a>:</h4>
+<p>alexcrichton closed without merge <a href="https://github.com/bytecodealliance/wasmtime/pull/3345">PR #3345</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

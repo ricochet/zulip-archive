@@ -1,0 +1,152 @@
+[
+    {
+        "content": "<p>Context: I'm working on adding resource support to <code>wasm-compose</code> and <code>wasi-virt</code>.  In the process, I was going to update the middleware example in the <code>wasm-tools</code> repo to use <code>wasi-http</code>-style resources to represent requests and responses.  However I immediately ran into a problem which leads me to wonder if implementing general-purpose middleware using component composition for <code>wasi:http/incoming-handler</code> might not be possible.</p>\n<p>The example in the <code>wasm-tools</code> repo involves composing a <code>service</code> component with a <code>middleware</code> component such that the latter compresses the body of the response returned by the former.  That works just fine when the response is represented as a <code>record</code> with a <code>list&lt;u8&gt;</code> body.  With <code>wasi-http</code>, though, both requests and responses are represented as <code>resource</code>s, and the signature of the <code>wasi:http/incoming-handler#handle</code> function takes <code>IncomingRequest</code> and <code>ResponseOutparam</code> resource handles.  Ideally, the <code>middleware</code> component would export the <code>handle</code> function from the host and import it from the <code>service</code> component.  Moreover, the <code>middleware</code> component should import the relevant resource types from the host and export its own \"virtualized\" versions of those resources to the <code>service</code> component.  However, a component cannot import a function which refers to types that it is exporting, which means the <code>handle</code> function it imports from the <code>service</code> component can only refer to the host's versions of those resource types.</p>\n<p>Is there a way around this?  The best I can come up with so far (and this just occurred to me, so it's a half-baked idea) is to add a third component to the above scenario which exports virtualized versions of the relevant resources plus some kind of \"hook\" API the <code>middleware</code> component can use to intercept the resource method calls it cares about.  Then both the <code>middleware</code> and the <code>service</code> component would import the resource types from the third component, which in turn would import the \"real\" versions from the host.</p>",
+        "id": 400585424,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1699293682
+    },
+    {
+        "content": "<p>Just had a good conversation with <span class=\"user-mention\" data-user-id=\"253998\">@Luke Wagner</span> about this, which I'll try to summarize here (any errors are my own, which perhaps he'll be kind enough to correct).</p>\n<p>First, you <em>can</em> create a component which both imports from and exports to another component.  This can't be expressed in WIT and can't be done using <code>wasm-compose</code> (to my knowledge), but you could theoretically build a wrapper component around the original one such that the wrapper instantiates the original and handles the cyclical relationship using lifted functions which use <code>call_indirect</code> at the core Wasm level.  In fact, you can create arbitrary graphs of components containing cycles as long as the cycles are \"broken\" using <code>call_indirect</code>.  Presumably <code>wasi-virt</code> does something like this.</p>\n<p>Second, you can always do service chaining the old-fashioned way by having the <code>middleware</code> component do an outbound HTTP request to the <code>service</code> component (which the host <em>might</em> optimize if it notices the <code>service</code> can be invoked without using the network at all).  I.e. you don't <em>need</em> component composition to do service chaining, and you probably won't want to use it for that until Preview 3.</p>\n<p>Once Preview 3 arrives, we'll be able to do efficient, local service chaining using component composition, and this will <em>not</em> require virtualizing resource types.  In my <code>middleware</code>/<code>service</code> example, the <code>middleware</code> component can call the <code>service</code> component's <code>handle</code> function, which returns a <code>Response</code> resource, from which <code>middleware</code> can extract the body as a stream (and anything else it wants), create a <em>new</em> <code>Response</code> with <em>new</em> stream, and pipe from the original stream to the new one while applying any desired transformations (e.g. compression).  None of that requires virtualizing any resource types, breaking cycles, etc. (i.e. it can all be done with standard, <code>wasm-compose</code>-style composition).</p>",
+        "id": 400812714,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1699389561
+    },
+    {
+        "content": "<p>Re: last paragraph, is the juggling kinda similar to how it goes with Rust's std::process::Command? (stdin et al)</p>",
+        "id": 402007353,
+        "sender_full_name": "kellytk",
+        "timestamp": 1699974828
+    },
+    {
+        "content": "<p>Yeah, that seems like a good analogy.  You can create multiple <code>Command</code>s and pipe the stdout of one to the stdin of another, using the equivalent plumbing to what a POSIX shell would do when you use the <code>|</code> (pipe) operator.</p>",
+        "id": 402030632,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1699981585
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> thank you for the summary. Just a couple clarifying questions.<br>\nYou mention, \"I.e. you don't need component composition to do service chaining, and you probably won't want to use it for that until Preview 3.\" Service chaining seems to be a really big use case that WASI HTTP + preview 2 has unlocked. I am not sure I understand why we don't want to use it yet, even without WASI virt.</p>\n<p>I just want to clarify why we think preview 3 will solve this. It sounds like with preview 3 we are avoiding needing to import/export Types? Is this a goal or side effect of preview 3. Just catching up.</p>",
+        "id": 402081337,
+        "sender_full_name": "Kate Goldenring",
+        "timestamp": 1700000758
+    },
+    {
+        "content": "<p>Guy and I just realized <code>wasi-virt --allow-http</code> is broken for exactly the reason I described above.  It currently relies on <code>wasm-compose</code>, which can't handle cycles (as noted earlier).  If you're only doing outbound requests, you're fine (or at least you will be once I PR a fix for that), but if you're handling inbound requests you hit the cycle issue.</p>\n<p>In my summary above, I basically concluded that we don't need or want virtualization to implement middleware anyway, but Guy reminded me that if you're not virtualizing <code>wasi-http</code>, you can't use <code>wasi-virt</code> to virtualize <em>anything</em> involving streams.  That means no virtual filesystem, etc.  At most, you can virtualize the bits that don't involve streams (e.g. env, clocks, and random), but that's it.  Kind of a sad state of affairs.</p>\n<p>So now Guy and I are thinking we <em>do</em> want to support virtualizing all of <code>wasi-http</code>, including inbound, which I think means we need to do one of the following:</p>\n<ul>\n<li>Add support for cycles in <code>wasm-compose</code></li>\n<li>Stop using <code>wasm-compose</code> in <code>wasi-virt</code> and implement a custom component wrapping solution</li>\n<li>Create a new tool that does that, which <code>wasi-virt</code> can use</li>\n</ul>",
+        "id": 402081439,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1700000792
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"582009\">@Kate Goldenring</span>: Till and I believe the best way to do general purpose service chaining with Preview 2 is by locally connecting outbound requests to incoming handlers without going over the network.  That allows us to do concurrent I/O with minimal buffering, which is not possible otherwise via composition given the current state of the component model.  For middleware applications that don't need to stream request or response bodies across component boundaries, composition can still be a good option, though.</p>",
+        "id": 402082030,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1700001059
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"582009\">@Kate Goldenring</span>: The plan for Preview 3 is to include native async and stream support in the component model, which will allow concurrent I/O across composed component boundaries.</p>",
+        "id": 402082337,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1700001210
+    },
+    {
+        "content": "<p>one way to explain this that may be helpful: in preview 2, scheduling of concurrent IO is managed with wasi:io/poll and wasi:io/stream, which are component model interfaces that expose resources (pollable, input-stream, output-stream)</p>",
+        "id": 402082616,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001339
+    },
+    {
+        "content": "<p>in order to import a component model interface that exposes any sort of io (meaning, anything in the interface returns a pollable or stream, like the wasi-http interface does), you also need to import the wasi:io package's interfaces from that same component</p>",
+        "id": 402082804,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001414
+    },
+    {
+        "content": "<p>and you can only have a single import of the wasi:io package's imports per component</p>",
+        "id": 402082864,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001436
+    },
+    {
+        "content": "<p>this effectively means, every time you import an interface such as http, you have to import it from a component that provides the entire world of io and every other interface that uses io</p>",
+        "id": 402082938,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001468
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253989\">@Peter Huene</span> do you have thoughts on the <code>wasi-virt</code> situation I described above?</p>",
+        "id": 402083106,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1700001536
+    },
+    {
+        "content": "<p>wasi-virt is the only component that tries to provide this complete wrapper of your world, but wasi-virt itself is incomplete so it doesnt actually do it yet. once joel (or someone else) fixes the problems with wasi-virt, it will provide the entire set of interfaces you import, even if all you need to do is override one part of the filesystem, it needs to virtualize your http as well</p>",
+        "id": 402083142,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001556
+    },
+    {
+        "content": "<p>ive called this style of component composition \"onion composition\" previous, because each layer you add on has to wrap the entire other layer, like an onion</p>",
+        "id": 402083176,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001584
+    },
+    {
+        "content": "<p>in short, it is not ideal. it is just the way these things have to work, at the moment, because wasi:io is an ordinary wit package.</p>",
+        "id": 402083282,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001619
+    },
+    {
+        "content": "<p>the goal for preview 3 (though, preview 3 is just whatever ships at the end of 2024, and who knows if this will be complete, so id actually prefer we start calling it something else like \"first-class component model async\" or something) is that instead of being a wit package, the primitives for scheduling and streams become component model primitives</p>",
+        "id": 402083376,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001663
+    },
+    {
+        "content": "<p>at which point we have a lot more power with how they can be implemented, they dont have to follow many of the rules of the canonical ABI as it exists today</p>",
+        "id": 402083425,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001684
+    },
+    {
+        "content": "<p>and then we can have composition of components that use the stream and scheduling primitives without having to do that onion composition</p>",
+        "id": 402083460,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001707
+    },
+    {
+        "content": "<p>among other things, that will make service chaining between http much simpler, because one element in the chain wont have to onion-wrap the other - if the inner element needs filesystem, the outer element doesnt have to virtualize that filesystem</p>",
+        "id": 402083651,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001780
+    },
+    {
+        "content": "<p>hopefully all of that makes sense, please let me help clarify if it doesnt!</p>",
+        "id": 402083700,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1700001804
+    },
+    {
+        "content": "<p>Here's an update on the state of <code>wasi-virt</code> support for <code>wasi:http/incoming-handler</code>.  First, a summary of the problem:</p>\n<ul>\n<li>In the component model, imports cannot refer to exported types, so the current <code>wasi-virt</code> model of using <code>wasm-compose</code> to compose a virtualization component (virt.wasm) with an application component (app.wasm) won't work if app.wasm targets <code>wasi:http/incoming-handler</code>.  Specifically, virt.wasm cannot import <code>wasi:http/incoming-handler#handle</code> from app.wasm because the parameter types (<code>incoming-request</code> and <code>response-outparam</code>) are the types virt.wasm is exporting to app.wasm.</li>\n<li>You can technically work around the above problem by introducing a third component (call it wrapper.wasm) which imports both the host and virt.wasm versions of <code>wasi:http/types</code>, plus some helper functions from virt.wasm to convert from the former to the latter.  wrapper.wasm exports a version of <code>wasi:http/incoming-handler#handle</code> that accepts the host's versions of <code>incoming-request</code> and <code>response-outparam</code>, uses the helper functions from virt.wasm to convert them to the virtualized versions of those types, and calls app.wasm's version of <code>wasi:http/incoming-handler#handle</code>.  This can all be expressed in the component model, but not in WIT or any tool that deals with WIT.</li>\n</ul>\n<p>After discussing this with <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span>, we've concluded that although it's technically possible to implement the three-component solution described above with some low-level WASM file manipulation, it would be better to add syntax to WIT which allows it to be expressed at that level.  That's not something we'll want to tackle until after WASI Preview 2 ships, though.  So we feel that this is not the right time to try to support <code>wasi:http/incoming-handler</code> in <code>wasi-virt</code>.  Instead, we plan to make the WIT syntax additions a priority post WASI Preview 2, at which point we'll have what we need to work on <code>wasi-virt</code>.</p>",
+        "id": 402557515,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1700169021
+    },
+    {
+        "content": "<p>Here's a diagram, in case it helps.<br>\n<a href=\"/user_uploads/15107/o7jaLd60HgokMX2_VkjN60qA/cycle.drawio1.png\">cycle.drawio1.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/o7jaLd60HgokMX2_VkjN60qA/cycle.drawio1.png\" title=\"cycle.drawio1.png\"><img src=\"/user_uploads/15107/o7jaLd60HgokMX2_VkjN60qA/cycle.drawio1.png\"></a></div>",
+        "id": 402558342,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1700169466
+    },
+    {
+        "content": "<p>Great to hear you're digging into virtualization, and these challenges make sense.  Two ideas:</p>\n<ul>\n<li>The \"introduce a third component\" option sounds like a reasonable starting point.  While it is currently difficult to achieve this composition using <code>wasm-compose</code> today using <code>wasm-compose</code>'s existing input syntax, <span class=\"user-mention\" data-user-id=\"253989\">@Peter Huene</span> and others have been working hard on a new input syntax for <code>wasm-compose</code> that captures pretty much the full expressivity of component linking (and with a new readable curly-brace syntax in the style of, and literally super-setting WIT).  I'm pretty sure your use case should be quite neatly expressible in this syntax (tentatively called \"WAC\" for \"WebAssembly Composition\"), so maybe ping Peter to use your use case as a motivating example?</li>\n<li>It should also be possible to avoid the need for a third/wrapper component by taking advantage of the fact that a parent component can <em>both</em> supply the imports <em>and</em> alias the exports of any child instance it creates (using <code>instantiate</code>).  The challenge here is that it's less clear what the developer tooling should look like b/c we're authoring core functions that are lifted into the child component (passed in via <code>with</code>, not exported) and we're lowering exports of the child component (accessed via <code>alias export</code>, not imported).  I've been imagining what this might look like using a proc-macro on a static variable in Rust setting and using ESM future features (based on source-phase imports) in a JS setting, so I'm happy to chat about that in more detail some time.</li>\n</ul>",
+        "id": 403240434,
+        "sender_full_name": "Luke Wagner",
+        "timestamp": 1700511986
+    },
+    {
+        "content": "<p>I've created a POC for doing middleware style chaining using wasi-http: <a href=\"https://github.com/rylev/wasi-http-middleware-prototype\">https://github.com/rylev/wasi-http-middleware-prototype</a></p>\n<p>The middleware calls down the middleware chain by calling into its outgoing-handler import which is intercepted by the runtime and forwarded to the downstream component which receives the request (without knowing that it actually came from a middleware component).</p>\n<p>Currently the demo code always forwards the outgoing-handler's request to the downstream components, but we'll want to come up with some protocol for distinguishing between passing a request down a middleware chain and making a legitimate HTTP call. <span class=\"user-mention\" data-user-id=\"480579\">@Lann Martin</span> had the idea of using the special TLD <code>.alt</code> for this.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rylev/wasi-http-middleware-prototype\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/3e64106eac40b6ff5a81a2fc0e0e03f357292104\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f303333636139663334343636333238663463316364353430363734663838393164383736643865313635373562303031386431363839366566646333396364612f72796c65762f776173692d687474702d6d6964646c65776172652d70726f746f74797065)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rylev/wasi-http-middleware-prototype\" title=\"GitHub - rylev/wasi-http-middleware-prototype\">GitHub - rylev/wasi-http-middleware-prototype</a></div><div class=\"message_embed_description\">Contribute to rylev/wasi-http-middleware-prototype development by creating an account on GitHub.</div></div></div>",
+        "id": 405409409,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701452076
+    }
+]

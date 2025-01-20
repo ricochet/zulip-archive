@@ -1,0 +1,68 @@
+[
+    {
+        "content": "<p>Has anyone thought about using custom allocators (both on the embedder and on the instance side) to make it possible for instances to release memory?</p>\n<p>Background: the grow-only semantics are turning out to be quite the problem for persistent instances in my runtime. A lot of code will have short bursts of larger memory usage and the instance ends up with way more memory than it actually needs. New code can be written to regularly re-create instances when they get too large, but that's both awkward and doesn't work for general purpose code that's not written with that constraint in mind.</p>\n<p>So in lack of an official solution my idea was to essentially emulate virtual linear memory for the guest with memory mapping.</p>\n<p>A custom allocator on the host provides two functions: <code>malloc</code> and <code>free</code>.</p>\n<p><code>malloc</code> initially always creates a new memory mapping at the end of current linear memory (think <code>MAP_ANONYMOUS | MAP_FIXED_NOREPLACE</code> on Linux)  to grow the memory. This should probably always do large chunks at once, at least 20+ Wasm pages.</p>\n<p><code>free</code> can now be used to release the memory, which will simply unmap the mapping, returning the memory to the host or to a cross-instance allocator. The relevant memory range needs to be reserved/protected to prevent access by the instance and a signal handler to recover from illegal access.</p>\n<p>There is now a hole in linear memory which can be re-used for future allocations.</p>\n<p>===</p>\n<p>On the guest side this needs a custom allocator that expects relatively large chunks of memory for each <code>malloc</code> and then uses it internally. It shouldn't be too hard to customize an existing allocator to do this, which can then be pretty easily used to patch up Rust/C/C++ code unobtrusively.</p>",
+        "id": 279223062,
+        "sender_full_name": "theduke",
+        "timestamp": 1650204166
+    },
+    {
+        "content": "<p>I <strong>think</strong> this should be implementable in Wasmtime as is with a <code>MemoryCreator</code>. The only open question for me is probably how to handle illegal access without blowing up the thread.</p>\n<p>Has anyone thought about or actually implemented something like this?<br>\nOr sees any concrete problems with the idea?</p>",
+        "id": 279223205,
+        "sender_full_name": "theduke",
+        "timestamp": 1650204365
+    },
+    {
+        "content": "<p>(addendum: ignore the <code>or to a cross-instance allocator</code> part above, which of course doesn't make sense with mapped memory)</p>",
+        "id": 279223536,
+        "sender_full_name": "theduke",
+        "timestamp": 1650204886
+    },
+    {
+        "content": "<p>I also don't know if creating tens of thousands or millions of mappings is a problem for the OS.<br>\nOn Linux the default limit is quite low with 65530. (<code>sysctl vm.max_map_count</code>)<br>\nQuite possible that this is rather unusual and could cause problems.</p>",
+        "id": 279223705,
+        "sender_full_name": "theduke",
+        "timestamp": 1650205184
+    },
+    {
+        "content": "<p>If I understand you right I believe this is something that Wasmtime does indeed not implement, but mainly because wasm itself has no facility for this. Linear memories in wasm can only be grown and never shrunk (or have holes in them). Changing that would be a CG-level proposal I believe.</p>\n<p>It may also be worth pointing out that linear memories and instances live as long as the Store that contains them, and that's an architectural decision of Wasmtime itself and not necessarily inherent to wasm (although I dont' think your question is directly related to this)</p>",
+        "id": 279290829,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1650291893
+    },
+    {
+        "content": "<p>Yeah this is something we are very unlikely to implement in a non-standard way.</p>\n<p>However, you may be interested in the <code>memory-control</code> Wasm proposal: <a href=\"https://github.com/WebAssembly/memory-control/blob/master/proposals/memory-control/Overview.md\">https://github.com/WebAssembly/memory-control/blob/master/proposals/memory-control/Overview.md</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/memory-control/blob/master/proposals/memory-control/Overview.md\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/86fa8552984caa6489c8ba525e9964a5107fad93\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f386539386432373636663230653161313437626434396337643763633835333033363134343037373661396162383333653837383561383364323765363838652f576562417373656d626c792f6d656d6f72792d636f6e74726f6c)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/memory-control/blob/master/proposals/memory-control/Overview.md\" title=\"memory-control/Overview.md at master · WebAssembly/memory-control\">memory-control/Overview.md at master · WebAssembly/memory-control</a></div><div class=\"message_embed_description\">A proposal to introduce finer grained control of WebAssembly memory. - memory-control/Overview.md at master · WebAssembly/memory-control</div></div></div>",
+        "id": 279319557,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1650307779
+    },
+    {
+        "content": "<p>(specifically the <code>memory.discard</code> functionality)</p>",
+        "id": 279319675,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1650307829
+    },
+    {
+        "content": "<p>I didn't mean to suggest this was something that wasmtime should implement, exactly because it's not standard and requires a custom allocator inside the instance.</p>\n<p>It's basically a hack to let linear memory grow as much as it wants to while still releasing the \"holes\" in it back to the OS , and hence indirectly back to the process running wasmtime because another mapping can reuse the physical memory. </p>\n<p>I just wanted to bring up the idea and see if someone sees a reason this really wouldn't work.</p>\n<p>Like I said, this should probably already be doable without any changes to wasmtime via a a custom <code>MemoryCreator</code>.</p>",
+        "id": 279324047,
+        "sender_full_name": "theduke",
+        "timestamp": 1650310098
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> </p>\n<p>Ah, thanks for that link. I now also stumbled on <a href=\"https://github.com/WebAssembly/design/issues/1397\">https://github.com/WebAssembly/design/issues/1397</a> and <a href=\"https://github.com/WebAssembly/design/issues/1397\">https://github.com/WebAssembly/design/issues/1397</a>.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/design/issues/1397\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/992164f981a8ba588fad7ef0bc1444e73aa59deb\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343238656135353730373039623635626634613836656366613934336338336262313565633332633333356139643763386330346638396137333762343262362f576562417373656d626c792f64657369676e2f6973737565732f31333937)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/design/issues/1397\" title=\"Wasm needs a better memory management story · Issue #1397 · WebAssembly/design\">Wasm needs a better memory management story · Issue #1397 · WebAssembly/design</a></div><div class=\"message_embed_description\">Hi all, after a video call with google last week, I was encouraged to raise a conversation here around issues we at Unity have with Wasm memory allocation. The short summary is that currently Wasm ...</div></div></div>",
+        "id": 279324309,
+        "sender_full_name": "theduke",
+        "timestamp": 1650310241
+    },
+    {
+        "content": "<p>Some of the ideas there around mapping mentioned in the discussion would actually allow my idea in a non-hacky way.</p>",
+        "id": 279324376,
+        "sender_full_name": "theduke",
+        "timestamp": 1650310285
+    },
+    {
+        "content": "<p>I think if you were to implement a custom <code>MemoryCreator</code> this would probably work, but if you create a \"hole\" which segfaults instead of being lazily initialized to zero it may not be safe from a Rust perspective depending on what you're doing because we hand out <code>&amp;[u8]</code> safely for all of linear memory.</p>",
+        "id": 279410965,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1650376035
+    }
+]

@@ -1,0 +1,247 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #4543 cranelift-wasm: Only allocate if vect... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html">wasmtime / PR #4543 cranelift-wasm: Only allocate if vect...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="291107894"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291107894" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291107894">(Jul 27 2022 at 20:46)</a>:</h4>
+<p>jameysharp opened <a href="https://github.com/bytecodealliance/wasmtime/pull/4543">PR #4543</a> from <code>lazy-bitcast</code> to <code>main</code>:</p>
+<blockquote>
+<p>For wasm programs using SIMD vector types, the type known at function<br>
+entry or exit may not match the type used within the body of the<br>
+function, so we have to bitcast them. We have to check all calls and<br>
+returns for this condition, which involves comparing a subset of a<br>
+function's signature with the CLIF types we're trying to use. Currently,<br>
+this check heap-allocates a short-lived Vec for the appropriate subset<br>
+of the signature.</p>
+<p>But most of the time none of the values need a bitcast. So this patch<br>
+avoids allocating unless at least one bitcast is actually required, and<br>
+only saves the pointers to values that need fixing up. I leaned heavily<br>
+on iterators to keep space usage constant until we discover allocation<br>
+is necessary after all.</p>
+<p>I don't think it's possible to eliminate the allocation entirely,<br>
+because the function signature we're examining is borrowed from the<br>
+FuncBuilder, but we need to mutably borrow the FuncBuilder to insert the<br>
+bitcast instructions. Fortunately, the FromIterator implementation for<br>
+Vec doesn't reserve any heap space if the iterator is empty, so we can<br>
+unconditionally collect into a Vec and still avoid unnecessary<br>
+allocations.</p>
+<p>Since the relationship between a function signature and a list of CLIF<br>
+values is somewhat complicated, I refactored all the uses of<br>
+<code>bitcast_arguments</code> and <code>wasm_param_types</code>. Instead there's<br>
+<code>bitcast_wasm_params</code> and <code>bitcast_wasm_returns</code> which share a helper<br>
+that combines the previous pair of functions into one.</p>
+<p>According to DHAT, when compiling the Sightglass Spidermonkey benchmark,<br>
+this avoids 52k allocations averaging about 9 bytes each, which are<br>
+freed on average within 2k instructions.</p>
+<p>Most Sightglass benchmarks, including Spidermonkey, show no performance<br>
+difference with this change. Only one has a slowdown, and it's small:</p>
+<p>compilation :: nanoseconds :: benchmarks/shootout-matrix/benchmark.wasm</p>
+<p>Δ = 689373.34 ± 593720.78 (confidence = 99%)</p>
+<p><a href="http://lazy-bitcast.so">lazy-bitcast.so</a> is 0.94x to 1.00x faster than <a href="http://main-e121c209f.so">main-e121c209f.so</a>!<br>
+<a href="http://main-e121c209f.so">main-e121c209f.so</a> is 1.00x to 1.06x faster than <a href="http://lazy-bitcast.so">lazy-bitcast.so</a>!</p>
+<p>[19741713 21375844.46 32976047] <a href="http://lazy-bitcast.so">lazy-bitcast.so</a><br>
+  [19345471 20686471.12 30872267] <a href="http://main-e121c209f.so">main-e121c209f.so</a></p>
+<p>But several Sightglass benchmarks have notable speed-ups, with smaller<br>
+improvements for shootout-ed25519, meshoptimizer, and pulldown-cmark,<br>
+and larger ones as follows:</p>
+<p>compilation :: nanoseconds :: benchmarks/bz2/benchmark.wasm</p>
+<p>Δ = 20071545.47 ± 2950014.92 (confidence = 99%)</p>
+<p><a href="http://lazy-bitcast.so">lazy-bitcast.so</a> is 1.26x to 1.36x faster than <a href="http://main-e121c209f.so">main-e121c209f.so</a>!<br>
+<a href="http://main-e121c209f.so">main-e121c209f.so</a> is 0.73x to 0.80x faster than <a href="http://lazy-bitcast.so">lazy-bitcast.so</a>!</p>
+<p>[55995164 64849257.68 89083031] <a href="http://lazy-bitcast.so">lazy-bitcast.so</a><br>
+  [79382460 84920803.15 98016185] <a href="http://main-e121c209f.so">main-e121c209f.so</a></p>
+<p>compilation :: nanoseconds :: benchmarks/blake3-scalar/benchmark.wasm</p>
+<p>Δ = 16620780.61 ± 5395162.13 (confidence = 99%)</p>
+<p><a href="http://lazy-bitcast.so">lazy-bitcast.so</a> is 1.14x to 1.28x faster than <a href="http://main-e121c209f.so">main-e121c209f.so</a>!<br>
+<a href="http://main-e121c209f.so">main-e121c209f.so</a> is 0.77x to 0.88x faster than <a href="http://lazy-bitcast.so">lazy-bitcast.so</a>!</p>
+<p>[54604352 79877776.35 103666598] <a href="http://lazy-bitcast.so">lazy-bitcast.so</a><br>
+  [94011835 96498556.96 106200091] <a href="http://main-e121c209f.so">main-e121c209f.so</a></p>
+<p>compilation :: nanoseconds :: benchmarks/intgemm-simd/benchmark.wasm</p>
+<p>Δ = 36891254.34 ± 12403663.50 (confidence = 99%)</p>
+<p><a href="http://lazy-bitcast.so">lazy-bitcast.so</a> is 1.12x to 1.24x faster than <a href="http://main-e121c209f.so">main-e121c209f.so</a>!<br>
+<a href="http://main-e121c209f.so">main-e121c209f.so</a> is 0.79x to 0.90x faster than <a href="http://lazy-bitcast.so">lazy-bitcast.so</a>!</p>
+<p>[131610845 201289587.88 247341883] <a href="http://lazy-bitcast.so">lazy-bitcast.so</a><br>
+  [232065032 238180842.22 250957563] <a href="http://main-e121c209f.so">main-e121c209f.so</a></p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="291111236"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291111236" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291111236">(Jul 27 2022 at 21:14)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931586220">PR review comment</a>:</p>
+<blockquote>
+<p>Can we split up this iterator chain a bit and give names to intermediates to make it easier to follow? I'm thinking perhaps <code>wasm_param_tys</code> for the first part up to grabbing <code>value_type</code>s; then another intermediate after <code>zip_eq</code>, with a comment that we're zipping with given wasm arg values and asserting length is equal; then do the last two filters on those, commenting that we're taking all vectors whose arg-type is not equal to the param's value type.</p>
+</blockquote>
+
+
+
+<a name="291111237"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291111237" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291111237">(Jul 27 2022 at 21:14)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931583320">PR review comment</a>:</p>
+<blockquote>
+<p>Does it help at all to use a <code>SmallVec</code> here, tuned to some size that captures most cases?</p>
+</blockquote>
+
+
+
+<a name="291111239"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291111239" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291111239">(Jul 27 2022 at 21:14)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053229613">PR review</a>.</p>
+
+
+
+<a name="291111240"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291111240" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291111240">(Jul 27 2022 at 21:14)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053229613">PR review</a>.</p>
+
+
+
+<a name="291111280"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291111280" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291111280">(Jul 27 2022 at 21:14)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053234725">PR review</a>.</p>
+
+
+
+<a name="291112723"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291112723" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291112723">(Jul 27 2022 at 21:27)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931596698">PR review comment</a>:</p>
+<blockquote>
+<p>I thought about using <code>SmallVec</code> but figured first I'd try the experiment that doesn't require any tuning. I'm not sure: how would you suggest picking a size? In the past I've usually picked however many elements will fit in two <code>usize</code>, because that's the minimum size the inline part of a <code>SmallVec</code> will consume anyway. But in this case that's 1, which hardly seems worth doing.</p>
+</blockquote>
+
+
+
+<a name="291112724"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291112724" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291112724">(Jul 27 2022 at 21:27)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053247451">PR review</a>.</p>
+
+
+
+<a name="291113055"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291113055" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291113055">(Jul 27 2022 at 21:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053249815">PR review</a>.</p>
+
+
+
+<a name="291113056"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291113056" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291113056">(Jul 27 2022 at 21:30)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931598423">PR review comment</a>:</p>
+<blockquote>
+<p>The <code>SmallVec</code> in this case will be on-stack so we can be a bit looser with its size I think (and <code>sub rsp, 128</code> is almost always faster than <code>malloc(128)</code>). For some cases like this I have just picked a reasonable value but to be more objective about it we could try 1, 4, 16 and see what the difference is...</p>
+</blockquote>
+
+
+
+<a name="291113077"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291113077" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291113077">(Jul 27 2022 at 21:30)</a>:</h4>
+<p>cfallin deleted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931598423">PR review comment</a>.</p>
+
+
+
+<a name="291113084"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291113084" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291113084">(Jul 27 2022 at 21:30)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053250091">PR review</a>.</p>
+
+
+
+<a name="291113087"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291113087" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291113087">(Jul 27 2022 at 21:30)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931598621">PR review comment</a>:</p>
+<blockquote>
+<p>The <code>SmallVec</code> in this case will be on-stack so we can be a bit looser with its size I think (and <code>sub rsp, 128</code> is almost always faster than <code>malloc(128)</code>). For some cases like this I have just picked a reasonable value but to be more objective about it we could try 1, 4, 16 and see what the difference is...</p>
+</blockquote>
+
+
+
+<a name="291121629"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291121629" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291121629">(Jul 27 2022 at 23:00)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053314876">PR review</a>.</p>
+
+
+
+<a name="291121630"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291121630" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291121630">(Jul 27 2022 at 23:00)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931646511">PR review comment</a>:</p>
+<blockquote>
+<p>On the intgemm-simd benchmark, Sightglass says plain <code>Vec</code> is 53-73% faster than a size-16 SmallVec, and 8-22% faster than a size-4 SmallVec. I don't understand that result, do you?</p>
+<p>Unless there's a simple explanation I'm not seeing, I'm inclined to not think further about SmallVec right now.</p>
+</blockquote>
+
+
+
+<a name="291121657"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291121657" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291121657">(Jul 27 2022 at 23:01)</a>:</h4>
+<p>jameysharp updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4543">PR #4543</a> from <code>lazy-bitcast</code> to <code>main</code>.</p>
+
+
+
+<a name="291122014"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291122014" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291122014">(Jul 27 2022 at 23:04)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053317306">PR review</a>.</p>
+
+
+
+<a name="291122016"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291122016" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291122016">(Jul 27 2022 at 23:04)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931648473">PR review comment</a>:</p>
+<blockquote>
+<p>That's somewhat surprising, but I can hypothesize at least one potential explanation: if the return value is almost always an empty list, then the empty SmallVec takes more stack space than an empty Vec and hence creates a little more spread in the memory usage (so bad cache effects). I'm stretching a bit with that though.</p>
+<p>Anyway if it's rare enough then a simple <code>Vec</code> is totally fine here; it's certainly better than what we had before!</p>
+</blockquote>
+
+
+
+<a name="291124814"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291124814" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291124814">(Jul 27 2022 at 23:40)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#pullrequestreview-1053336051">PR review</a>.</p>
+
+
+
+<a name="291124815"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291124815" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291124815">(Jul 27 2022 at 23:40)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/4543#discussion_r931664073">PR review comment</a>:</p>
+<blockquote>
+<p>I decided to give size-1 SmallVec a shot too for completeness: if it's a matter of different stack frame sizes, then that should be no worse than Vec. But Vec was 44-58% faster on intgemm-simd than even size-1 SmallVec. So I remain thoroughly puzzled. <span aria-label="shrug" class="emoji emoji-1f937" role="img" title="shrug">:shrug:</span></p>
+</blockquote>
+
+
+
+<a name="291124865"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234543%20cranelift-wasm%3A%20Only%20allocate%20if%20vect.../near/291124865" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234543.20cranelift-wasm.3A.20Only.20allocate.20if.20vect.2E.2E.2E.html#291124865">(Jul 27 2022 at 23:41)</a>:</h4>
+<p>jameysharp merged <a href="https://github.com/bytecodealliance/wasmtime/pull/4543">PR #4543</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

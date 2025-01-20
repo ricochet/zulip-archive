@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>Hi! Some of the hashmaps used internally seem to show up in flamegraphs for my program that creates a lot of smaller wasm modules. e.g., <a href=\"https://github.com/bytecodealliance/wasmtime/blob/cd97c9f14713d81de5453fb9861319e78a761432/crates/wasmtime/src/linker.rs#L88\">https://github.com/bytecodealliance/wasmtime/blob/cd97c9f14713d81de5453fb9861319e78a761432/crates/wasmtime/src/linker.rs#L88</a> is one of them. Is there any interest in being able to pass custom hashers (like <code>rustc-hash</code>) to help with hashing performance?</p>",
+        "id": 404541545,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1701144205
+    },
+    {
+        "content": "<p>Would another option be to change the HashMap implementation used here? It doesn't seem to me like this would be a DoS attack vector, so perhaps a fast HashMap that'd be less robust against those would work here? <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span>, thoughts?</p>",
+        "id": 404637603,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1701178753
+    },
+    {
+        "content": "<p>Ah yeah we likely don't need dos protection for most of our usage of hash maps, so rather than specifying custom hashers as an embedder it should be fine to hardcode many hash maps to a faster hasher.</p>\n<p>That being said though I'd probably first go the route of trying to reduce the usage of APIs that trigger hashing. That's not always possible, though, for example if you have a single <code>Linker</code> and instantiate lots of small moudles through that there's not much we can do to reduce the hashing any more.</p>",
+        "id": 404651788,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701183049
+    },
+    {
+        "content": "<p>Yeah I currently use separate <code>Linker</code>s per module but still spend a significant amount of time hashing during the initial <code>insert</code>s. I can try to submit a PR for some of the spots I notice, would you prefer any specific fast hasher (rustc-hash, ahash, something else)?</p>",
+        "id": 404658469,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1701184924
+    },
+    {
+        "content": "<p>we have <a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/supply-chain/audits.toml#L699\">ahash</a> in our audits, so that'd probably be good to use. Though I think rustc-hash should also just work in that regard</p>",
+        "id": 404676029,
+        "sender_full_name": "Till Schneidereit",
+        "timestamp": 1701190092
+    },
+    {
+        "content": "<p><del>Isn't ahash the default rust hasher now (via being hashbrown's default)?</del> Ah no I see libstd opts out of ahash.</p>",
+        "id": 404676466,
+        "sender_full_name": "Lann Martin",
+        "timestamp": 1701190247
+    },
+    {
+        "content": "<p>Is it not possible to use one <code>Linker</code> for all modules?</p>",
+        "id": 404680072,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701191339
+    },
+    {
+        "content": "<p>(that'd be best to reduce all the insertions and clones involved there too)</p>",
+        "id": 404680111,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701191349
+    },
+    {
+        "content": "<p>Yeah I also want to try that soon, although I might have the opposite problem of having a large hashmap to search afterwards. I think a faster hasher would be beneficial either way</p>",
+        "id": 404680373,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1701191446
+    },
+    {
+        "content": "<p>indeed!</p>",
+        "id": 404680678,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701191566
+    },
+    {
+        "content": "<p>Also, are you doing repeated instantiations of the same module? Or instantiations of new modules primarily?</p>",
+        "id": 404680750,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701191588
+    },
+    {
+        "content": "<p>I ask b/c <code>InstancePre</code> can help with the former, repeated instantaitions of the same module, and skips hash maps entirely</p>",
+        "id": 404680795,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701191603
+    },
+    {
+        "content": "<p>That's also a good idea, it's mostly new modules right now but I think I could probably reuse many of them. I need to spend some more understanding the implications of reusing modules and linkers, especially trade-offs (e.g., inlining different constants into a module from the host at compilation time with separate modules, vs. reusing one module but using different environments or something)</p>",
+        "id": 404681619,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1701191964
+    },
+    {
+        "content": "<p>FWIW if it helps with context, my use case is analogous to Excel/Google Sheets spreadsheets where each formula becomes its own tiny wasm module (using its own linker) in my current design</p>",
+        "id": 404681914,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1701192071
+    },
+    {
+        "content": "<p>So it's easy to end up with tens of thousands-ish modules if they're all completely unique, but a lot of the time the formulas are the exact same but just need slightly different environments passed to them</p>",
+        "id": 404682201,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1701192178
+    },
+    {
+        "content": "<p>ah ok makes sense, well in any case switching hashers definitely makes sense, and any other optimizations you'd like to apply to <code>Linker</code> or the compilation process in general I think would make sense too</p>",
+        "id": 404682276,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701192213
+    },
+    {
+        "content": "<p>most of Wasmtime's optimizations have been around runtime and <code>InstancePre</code>-to-<code>Instance</code> so this part isn't quite so well optimized</p>",
+        "id": 404682329,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701192235
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"351307\">Josh Groves</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Custom.20hashers/near/404541545\">said</a>:</p>\n<blockquote>\n<p>e.g., <a href=\"https://github.com/bytecodealliance/wasmtime/blob/cd97c9f14713d81de5453fb9861319e78a761432/crates/wasmtime/src/linker.rs#L88\">https://github.com/bytecodealliance/wasmtime/blob/cd97c9f14713d81de5453fb9861319e78a761432/crates/wasmtime/src/linker.rs#L88</a> is one of them.</p>\n</blockquote>\n<p>How much is it specifically that one?  It looks like <code>ImportKey</code> is two indexes into an interned strings list?  If so, that's a great candidate for some type-specific hashing logic.  Or maybe even making a <code>struct InternKey(u32);</code> instead of using raw <code>usize</code> to shrink ImportKey from 16 bytes down to 8 on 64-bit, which save a bunch of hashing work.</p>\n<p>(This is totally a peanut-gallery comment because zulip put this thread in a digest and I've been <a href=\"https://github.com/bevyengine/bevy/pull/10519\">look</a>ing <a href=\"https://github.com/bevyengine/bevy/pull/10648\">recent</a>ly at hashtables where the key is two integers.  Feel free to ignore if I'm off-base.)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bevyengine/bevy/pull/10519\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/501b80308137faa4e8dec01318e2e685e8ed7225\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f666637376136326363303830303936333362626161343164343635646366653434313132663839313866656132663735663161373732386462366435656137622f62657679656e67696e652f626576792f70756c6c2f3130353139)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bevyengine/bevy/pull/10519\" title=\"Optimize `Entity::eq` by scottmcm · Pull Request #10519 · bevyengine/bevy\">Optimize `Entity::eq` by scottmcm · Pull Request #10519 · bevyengine/bevy</a></div><div class=\"message_embed_description\">(This is my first PR here, so I've probably missed some things.  Please let me know what else I should do to help you as a reviewer!)\nObjective\nDue to rust-lang/rust#117800, the derive'd PartialEq:...</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bevyengine/bevy/pull/10648\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/dcb8c986977b7922432375e5005495469b38112e\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f656461643638613838346435636332643832356433393336356435623936333864636436633031326263333436666533623130353065356639666533383234392f62657679656e67696e652f626576792f70756c6c2f3130363438)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bevyengine/bevy/pull/10648\" title=\"Save an instruction in `EntityHasher` by scottmcm · Pull Request #10648 · bevyengine/bevy\">Save an instruction in `EntityHasher` by scottmcm · Pull Request #10648 · bevyengine/bevy</a></div><div class=\"message_embed_description\">Objective\nKeep essentially the same structure of EntityHasher from #9903, but rephrase the multiplication slightly to save an instruction.\ncc @superdump\nDiscord thread: https://discord.com/channels...</div></div></div>",
+        "id": 404694413,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1701196873
+    },
+    {
+        "content": "<p>Unfortunately I don’t have great stats right now, the sampling profiler in vtune makes it difficult to get detailed statistics for sub-millisecond code without setting up artificial microbenchmarks. I just noticed SipHash show up in a few hot paths for wasmtime so I figured it might be worth raising here. That partialeq optimization looks neat!</p>",
+        "id": 404695808,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1701197306
+    },
+    {
+        "content": "<p>It's a fun one, though I'm hopeful that between Rust and LLVM we can make it unnecessary in future (&lt;<a href=\"https://github.com/rust-lang/rust/issues/117800\">https://github.com/rust-lang/rust/issues/117800</a>&gt;).</p>\n<p><code>Entity</code> in bevy shows up <em>everywhere</em>, so it's worth some uglification for even tiny speedups.  I don't know nearly enough about wasmtime to know if <code>ImportKey</code> is anywhere close to as critical.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/rust-lang/rust/issues/117800\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/dd077222dd27168a54f2ba36fa4ecf7e4f5a2ec3\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f396363336662313637383162323138303661616661633831646665636239343666303165343833626239306435373434366464323265316531313662346565662f727573742d6c616e672f727573742f6973737565732f313137383030)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/rust-lang/rust/issues/117800\" title=\"Poor codegen for derived `==` on simple 2-field struct · Issue #117800 · rust-lang/rust\">Poor codegen for derived `==` on simple 2-field struct · Issue #117800 · rust-lang/rust</a></div><div class=\"message_embed_description\">Given a basic struct like this, #[derive(Copy, Clone, PartialEq, Eq)] pub struct Entity { g: u32, i: u32 } The generated == is suboptimal: #[no_mangle] pub fn derived_eq(x: &amp;Entity, y: &amp;Entity) -&gt; ...</div></div></div>",
+        "id": 404696803,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1701197656
+    },
+    {
+        "content": "<p>Opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7828\">https://github.com/bytecodealliance/wasmtime/pull/7828</a> as a follow-up to this conversation</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/7828\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/542d494ef2d9d9ab8fd49b7b89fbdb2105c03330\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f346630633664646265386666386535323364633461653335313963323839636238363364616138386337636465653166653966306631386534396664633665312f62797465636f6465616c6c69616e63652f7761736d74696d652f70756c6c2f37383238)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/7828\" title=\"Use `rustc-hash` for module exports by grovesNL · Pull Request #7828 · bytecodealliance/wasmtime\">Use `rustc-hash` for module exports by grovesNL · Pull Request #7828 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">From a Zulip discussion a few months ago (https://bytecodealliance.zulipchat.com/#narrow/stream/217126-wasmtime/topic/Custom.20hashers) it was mentioned that custom hashers like rustc-hash should b...</div></div></div>",
+        "id": 418306407,
+        "sender_full_name": "Josh Groves",
+        "timestamp": 1706285442
+    }
+]

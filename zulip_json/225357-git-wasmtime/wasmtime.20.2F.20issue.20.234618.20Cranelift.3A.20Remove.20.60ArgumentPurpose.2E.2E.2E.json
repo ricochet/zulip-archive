@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>bjorn3 <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1206969196\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>The sysv x86_64 abi handles large struct returning by passing a pointer in a specific register, writing the return value to the same register and I believe ensuring that this pointer stays in the same register afterwards. This can't as easily be done if StructReturn is removed. Currently simply declaring an argument as StructReturn is enough, but with that removed you did have to pass it as first argument and make sure to return it again as first return value. I expect most people to forget that last step. In addition architectures other than x86_64 may have different requirements, thus making Cranelift IR less target independent and pushing complexity for choosing the right way towards Cranelift users.</p>\n</blockquote>",
+        "id": 292212786,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659737122
+    },
+    {
+        "content": "<p>bjorn3 edited a <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1206969196\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>The sysv x86_64 abi handles large struct returning by passing a pointer in a specific register, writing the return value to this buffer and returning the pointer again in a different register. This can't as easily be done if StructReturn is removed. Currently simply declaring an argument as StructReturn is enough, but with that removed you did have to pass it as first argument and make sure to return it again as first return value. I expect most people to forget that last step. In addition architectures other than x86_64 may have different requirements (possibly not even expressible without StructReturn), thus making Cranelift IR less target independent and pushing complexity for choosing the right way towards Cranelift users.</p>\n</blockquote>",
+        "id": 292213081,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659737334
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1207004020\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p><code>ArgumentPurpose::StructReturn</code> doesn't ensure that the argument matches the calling conventions at all though, all it does is copy the value to the returns if missing. No check that it is the first argument or first return. CLIF producers are already on their own here.</p>\n</blockquote>",
+        "id": 292213540,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659737663
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1207026518\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>@bjorn3 I think that if Cranelift natively had struct types (as LLVM does), it would make more sense to worry about closely following the ABI for aggregate values. In such a hypothetical case, Cranelift would be responsible for everything related to the struct's handling, and the IR producer would simply create the struct and fill it in or consume it.</p>\n<p>However, CLIF is at a lower abstraction level: it provides building blocks, but does not actually have support for struct types. Sometimes these building blocks are \"fundamental\" and cannot be built from others. For example, args that need to be memcpy'd before a call are difficult to handle by generating CLIF instead.</p>\n<p>But I think that <code>sret</code> is not such a feature: it simply has the semantics \"return this one arg\". One can just as well generate CLIF that does that. And as @fitzgen notes, there are many other details the CLIF producer has to get right; removing one building block does not cause a phase-change in difficulty from \"everything provided\" to \"many fiddly details\", it just adds one detail to an already large pile.</p>\n<p>So then we ask why remove the building block: in this case, it is a small but not insignificant simplification in the ABI code, because it removes the only kind of \"legalization\" that we currently need to do to the signature. Having one signature that passes all the way through the pipeline, and then lowering ABI-handling code directly from that signature, is a nice simplicity + correctness win. And, performance as well, as @fitzgen shows here.</p>\n<p>So unless there is a reason it cannot be done at the CLIF level at all (please do speak up if this is actually the case and we've missed something), I think it makes sense to follow through with this. Does that make some sense at least?</p>\n</blockquote>",
+        "id": 292213936,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659737986
+    },
+    {
+        "content": "<p>bjorn3 <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1207227038\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<blockquote>\n<p>I think that if Cranelift natively had struct types (as LLVM does), it would make more sense to worry about closely following the ABI for aggregate values.</p>\n</blockquote>\n<p>LLVM has struct types lowered to an sret argument at IR level too.</p>\n<blockquote>\n<p>But I think that sret is not such a feature: it simply has the semantics \"return this one arg\".</p>\n</blockquote>\n<p>It has the semantics of pass this argument in the right register and return it in the right register again on x86_64. This is not the case on all architectures:</p>\n<p>On x86 there seems to be a difference between what works on x86_64 and what is actually done in C: <a href=\"https://godbolt.org/z/6dnEhK1vK\">https://godbolt.org/z/6dnEhK1vK</a></p>\n<p>Arm64 windows uses x8 instead of x0 as implicit return pointer: <a href=\"https://godbolt.org/z/fe95Y8Pdv\">https://godbolt.org/z/fe95Y8Pdv</a></p>\n<p>Power has an extra <code>crxor 6,6,6</code> instruction which if I read the manual correctly clear bit 6 of the condition register: <a href=\"https://rust.godbolt.org/z/d66P6q3z4\">https://rust.godbolt.org/z/d66P6q3z4</a></p>\n<p>In other words removing sret will make it impossible to correctly support those architectures in the future.</p>\n<blockquote>\n<p>So then we ask why remove the building block: in this case, it is a small but not insignificant simplification in the ABI code, because it removes the only kind of \"legalization\" that we currently need to do to the signature.</p>\n</blockquote>\n<p>I think instead of implementing it as legalization, it should be a direct part of the abi handling code for the respective architecture. Especially as it differs between architectures.</p>\n</blockquote>",
+        "id": 292258520,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659797173
+    },
+    {
+        "content": "<p>bjorn3 <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1207428086\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>I have been debugging an abi incompatibility on aarch64 found in <a href=\"https://github.com/bjorn3/rustc_codegen_cranelift/pull/1255\">https://github.com/bjorn3/rustc_codegen_cranelift/pull/1255</a>. Turns out sret arguments must be passed in the x8 register, while Cranelift currently passes it in x0 like a regular argument. It is not possible to pass a regular argument in x8, you need sret for this.</p>\n</blockquote>",
+        "id": 292324412,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659884944
+    },
+    {
+        "content": "<p>bjorn3 edited a <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1207428086\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>I have been debugging an abi incompatibility on aarch64 found in <a href=\"https://github.com/bjorn3/rustc_codegen_cranelift/pull/1255\">https://github.com/bjorn3/rustc_codegen_cranelift/pull/1255</a>. Turns out sret arguments must be passed in the x8 register, while Cranelift currently passes it in x0 like a regular argument. It is not possible to pass a regular argument in x8, you need sret for this.</p>\n<p>Edit: Opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4634\">https://github.com/bytecodealliance/wasmtime/pull/4634</a></p>\n</blockquote>",
+        "id": 292333786,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659898204
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1208444066\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>@bjorn3 thanks for the additional details (and for hunting the linked bug!); I agree that given this new context, <code>sret</code> args are needed at the IR level.</p>\n</blockquote>",
+        "id": 292476208,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1659982061
+    },
+    {
+        "content": "<p>jameysharp <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1211414714\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>I had a branch lying around changing the return type of <code>ensure_struct_return_ptr_is_returned</code> to a <code>Cow</code> so the clone can at least be deferred to the caller, since there was one caller where a borrow is fine. After rebasing on #4621, now three of the four callers can use a borrow; only <code>ABICalleeImpl::new</code> has to clone. I'd set it aside because I was having trouble figuring out whether it was actually a performance improvement, but maybe I should pick it up again?</p>\n</blockquote>",
+        "id": 292849828,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1660175470
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1211432943\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>@jameysharp that could be a good change; I'd be curious about the performance. @fitzgen has some plans regarding interning/sharing <code>ABISig</code>s as well; it may be worth coordinating plans between the two of you.</p>\n</blockquote>",
+        "id": 292852276,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1660177403
+    },
+    {
+        "content": "<p>bjorn3 <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1211753953\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>I think it makes sense to remove ensure_struct_return_ptr_is_returned and instead directly handle sret in the abi impls. That is more flexible and should allow avoiding this allocation unconditionally.</p>\n</blockquote>",
+        "id": 292895456,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1660210473
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1212472890\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>I agree that doing the legalization on-the-fly is probably best.</p>\n<p>I investigated making it <code>Cow</code> but that doesn't end up working out well because you'd need to start threading a lifetime param through <code>ABICalle{e,r}Impl</code> and a bunch of places and it quickly runs into shared vs exclusive borrows of the same stuff.</p>\n<p>Working on refactoring all of signature stuff right now.</p>\n</blockquote>",
+        "id": 293005676,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1660250501
+    },
+    {
+        "content": "<p>jameysharp <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618#issuecomment-1212552067\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4618\">issue #4618</a>:</p>\n<blockquote>\n<p>My trick was I didn't change any types except the return type of <code>ensure_struct_return_ptr_is_returned</code>. That meant I didn't have to thread lifetimes around anywhere, and the only downside was that sometimes the value would get cloned anyway because one of the other types needed to own a copy. That still gave plenty of opportunities to avoid allocations, even if it didn't eliminate all of them.</p>\n<p>Here's my <a href=\"https://github.com/jameysharp/wasmtime/commit/cow-sig\">cow-sig branch</a> in case anyone wants to look at it. I'm not currently proposing merging it since it sounds like we should do something different. So I haven't re-evaluated whether it has any performance impact.</p>\n</blockquote>",
+        "id": 293018072,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1660256230
+    }
+]

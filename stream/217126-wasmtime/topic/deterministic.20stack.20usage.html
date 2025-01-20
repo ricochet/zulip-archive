@@ -1,0 +1,108 @@
+<html>
+<head><meta charset="utf-8"><title>deterministic stack usage · wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/index.html">wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html">deterministic stack usage</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="241809381"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/241809381" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Sergei Pepyakin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#241809381">(Jun 07 2021 at 17:12)</a>:</h4>
+<p>I am working on a project that requires absolute determinism of the executed code. One of the parts that has non-deterministic behavior  is the wasm stack. This non-determinism can be exhibited even by the same engine running under different conditions, e.g. x86-64 vs aarch64. In order to make it deterministic we want to run an instrumentation pass that would eradicate all the non-determinism. </p>
+<p>The idea is to for each function we would compute its logical size. The logical size would assume the dumbest implementation ever. That is, each value costs some of this logical units. It doesn't matter whether the value comes from the value stack or a local/arg. Moveover, we assume that args are not shared between the frames but rather copied.</p>
+<p>Once we have these costs for each function, we would go over all call sites and instrument each call site with a simple sequence:</p>
+<ul>
+<li>increment the counter with the cost of the function, then</li>
+<li>trap if exceeds some preconfigured value, then</li>
+<li>perform the actual call, then</li>
+<li>decrement the counter. </li>
+</ul>
+<p>Then we would configure the engine, i.e. wasmtime, to allocate the wasm native stack so big so that the logical stack limiter will be always hit first. </p>
+<p>However, this scheme relies on the assumption that cranelift will generate a stack frame which is always smaller than the overestimated logical size. </p>
+<p>I suspect that this assumption can be invalidated by:</p>
+<ul>
+<li>optimizations performed by the cranelift. Maybe inlining under some circumstances could lead to that? I suspect even if it's a problem we can turn off some of the optimizations.</li>
+<li>regalloc. </li>
+</ul>
+<p>The regalloc is totally unclear to me. I know that regalloc would need to allocate a spill area. What is not clear to me, if the worst case size for this area is capped by the number of locals?</p>
+<p><span class="user-mention" data-user-id="254389">@Chris Fallin</span> , or anybody else familiar with the regalloc, is it actually possible for the regalloc to go rogue and potentially allocate the spill area bigger than the number of locals, say, multiplied by the biggest value wasm supports (16 bytes)?</p>
+
+
+
+<a name="241810001"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/241810001" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#241810001">(Jun 07 2021 at 17:15)</a>:</h4>
+<p><span class="user-mention" data-user-id="267712">@Sergei Pepyakin</span> interesting ideas! Regarding regalloc spill-area size: in general it's hard to make tight guarantees about this, simply because of the complexity of the algorithms involved. (Even ensuring termination is subtle when e.g. splitting or backtracking.) The first aspect that's important is the number of <em>live ranges</em>, rather than locals: internally, the code is represented in SSA form, and locals no longer exist, only individual SSA values at new definition sites. There is an upper bound on the number of <em>live</em> values determined by the number of locals plus the maximum wasm operand stack size, but conservatively, the only bound we can confidently state is that there will be (at most) one spillslot per live range. Tighter bounds than that rely on reasoning about spillslot coalescing, which is complex</p>
+
+
+
+<a name="241810158"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/241810158" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#241810158">(Jun 07 2021 at 17:17)</a>:</h4>
+<p>This actually feels like sort of an open-ended research question: what bounds can one prove about a realistic register allocator? Such proofs are notoriously hard when termination conditions are complex (i.e., when one has more than just structural recursion and simple iteration)</p>
+
+
+
+<a name="241810266"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/241810266" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#241810266">(Jun 07 2021 at 17:17)</a>:</h4>
+<p>I might encourage approaching this problem from the opposite side: decide a stack-depth bound to deterministically enforce, then modify the engine so that it will dynamically (re-)allocate the stack up until this logical limit is exceeded</p>
+
+
+
+<a name="241810362"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/241810362" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#241810362">(Jun 07 2021 at 17:18)</a>:</h4>
+<p>that trades off potential OOM at runtime for determinism of stack-overflow</p>
+
+
+
+<a name="241912933"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/241912933" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Sergei Pepyakin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#241912933">(Jun 08 2021 at 12:47)</a>:</h4>
+<p>This is summary of my understanding:</p>
+<ol>
+<li>spillslot is an allocation of memory on the machine stack. </li>
+<li>conservatively we can state that there is at most one spillslot per live range</li>
+<li>we can conservatively assume that each variable lives from start to finish of the function. </li>
+<li>Therefore the number live ranges at all points is the number of variables, and thus we get the number  of spillslots.</li>
+<li>if we assume a maximum size of a spillslot to be a constant C, we can get the maximum spill area size by multiplying C by the number of variables.</li>
+</ol>
+<p>It seems that knowing this we will be able to compute a very conservative upper bound for the stack usage for a given logical stack size (described in the OP).</p>
+<p>There is a catch though: the above uses the term variable referring to an SSA variable from Cranelift IR. They are created from stack operands and locals. As you mentioned it may be the maximum depth we are interested in. But besides that, translation of wasm into clif also produces temp variables. I assume we can find the absolute maximum of variables created by the translation or if it is unbounded impose application specific limits on wasm. Then knowing the number of instruction we can get the hard cap of the values produced by lowering wasm to clif.</p>
+<p>As if it wasn't enough, there are some variables created by optimizations. If we had loop unrolling it may multiply all the variables found in the the loop.</p>
+<p>Is my understanding roughly right?</p>
+<p>Thanks for the idea of approaching this problem from the opposite side. Why we wanted to go with the instrumentation approach is because we would like to have some freedom in choosing an engine. That is a preference at this moment, not a strong requirement, so we may as well consider altering wasmtime for these purposes.</p>
+
+
+
+<a name="241977283"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/241977283" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#241977283">(Jun 08 2021 at 19:57)</a>:</h4>
+<p>Hi <span class="user-mention" data-user-id="267712">@Sergei Pepyakin</span> -- that's very close! The conservative upper bounds for live ranges are actually:</p>
+<ol>
+<li>
+<p>We should assume that there is a new SSA value for every Wasm value definition ( == operand stack push), and for every value that is live across a control-flow-merge point (phi node), and for every Wasm local modification (<code>local.set</code> or <code>local.tee</code> opcode) or merge point thereof. A very conservative bound on that is <code>(len(wasm opcodes) * (worst-case number of values pushed by wasm opcode) + (wasm local modifications)) * (number of basic blocks)</code>, though that is a very very loose bound because only a very sparse subset of values will be live at any given program point in a realistic program.</p>
+</li>
+<li>
+<p>Given that bound on the number of SSA values, the bound on the number of <em>live ranges</em> is, at most, one live range per SSA value per basic block (because a value can flow across discontiguous blocks and live-ranges are just contiguous ranges of instructions).</p>
+</li>
+<li>
+<p>Then, if the spillslot coalescer doesn't work, we have up to one spillslot (or N spillslots depending on types -- concretely, 2 spillslots for float/vector-typed values) per live range.</p>
+</li>
+</ol>
+<p>So that's <code>O(len(program) ^ 3)</code>, effectively</p>
+
+
+
+<a name="241977396"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/241977396" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#241977396">(Jun 08 2021 at 19:58)</a>:</h4>
+<p>Given that very loose bound, and the difficulty in making it tighter, I'd go as far as saying that the only <em>practical</em> way to do this would be to follow the logical limit exclusively and expand the physical stack to match, but possibly there are better ideas I've missed :-)</p>
+
+
+
+<a name="242101594"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/deterministic%20stack%20usage/near/242101594" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Sergei Pepyakin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/deterministic.20stack.20usage.html#242101594">(Jun 09 2021 at 17:28)</a>:</h4>
+<p>This is immensely useful. Thank you for help!</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

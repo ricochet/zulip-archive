@@ -1,0 +1,146 @@
+[
+    {
+        "content": "<p>fitzgen opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a> from <code>fitzgen:saferpoints</code> to <code>bytecodealliance:main</code>:</p>\n<blockquote>\n<p>Tracking GC references and producing stack maps is a significant amount of complexity in <code>regalloc2</code>.</p>\n<p>At the same time, GC reference value types are pretty annoying to deal with in Cranelift itself. We know our <code>r64</code> is \"actually\" just an <code>i64</code> pointer, and we want to do <code>i64</code>-y things with it, such as an <code>iadd</code> to compute a derived pointer, but <code>iadd</code> only takes integer types and not <code>r64</code>s. We investigated loosening that restriction and it was way too painful given the way that CLIF type inference and its controlling type vars work. So to compute those derived pointers, we have to first <code>bitcast</code> the <code>r64</code> into an <code>i64</code>. This is unfortunate in two ways. First, because of arcane interactions between register allocation constraints, stack maps, and ABIs this involves inserting unnecessary register-to-register moves in our generated code which hurts binary size and performance ever so slightly. Second, and much more seriously, this is a serious footgun. If a GC reference isn't an <code>r64</code> right now, then it will not appear in stack maps, and failure to record a live GC reference in a stack map means that the collector could reclaim the object while you are still using it, leading to use-after-free bugs! Very bad. And the mid-end needs to know <em>not</em> to GVN these bitcasts or else we get similar bugs (see <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8317\">https://github.com/bytecodealliance/wasmtime/pull/8317</a>).</p>\n<p>Overall GC references are a painful situation for us today.</p>\n<p>This commit is the introduction of an alternative. (Note, though, that we aren't quite ready to remove the old stack maps infrastructure just yet.)</p>\n<p>Instead of preserving GC references all the way through the whole pipeline and computing live GC references and inserting spills at safepoints for stack maps all the way at the end of that pipeline in register allocation, the CLIF-producing frontend explicitly generates its own stack slots and spills for safepoints. The only thing the rest of the compiler pipeline needs to know is the metadata required to produce the stack map for the associated safepoint. We can completely remove <code>r32</code> and <code>r64</code> from Cranelift and just use plain <code>i32</code> and <code>i64</code> values. Or <code>f64</code> if the runtime uses NaN-boxing, which the old stack maps system did not support at all. Or 32-bit GC references on a 64-bit target, which was also not supported by the old system. Furthermore, we <em>cannot</em> get miscompiles due to GVN'ing bitcasts that shouldn't be GVN'd because there aren't any bitcasts hiding GC references from stack maps anymore. And in the case of a moving GC, we don't need to worry about the mid-end doing illegal code motion across calls that could have triggered a GC that invalidated the moved GC reference because frontends will reload their GC references from the stack slots after the call, and that loaded value simply isn't a candidate for GVN with the previous version. We don't have to worry about those bugs by construction.</p>\n<p>So everything gets a lot easier under this new system.</p>\n<p>But this commit doesn't mean we are 100% done and ready to transition to the new system, so what is actually in here?</p>\n<ul>\n<li>\n<p>CLIF producers can mark values as needing to be present in a stack map if they are live across a safepoint in <code>cranelift-frontend</code>. This is the <code>FunctionBuilder::declare_needs_stack_map</code> method.</p>\n</li>\n<li>\n<p>When we finalize the function we are building, we do a simple, single-pass liveness analysis to determine the set of GC references that are live at each safepoint, and then we insert spills to explicit stack slots just before the safepoint. We intentionally trade away the precision of a fixed-point liveness analysis for the speed and simplicity of a single-pass implementation.</p>\n</li>\n<li>\n<p>We annotate the safepoint with the metadata necessary to construct its associated stack map. This is the new<br>\n<code>cranelift_codegen::ir::DataFlowGraph::append_user_stack_map_entry</code> method and all that stuff.</p>\n</li>\n<li>\n<p>These stack map entries are part of the CLIF and can be roundtripped through printing and parsing CLIF.</p>\n</li>\n<li>\n<p>Each stack map entry describes a GC-managed value that is on the stack and how to locate it: its type, the stack slot it is located within, and the offset within that stack slot where it resides. Different stack map entries for the same safepoint may have different types or a different width from the target's pointer.</p>\n</li>\n</ul>\n<p>Here is what is <em>not</em> handled yet, and left for future follow up commits:</p>\n<ul>\n<li>\n<p>Lowering the stack map entries' locations from symbolic stack slot and offset pairs to physical stack frame offsets after register allocation.</p>\n</li>\n<li>\n<p>Coalescing and aggregating the safepoints and their raw stack map entries into a compact PC-to-stack-map table during emission.</p>\n</li>\n<li>\n<p>Supporting moving GCs. Right now we generate spills into stack slots for live GC references just before safepoints, but we don't reload the GC references from the stack upon their next use after the safepoint. This involves rewriting uses of the old, spilled values which could be a little finicky, but we think we have a good approach.</p>\n</li>\n<li>\n<p>Port Wasmtime over to using this new stack maps system.</p>\n</li>\n<li>\n<p>Removing the old stack map system, including <code>r{32,64}</code> from Cranelift and GC reference handling from <code>regalloc2</code>. (For the time being, the new system generally refers to \"user stack maps\" to disambiguate from the old system where it might otherwise be confusing.) If we wanted to remove the old system now, that would require us to also port Wasmtime to the new system now, and we'd end up with a monolithic PR. Better to do this incrementally and temporarily have the old and in-progress new system overlap for a short period of time.</p>\n</li>\n</ul>\n<p>&lt;!--<br>\nPlease make sure you include the following information:</p>\n<ul>\n<li>\n<p>If this work has been discussed elsewhere, please include a link to that<br>\n  conversation. If it was discussed in an issue, just mention \"issue #...\".</p>\n</li>\n<li>\n<p>Explain why this change is needed. If the details are in an issue already,<br>\n  this can be brief.</p>\n</li>\n</ul>\n<p>Our development process is documented in the Wasmtime book:<br>\n<a href=\"https://docs.wasmtime.dev/contributing-development-process.html\">https://docs.wasmtime.dev/contributing-development-process.html</a></p>\n<p>Please ensure all communication follows the code of conduct:<br>\n<a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md\">https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md</a><br>\n--&gt;</p>\n</blockquote>",
+        "id": 441836373,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717203654
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers\">wasmtime-compiler-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 441836374,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717203655
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/cfallin\">cfallin</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 441836375,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717203655
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#pullrequestreview-2099634495\">PR review</a>:</p>\n<blockquote>\n<p>This is extremely cool work and I'm very happy we'll be able to remove the complexity later in the pipeline eventually!</p>\n<p>A few nits and requests for some comments, minor refactorings, etc below but nothing major.</p>\n</blockquote>",
+        "id": 442862191,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1628044778\">PR review comment</a>:</p>\n<blockquote>\n<p>Can we have a doc-comment at the module level here describing the overall abstraction? Basically: call instructions (only?) have sets of <code>UserStackMapEntry</code> structs attached; these stack map entries point to CLIF-level stack slots.</p>\n</blockquote>",
+        "id": 442862199,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#pullrequestreview-2099634495\">PR review</a>:</p>\n<blockquote>\n<p>This is extremely cool work and I'm very happy we'll be able to remove the complexity later in the pipeline eventually!</p>\n<p>A few nits and requests for some comments, minor refactorings, etc below but nothing major.</p>\n</blockquote>",
+        "id": 442862201,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1628216313\">PR review comment</a>:</p>\n<blockquote>\n<p>This sequence to compute <code>max_vals_in_stack_map_by_size</code> is a little dense -- could we break it out into some helpers, e.g. something like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span><span class=\"w\"> </span><span class=\"nf\">live_value_count_by_size</span><span class=\"p\">(</span><span class=\"n\">dfg</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kp\">&amp;</span><span class=\"nc\">DataFlowGraph</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">live</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">Iterator</span><span class=\"o\">&lt;</span><span class=\"n\">Item</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Value</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">-&gt;</span><span class=\"w\"> </span><span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">Iterator</span><span class=\"o\">&lt;</span><span class=\"n\">Item</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">)</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"p\">}</span>\n<span class=\"k\">fn</span><span class=\"w\"> </span><span class=\"nf\">val_bucket_from_size</span><span class=\"p\">(</span><span class=\"n\">size</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">-&gt;</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"p\">}</span>\n\n<span class=\"k\">for</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">byte_size</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">count</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">live_value_count_by_size</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">func</span><span class=\"p\">.</span><span class=\"n\">dfg</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">live</span><span class=\"p\">.</span><span class=\"n\">iter</span><span class=\"p\">())</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">  </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">bucket</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">val_bucket_from_size</span><span class=\"p\">(</span><span class=\"n\">byte_size</span><span class=\"p\">);</span>\n<span class=\"w\">  </span><span class=\"n\">max_vals_in_stack_map_by_size</span><span class=\"p\">[</span><span class=\"n\">bucket</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">core</span><span class=\"p\">::</span><span class=\"n\">cmp</span><span class=\"p\">::</span><span class=\"n\">max</span><span class=\"p\">(</span><span class=\"o\">..</span><span class=\"p\">.,</span><span class=\"w\"> </span><span class=\"n\">count</span><span class=\"p\">);</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n</blockquote>",
+        "id": 442862203,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1628185006\">PR review comment</a>:</p>\n<blockquote>\n<p>name <code>..._by_log2_size</code> to clarify?</p>\n</blockquote>",
+        "id": 442862204,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1628248968\">PR review comment</a>:</p>\n<blockquote>\n<p>Reloads are conspicuously absent here -- are we making the assumption that we won't have a moving GC (so we need to root but don't need to allow mutation of references)? Would be good to have that in a module-level doc-comment too :-)</p>\n</blockquote>",
+        "id": 442862206,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1628246649\">PR review comment</a>:</p>\n<blockquote>\n<p>(here too, for the constant)</p>\n</blockquote>",
+        "id": 442862208,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1628207204\">PR review comment</a>:</p>\n<blockquote>\n<p>perhaps to note for more precision here (to guide future thinking around this): would require a fixed-point loop in the presence of backedges, at least?</p>\n<p>For example if we (i) do propagate liveness back to branch args from blockparams, and (ii) at a branch, observe that all targets have already been visited (have higher RPO numbers), then we can use the real liveness rather than conservatively assume live.</p>\n<p>No real data but my hunch is that this may be important when we have \"extraneous blocks\" due to Wasm control flow structure that have a single forward out-edge and that we can't yet optimize out (and wouldn't have at this point in the pipeline anyway)...</p>\n</blockquote>",
+        "id": 442862209,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1628238698\">PR review comment</a>:</p>\n<blockquote>\n<p>Can we add a comment here noting that this (implicitly) includes block args as well, in reference to above discussion of blockparams? Was looking for the logic as an explicit thing for branches and missed this (implicit/more general) handling.</p>\n</blockquote>",
+        "id": 442862210,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1628241468\">PR review comment</a>:</p>\n<blockquote>\n<p>Can we make the <code>5</code> a constant defined somewhere (and used in the initialization above too)?</p>\n</blockquote>",
+        "id": 442862216,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717612323
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#pullrequestreview-2102128911\">PR review</a>.</p>",
+        "id": 443071787,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717683513
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1629646730\">PR review comment</a>:</p>\n<blockquote>\n<p>From the commit message / top level PR comment:</p>\n<blockquote>\n<p>Here is what is <em>not</em> handled yet, and left for future follow up commits:</p>\n<p>[...]</p>\n<ul>\n<li>Supporting moving GCs. Right now we generate spills into stack slots for live GC references just before safepoints, but we don't reload the GC references from the stack upon their next use after the safepoint. This involves rewriting uses of the old, spilled values which could be a little finicky, but we think we have a good approach.</li>\n</ul>\n</blockquote>\n<p>Happy to add a comment in the meantime.</p>\n</blockquote>",
+        "id": 443071791,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717683513
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#pullrequestreview-2102166645\">PR review</a>.</p>",
+        "id": 443074849,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717684310
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728#discussion_r1629669929\">PR review comment</a>:</p>\n<blockquote>\n<p>Definitely missed/forgot that, sorry! Yep, a doc-comment point saying the same would be great.</p>\n</blockquote>",
+        "id": 443074851,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717684310
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 443123794,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717696557
+    },
+    {
+        "content": "<p>fitzgen has enabled auto merge for <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 443123986,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717696623
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 443125454,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717697034
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 443128291,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717697901
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 443204463,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717732669
+    },
+    {
+        "content": "<p>fitzgen has enabled auto merge for <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 443204477,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717732677
+    },
+    {
+        "content": "<p>fitzgen merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8728\">PR #8728</a>.</p>",
+        "id": 443206971,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1717734012
+    }
+]

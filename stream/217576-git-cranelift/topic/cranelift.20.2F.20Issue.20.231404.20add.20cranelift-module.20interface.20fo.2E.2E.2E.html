@@ -1,0 +1,125 @@
+<html>
+<head><meta charset="utf-8"><title>cranelift / Issue #1404 add cranelift-module interface fo... · git-cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/index.html">git-cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/topic/cranelift.20.2F.20Issue.20.231404.20add.20cranelift-module.20interface.20fo.2E.2E.2E.html">cranelift / Issue #1404 add cranelift-module interface fo...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="188951059"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217576-git-cranelift/topic/cranelift%20/%20Issue%20%231404%20add%20cranelift-module%20interface%20fo.../near/188951059" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GitHub <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/topic/cranelift.20.2F.20Issue.20.231404.20add.20cranelift-module.20interface.20fo.2E.2E.2E.html#188951059">(Feb 24 2020 at 18:14)</a>:</h4>
+<p>froydnj opened <a href="https://github.com/bytecodealliance/cranelift/issues/1404" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404">Issue #1404</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p><code>lucetc</code> needs some way of accessing the trap sites for every function it compiles:</p>
+<p><a href="https://github.com/bytecodealliance/lucet/blob/23305e5d8e08bed442c244d282b1a0389ed3d822/lucetc/src/output.rs#L69-L89" target="_blank" title="https://github.com/bytecodealliance/lucet/blob/23305e5d8e08bed442c244d282b1a0389ed3d822/lucetc/src/output.rs#L69-L89">https://github.com/bytecodealliance/lucet/blob/23305e5d8e08bed442c244d282b1a0389ed3d822/lucetc/src/output.rs#L69-L89</a></p>
+<p>In the above snippet, the trap site access happens after <code>Module::finish</code> has been called, so we're working with <code>faerie</code> interfaces.</p>
+<p>We are trying to port <code>lucetc</code> to use <code>object</code> instead of <code>faerie</code> underneath, mostly so <code>lucetc</code> can start generating PE/COFF objects with ease.  It would reduce risk somewhat to be able to use <code>cranelift-module</code> as a high-level interface, swap between <code>cranelift-object</code> and <code>cranelift-faerie</code> with as few lines of code as possible, and deal with <code>object</code> and <code>faerie</code> themselves as little as possible (probably just to write out the .o file).  Therefore, it would be convenient if this information about traps associated with each function were accessible through <code>cranelift-module</code> interfaces, rather than through lower-level interfaces.</p>
+<h4>Benefit</h4>
+<p>Trap information would be more easily accessible prior to module finalization.  Though I don't know of anybody else who needs this kind of information about besides <code>lucetc</code> at this point.</p>
+<h4>Implementation</h4>
+<p>This is the tricky bit, because the three in-tree implementations differ substantially in their approach to trap collection:</p>
+<ul>
+<li><code>cranelift-faerie</code> collects essentially <code>(string-name, Vec&lt;TrapSite&gt;)</code> pairs.</li>
+<li><code>cranelift-object</code> collects a mapping of <code>FuncId</code> to <code>Vec&lt;TrapSite&gt;</code>.</li>
+<li><code>cranelift-simplejit</code> ignores traps entirely.</li>
+</ul>
+<p>I don't think there is a single method that all three interfaces could easily implement to iterate over <code>(string-name, &amp;Vec&lt;TrapSite&gt;)</code> pairs.  To implement such an interface, <code>cranelift-object</code> would need to have a way to map from <code>FuncId</code> to <code>string-name</code>, and that's awkward to do, given that <code>object</code> itself doesn't deal with symbol names as strings, but as <code>Vec&lt;u8&gt;</code>.</p>
+<p>The alternative, iterating over <code>(FuncId, &amp;Vec&lt;TrapSite&gt;)</code> pairs, would require some kind of modification to <code>cranelift-faerie</code>.  We could change <code>cranelift-faerie</code> to map from <code>string-name</code> to <code>FuncId</code>: <code>cranelift-faerie</code> could grow a separate table for storing that mapping, but <code>cranelift-module</code> is already storing that mapping, and requiring <code>cranelift-faerie</code> to store it seems like wasted effort.  Alternatively, the way <code>cranelift-faerie</code> stores its traps could be modified to look more like <code>cranelift-object</code>.</p>
+<p>But then maybe the right thing to do is just moving trap collection into <code>cranelift-module</code> itself?  <code>Module::new</code> would then grow a flag for indicating whether trap collection should be done.  <code>Module</code> itself would probably contain a <code>FuncId</code> to <code>Vec&lt;TrapSite&gt;</code> mapping similar to <code>cranelift-object</code>, and then <code>Backend::define_function</code> would receive <code>Option&lt;&amp;mut Vec&lt;TrapSite&gt;&gt;</code> for potentially accumulating traps.</p>
+<p>Since <code>cranelift-simplejit</code> doesn't collect traps, it doesn't matter too much what interface gets decided on.</p>
+<p>I think I prefer moving trap collection into <code>cranelift-module</code> itself, but modifying <code>cranelift-faerie</code> to make it more like <code>cranelift-object</code> and the implementing some sort of common iterator interface works, too.</p>
+<h4>Alternatives</h4>
+<p>The alternative is to keep the status quo, and <code>lucetc</code> would need to write two sets of code for defining certain pieces of information: one that defines those pieces with <code>faerie</code> and another that defines them with <code>object</code>.</p>
+</blockquote>
+
+
+
+<a name="188980888"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217576-git-cranelift/topic/cranelift%20/%20Issue%20%231404%20add%20cranelift-module%20interface%20fo.../near/188980888" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GitHub <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/topic/cranelift.20.2F.20Issue.20.231404.20add.20cranelift-module.20interface.20fo.2E.2E.2E.html#188980888">(Feb 25 2020 at 00:28)</a>:</h4>
+<p>philipc <a href="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-590618409" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-590618409">commented</a> on <a href="https://github.com/bytecodealliance/cranelift/issues/1404" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404">Issue #1404</a>:</p>
+<blockquote>
+<blockquote>
+<p>To implement such an interface, cranelift-object would need to have a way to map from FuncId to string-name</p>
+</blockquote>
+<p><code>cranelift-module</code> already has a <a href="https://github.com/bytecodealliance/cranelift/blob/ea922e17f9c5febffe8f43019bc8697cf4656f04/cranelift-module/src/module.rs#L221" target="_blank" title="https://github.com/bytecodealliance/cranelift/blob/ea922e17f9c5febffe8f43019bc8697cf4656f04/cranelift-module/src/module.rs#L221">map from <code>FuncId</code> to <code>ModuleFunction</code></a> which includes a <a href="https://github.com/bytecodealliance/cranelift/blob/ea922e17f9c5febffe8f43019bc8697cf4656f04/cranelift-module/src/module.rs#L120" target="_blank" title="https://github.com/bytecodealliance/cranelift/blob/ea922e17f9c5febffe8f43019bc8697cf4656f04/cranelift-module/src/module.rs#L120">name</a> and is accessible via the <code>ModuleNamespace</code> that is commonly passed to backend methods.</p>
+<p>Another alternative is to return the traps when defining functions, instead of storing them in the backend.  So <code>lucetc</code> will need to build its trap tables as it goes, instead of doing it all at then end. I haven't looked deeply to see how nicely this would work out, but it seems that each function trap table gets its own independent symbol so I think it could be okay.</p>
+</blockquote>
+
+
+
+<a name="188984201"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217576-git-cranelift/topic/cranelift%20/%20Issue%20%231404%20add%20cranelift-module%20interface%20fo.../near/188984201" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GitHub <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/topic/cranelift.20.2F.20Issue.20.231404.20add.20cranelift-module.20interface.20fo.2E.2E.2E.html#188984201">(Feb 25 2020 at 01:36)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-590636512" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-590636512">commented</a> on <a href="https://github.com/bytecodealliance/cranelift/issues/1404" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404">Issue #1404</a>:</p>
+<blockquote>
+<p>Returning the traps when defining functions seems like a good way to divide the responsibilities into cranelift-module and lucet. That would mean changing the codegen model of cranelift-module to do it at definition, rather than at finalize, but I don't think that is necessarily a bad thing.</p>
+</blockquote>
+
+
+
+<a name="188984221"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217576-git-cranelift/topic/cranelift%20/%20Issue%20%231404%20add%20cranelift-module%20interface%20fo.../near/188984221" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GitHub <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/topic/cranelift.20.2F.20Issue.20.231404.20add.20cranelift-module.20interface.20fo.2E.2E.2E.html#188984221">(Feb 25 2020 at 01:36)</a>:</h4>
+<p>pchickey edited a <a href="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-590636512" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-590636512">comment</a> on <a href="https://github.com/bytecodealliance/cranelift/issues/1404" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404">Issue #1404</a>:</p>
+<blockquote>
+<p>Returning the traps when defining functions seems like a good way to divide the responsibilities into cranelift-module and lucet. That would mean changing cranelift-module to perform codegen at definition time, rather than at finalize, but I don't think that is necessarily a bad thing.</p>
+</blockquote>
+
+
+
+<a name="189053345"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217576-git-cranelift/topic/cranelift%20/%20Issue%20%231404%20add%20cranelift-module%20interface%20fo.../near/189053345" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GitHub <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/topic/cranelift.20.2F.20Issue.20.231404.20add.20cranelift-module.20interface.20fo.2E.2E.2E.html#189053345">(Feb 25 2020 at 19:43)</a>:</h4>
+<p>froydnj <a href="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-591033651" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-591033651">commented</a> on <a href="https://github.com/bytecodealliance/cranelift/issues/1404" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404">Issue #1404</a>:</p>
+<blockquote>
+<blockquote>
+<p>That would mean changing cranelift-module to perform codegen at definition time, rather than at finalize, but I don't think that is necessarily a bad thing.</p>
+</blockquote>
+<p>Doesn't <code>cranelift-module</code> already do this?  <code>cranelift-object</code>'s <code>define_function</code> says:</p>
+<p><a href="https://github.com/bytecodealliance/cranelift/blob/ea922e17f9c5febffe8f43019bc8697cf4656f04/cranelift-object/src/backend.rs#L177-L211" target="_blank" title="https://github.com/bytecodealliance/cranelift/blob/ea922e17f9c5febffe8f43019bc8697cf4656f04/cranelift-object/src/backend.rs#L177-L211">https://github.com/bytecodealliance/cranelift/blob/ea922e17f9c5febffe8f43019bc8697cf4656f04/cranelift-object/src/backend.rs#L177-L211</a></p>
+<p>and <code>cranelift-faerie</code>/<code>cranelift-simplejit</code> do very similar things.  I guess they don't <em>have</em> to, but the documentation on <code>cranelift-module::define_function</code> says "Define a function, producing the function body from the given <code>Context</code>."</p>
+</blockquote>
+
+
+
+<a name="189129035"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217576-git-cranelift/topic/cranelift%20/%20Issue%20%231404%20add%20cranelift-module%20interface%20fo.../near/189129035" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GitHub <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/topic/cranelift.20.2F.20Issue.20.231404.20add.20cranelift-module.20interface.20fo.2E.2E.2E.html#189129035">(Feb 26 2020 at 16:13)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-591509300" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404#issuecomment-591509300">commented</a> on <a href="https://github.com/bytecodealliance/cranelift/issues/1404" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404">Issue #1404</a>:</p>
+<blockquote>
+<p>Sorry, bad memory on my part, cranelift-module does do it that way, the system in lucet that preceeded it waited until the end.</p>
+</blockquote>
+
+
+
+<a name="189361788"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217576-git-cranelift/topic/cranelift%20/%20Issue%20%231404%20add%20cranelift-module%20interface%20fo.../near/189361788" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GitHub <a href="https://bytecodealliance.github.io/zulip-archive/stream/217576-git-cranelift/topic/cranelift.20.2F.20Issue.20.231404.20add.20cranelift-module.20interface.20fo.2E.2E.2E.html#189361788">(Feb 28 2020 at 23:28)</a>:</h4>
+<p>alexcrichton transferred <a href="https://github.com/bytecodealliance/cranelift/issues/1404" target="_blank" title="https://github.com/bytecodealliance/cranelift/issues/1404">Issue #1404</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p><code>lucetc</code> needs some way of accessing the trap sites for every function it compiles:</p>
+<p><a href="https://github.com/bytecodealliance/lucet/blob/23305e5d8e08bed442c244d282b1a0389ed3d822/lucetc/src/output.rs#L69-L89" target="_blank" title="https://github.com/bytecodealliance/lucet/blob/23305e5d8e08bed442c244d282b1a0389ed3d822/lucetc/src/output.rs#L69-L89">https://github.com/bytecodealliance/lucet/blob/23305e5d8e08bed442c244d282b1a0389ed3d822/lucetc/src/output.rs#L69-L89</a></p>
+<p>In the above snippet, the trap site access happens after <code>Module::finish</code> has been called, so we're working with <code>faerie</code> interfaces.</p>
+<p>We are trying to port <code>lucetc</code> to use <code>object</code> instead of <code>faerie</code> underneath, mostly so <code>lucetc</code> can start generating PE/COFF objects with ease.  It would reduce risk somewhat to be able to use <code>cranelift-module</code> as a high-level interface, swap between <code>cranelift-object</code> and <code>cranelift-faerie</code> with as few lines of code as possible, and deal with <code>object</code> and <code>faerie</code> themselves as little as possible (probably just to write out the .o file).  Therefore, it would be convenient if this information about traps associated with each function were accessible through <code>cranelift-module</code> interfaces, rather than through lower-level interfaces.</p>
+<h4>Benefit</h4>
+<p>Trap information would be more easily accessible prior to module finalization.  Though I don't know of anybody else who needs this kind of information about besides <code>lucetc</code> at this point.</p>
+<h4>Implementation</h4>
+<p>This is the tricky bit, because the three in-tree implementations differ substantially in their approach to trap collection:</p>
+<ul>
+<li><code>cranelift-faerie</code> collects essentially <code>(string-name, Vec&lt;TrapSite&gt;)</code> pairs.</li>
+<li><code>cranelift-object</code> collects a mapping of <code>FuncId</code> to <code>Vec&lt;TrapSite&gt;</code>.</li>
+<li><code>cranelift-simplejit</code> ignores traps entirely.</li>
+</ul>
+<p>I don't think there is a single method that all three interfaces could easily implement to iterate over <code>(string-name, &amp;Vec&lt;TrapSite&gt;)</code> pairs.  To implement such an interface, <code>cranelift-object</code> would need to have a way to map from <code>FuncId</code> to <code>string-name</code>, and that's awkward to do, given that <code>object</code> itself doesn't deal with symbol names as strings, but as <code>Vec&lt;u8&gt;</code>.</p>
+<p>The alternative, iterating over <code>(FuncId, &amp;Vec&lt;TrapSite&gt;)</code> pairs, would require some kind of modification to <code>cranelift-faerie</code>.  We could change <code>cranelift-faerie</code> to map from <code>string-name</code> to <code>FuncId</code>: <code>cranelift-faerie</code> could grow a separate table for storing that mapping, but <code>cranelift-module</code> is already storing that mapping, and requiring <code>cranelift-faerie</code> to store it seems like wasted effort.  Alternatively, the way <code>cranelift-faerie</code> stores its traps could be modified to look more like <code>cranelift-object</code>.</p>
+<p>But then maybe the right thing to do is just moving trap collection into <code>cranelift-module</code> itself?  <code>Module::new</code> would then grow a flag for indicating whether trap collection should be done.  <code>Module</code> itself would probably contain a <code>FuncId</code> to <code>Vec&lt;TrapSite&gt;</code> mapping similar to <code>cranelift-object</code>, and then <code>Backend::define_function</code> would receive <code>Option&lt;&amp;mut Vec&lt;TrapSite&gt;&gt;</code> for potentially accumulating traps.</p>
+<p>Since <code>cranelift-simplejit</code> doesn't collect traps, it doesn't matter too much what interface gets decided on.</p>
+<p>I think I prefer moving trap collection into <code>cranelift-module</code> itself, but modifying <code>cranelift-faerie</code> to make it more like <code>cranelift-object</code> and the implementing some sort of common iterator interface works, too.</p>
+<h4>Alternatives</h4>
+<p>The alternative is to keep the status quo, and <code>lucetc</code> would need to write two sets of code for defining certain pieces of information: one that defines those pieces with <code>faerie</code> and another that defines them with <code>object</code>.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

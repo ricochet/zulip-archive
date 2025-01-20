@@ -1,0 +1,357 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #6260 cranelift: Better heuristics for i... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html">wasmtime / issue #6260 cranelift: Better heuristics for i...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="351488351"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/351488351" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#351488351">(Apr 21 2023 at 01:23)</a>:</h4>
+<p>jameysharp opened <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>When any optimization level is enabled, Cranelift runs e-graph equality saturation, which removes all pure instructions from the function layout and leaves only a data-flow graph representation. We then have to put those instructions back into a linear order before we can emit machine code.</p>
+<p>Currently, we pick an arbitrary topo-sort of the instructions. Instead, I propose implementing list scheduling and, when there are multiple instructions whose operands are all ready, using a heuristic to decide between them.</p>
+<h4>Benefit</h4>
+<p>See #6159 for one in-depth analysis of a workload where our instruction scheduling has a measurable impact on performance.</p>
+<h4>Implementation</h4>
+<p>I suggest a combination of two heuristics, based on the results in this paper:</p>
+<p>Shobaki, G., Sakka, L., Abu Rmaileh, N. E., and Al-Hamash, H. (2015) Experimental evaluation of various register-pressure-reduction heuristics. Softw. Pract. Exper., 45: 1497– 1517. doi: <a href="https://doi.org/10.1002/spe.2297">10.1002/spe.2297</a></p>
+<p>The first heuristic is called "Last Use Count" (LUC). It counts how many live-ranges will end if we place this instruction now. Put another way, for each operand, check whether there are any other instructions that will use the same value but haven't been scheduled yet. If there aren't any, then this instruction is the last user of that value. Count how many operands that applies to. We want to choose an instruction with maximum LUC at each point, because that tends to reduce register pressure.</p>
+<p>LUC should have frequent ties. Since most instructions have at most two operands, they can end zero, one, or two live ranges. So we need a tie-breaker.</p>
+<p>The tie-breaker heuristic is "Critical Path" (CP) length. It counts the maximum length of any data-dependent chain of instructions that must execute after this instruction before the end of the block. By itself, CP optimizes for instruction-level parallelism (ILP) by starting long chains of operations as soon as possible, but it tends to increase register pressure. However, when used as a tie-breaker for LUC, it can reduce register pressure more than LUC alone. We want to choose an instruction with maximum CP.</p>
+<p>If both LUC and CP are tied, we need a last-resort tie-breaker. Prefer the instruction with the smallest instruction number. That will tend to keep instructions in the same order that they appeared in the input.</p>
+<p>Computing CP for each instruction can be done in linear time with a breadth-first traversal starting from the block terminator. If there's an edge from instruction A to instruction B, then the CP length for B is whichever is higher of: 1) A's CP length plus 1, or 2) any CP length from any other path. Note that each instruction in the side-effecting skeleton should be treated as if it has an edge to the side-effecting instruction immediately before it.</p>
+<p>While visiting all the instructions in the block we should also record the reverse edges: the set of instructions which use each value. Also initialize a side table recording, for each instruction, the number of values it uses which are defined by instructions inside the current block.</p>
+<p>The main scheduling loop should proceed like this:</p>
+<ul>
+<li>Pick the highest-priority instruction that's currently ready and append it to the current block's layout.</li>
+<li>For each operand of this instruction, remove this instruction from the set of the value's users. If the value now has exactly one user left, find that user and increment its LUC.</li>
+<li>For each result defined by this instruction, find all instructions which use the value and decrement their count of unready operands. If any now has zero unready operands, add it to the priority queue of ready instructions.</li>
+<li>If this instruction was in the side-effecting skeleton, check the next side-effecting instruction to see if it's ready. Add it to the queue if so.</li>
+</ul>
+<p>Because the LUC can increase while an instruction is waiting in the ready queue, we need a priority queue which supports an efficient "decrease-key" operation. (Textbooks and academic papers generally assume you want to find/extract the minimum element, so we need to reverse the order.) "Rank-pairing heaps" (by Haeupler, Sen, and Tarjan) are the newest option I found in a literature review, and they cite all the earlier papers that I found, so that paper is a good starting point for picking a suitable data structure. It should be possible to get O(1) time for all the operations we need except for extract-min, which should be O(log n); but depending on the data structure chosen these bounds will either be worst-case or amortized time.</p>
+<p>I _think_ the overall running time of this algorithm is then O(n log n) in the number of instructions in the block. (There should maybe be a factor for the number of edges as well, but we can treat that as bounded by a constant factor of the number of instructions. Again, for most instructions that bound is 2.)</p>
+<h4>Alternatives</h4>
+<p>@cfallin suggested a variation on this idea, where we use some other heuristic to decide whether it's worth spending extra CPU time on heuristic-guided list scheduling. We can always fall back to the current topo-sort. One heuristic for this could be some function of the critical path length of the block as a whole (that is, the maximum CP for any instruction) versus the number of instructions in the block, which is one way of estimating the maximum amount of parallelism available in the block. If there's very little parallelism then there aren't many choices of topo-sort and they're probably all pretty close to equivalent.</p>
+<p>Critical path length could be defined in terms of an estimate of the number of CPU cycles needed to evaluate the instruction, rather than assuming that all CLIF instructions take the same amount of time. This is probably not worth bothering with but, given a suitable cost model, it's easy to integrate by using a priority queue instead of a FIFO queue when computing CP length.</p>
+<p>There are no doubt other ordering heuristics we could try.</p>
+</blockquote>
+
+
+
+<a name="351488352"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/351488352" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#351488352">(Apr 21 2023 at 01:24)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>When any optimization level is enabled, Cranelift runs e-graph equality saturation, which removes all pure instructions from the function layout and leaves only a data-flow graph representation. We then have to put those instructions back into a linear order before we can emit machine code.</p>
+<p>Currently, we pick an arbitrary topo-sort of the instructions. Instead, I propose implementing list scheduling and, when there are multiple instructions whose operands are all ready, using a heuristic to decide between them.</p>
+<h4>Benefit</h4>
+<p>See #6159 for one in-depth analysis of a workload where our instruction scheduling has a measurable impact on performance.</p>
+<h4>Implementation</h4>
+<p>I suggest a combination of two heuristics, based on the results in this paper:</p>
+<p>Shobaki, G., Sakka, L., Abu Rmaileh, N. E., and Al-Hamash, H. (2015) Experimental evaluation of various register-pressure-reduction heuristics. Softw. Pract. Exper., 45: 1497– 1517. doi: <a href="https://doi.org/10.1002/spe.2297">10.1002/spe.2297</a></p>
+<p>The first heuristic is called "Last Use Count" (LUC). It counts how many live-ranges will end if we place this instruction now. Put another way, for each operand, check whether there are any other instructions that will use the same value but haven't been scheduled yet. If there aren't any, then this instruction is the last user of that value. Count how many operands that applies to. We want to choose an instruction with maximum LUC at each point, because that tends to reduce register pressure.</p>
+<p>LUC should have frequent ties. Since most instructions have at most two operands, they can end zero, one, or two live ranges. So we need a tie-breaker.</p>
+<p>The tie-breaker heuristic is "Critical Path" (CP) length. It counts the maximum length of any data-dependent chain of instructions that must execute after this instruction before the end of the block. By itself, CP optimizes for instruction-level parallelism (ILP) by starting long chains of operations as soon as possible, but it tends to increase register pressure. However, when used as a tie-breaker for LUC, it can reduce register pressure more than LUC alone. We want to choose an instruction with maximum CP.</p>
+<p>If both LUC and CP are tied, we need a last-resort tie-breaker. Prefer the instruction with the smallest instruction number. That will tend to keep instructions in the same order that they appeared in the input.</p>
+<p>Computing CP for each instruction can be done in linear time with a breadth-first traversal starting from the block terminator. If there's an edge from instruction A to instruction B, then the CP length for B is whichever is higher of: 1) A's CP length plus 1, or 2) any CP length from any other path. Note that each instruction in the side-effecting skeleton should be treated as if it has an edge to the side-effecting instruction immediately before it.</p>
+<p>While visiting all the instructions in the block we should also record the reverse edges: the set of instructions which use each value. Also initialize a side table recording, for each instruction, the number of values it uses which are defined by instructions inside the current block.</p>
+<p>The main scheduling loop should proceed like this:</p>
+<ul>
+<li>Pick the highest-priority instruction that's currently ready and append it to the current block's layout.</li>
+<li>For each operand of this instruction, remove this instruction from the set of the value's users. If the value now has exactly one user left, find that user and increment its LUC.</li>
+<li>For each result defined by this instruction, find all instructions which use the value and decrement their count of unready operands. If any now has zero unready operands, add it to the priority queue of ready instructions.</li>
+<li>If this instruction was in the side-effecting skeleton, check the next side-effecting instruction to see if it's ready. Add it to the queue if so.</li>
+</ul>
+<p>Because the LUC can increase while an instruction is waiting in the ready queue, we need a priority queue which supports an efficient "decrease-key" operation. (Textbooks and academic papers generally assume you want to find/extract the minimum element, so we need to reverse the order.) "Rank-pairing heaps" (by Haeupler, Sen, and Tarjan) are the newest option I found in a literature review, and they cite all the earlier papers that I found, so that paper is a good starting point for picking a suitable data structure. It should be possible to get O(1) time for all the operations we need except for extract-min, which should be O(log n); but depending on the data structure chosen these bounds will either be worst-case or amortized time.</p>
+<p>I _think_ the overall running time of this algorithm is then O(n log n) in the number of instructions in the block. (There should maybe be a factor for the number of edges as well, but we can treat that as bounded by a constant factor of the number of instructions. Again, for most instructions that bound is 2.)</p>
+<h4>Alternatives</h4>
+<p>@cfallin suggested a variation on this idea, where we use some other heuristic to decide whether it's worth spending extra CPU time on heuristic-guided list scheduling. We can always fall back to the current topo-sort. One heuristic for this could be some function of the critical path length of the block as a whole (that is, the maximum CP for any instruction) versus the number of instructions in the block, which is one way of estimating the maximum amount of parallelism available in the block. If there's very little parallelism then there aren't many choices of topo-sort and they're probably all pretty close to equivalent.</p>
+<p>Critical path length could be defined in terms of an estimate of the number of CPU cycles needed to evaluate the instruction, rather than assuming that all CLIF instructions take the same amount of time. This is probably not worth bothering with but, given a suitable cost model, it's easy to integrate by using a priority queue instead of a FIFO queue when computing CP length.</p>
+<p>There are no doubt other ordering heuristics we could try.</p>
+</blockquote>
+
+
+
+<a name="351488354"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/351488354" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#351488354">(Apr 21 2023 at 01:24)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>When any optimization level is enabled, Cranelift runs e-graph equality saturation, which removes all pure instructions from the function layout and leaves only a data-flow graph representation. We then have to put those instructions back into a linear order before we can emit machine code.</p>
+<p>Currently, we pick an arbitrary topo-sort of the instructions. Instead, I propose implementing list scheduling and, when there are multiple instructions whose operands are all ready, using a heuristic to decide between them.</p>
+<h4>Benefit</h4>
+<p>See #6159 for one in-depth analysis of a workload where our instruction scheduling has a measurable impact on performance.</p>
+<h4>Implementation</h4>
+<p>I suggest a combination of two heuristics, based on the results in this paper:</p>
+<p>Shobaki, G., Sakka, L., Abu Rmaileh, N. E., and Al-Hamash, H. (2015) Experimental evaluation of various register-pressure-reduction heuristics. Softw. Pract. Exper., 45: 1497– 1517. doi: <a href="https://doi.org/10.1002/spe.2297">10.1002/spe.2297</a></p>
+<p>The first heuristic is called "Last Use Count" (LUC). It counts how many live-ranges will end if we place this instruction now. Put another way, for each operand, check whether there are any other instructions that will use the same value but haven't been scheduled yet. If there aren't any, then this instruction is the last user of that value. Count how many operands that applies to. We want to choose an instruction with maximum LUC at each point, because that tends to reduce register pressure.</p>
+<p>LUC should have frequent ties. Since most instructions have at most two operands, they can end zero, one, or two live ranges. So we need a tie-breaker.</p>
+<p>The tie-breaker heuristic is "Critical Path" (CP) length. It counts the maximum length of any data-dependent chain of instructions that must execute after this instruction before the end of the block. By itself, CP optimizes for instruction-level parallelism (ILP) by starting long chains of operations as soon as possible, but it tends to increase register pressure. However, when used as a tie-breaker for LUC, it can reduce register pressure more than LUC alone. We want to choose an instruction with maximum CP.</p>
+<p>If both LUC and CP are tied, we need a last-resort tie-breaker. Prefer the instruction with the smallest instruction number. That will tend to keep instructions in the same order that they appeared in the input.</p>
+<p>Computing CP for each instruction can be done in linear time with a breadth-first traversal starting from the block terminator. If there's an edge from instruction A to instruction B, then the CP length for B is whichever is higher of: 1) A's CP length plus 1, or 2) any CP length from any other path. Note that each instruction in the side-effecting skeleton should be treated as if it has an edge to the side-effecting instruction immediately before it.</p>
+<p>While visiting all the instructions in the block we should also record the reverse edges: the set of instructions which use each value. Also initialize a side table recording, for each instruction, the number of values it uses which are defined by instructions inside the current block.</p>
+<p>The main scheduling loop should proceed like this:</p>
+<ul>
+<li>Pick the highest-priority instruction that's currently ready and append it to the current block's layout.</li>
+<li>For each operand of this instruction, remove this instruction from the set of the value's users. If the value now has exactly one user left, find that user and increment its LUC.</li>
+<li>For each result defined by this instruction, find all instructions which use the value and decrement their count of unready operands. If any now has zero unready operands, add it to the priority queue of ready instructions.</li>
+<li>If this instruction was in the side-effecting skeleton, check the next side-effecting instruction to see if it's ready. Add it to the queue if so.</li>
+</ul>
+<p>Because the LUC can increase while an instruction is waiting in the ready queue, we need a priority queue which supports an efficient "decrease-key" operation. (Textbooks and academic papers generally assume you want to find/extract the minimum element, so we need to reverse the order.) "Rank-pairing heaps" (by Haeupler, Sen, and Tarjan) are the newest option I found in a literature review, and they cite all the earlier papers that I found, so that paper is a good starting point for picking a suitable data structure. It should be possible to get O(1) time for all the operations we need except for extract-min, which should be O(log n); but depending on the data structure chosen these bounds will either be worst-case or amortized time.</p>
+<p>I _think_ the overall running time of this algorithm is then O(n log n) in the number of instructions in the block. (There should maybe be a factor for the number of edges as well, but we can treat that as bounded by a constant factor of the number of instructions. Again, for most instructions that bound is 2.)</p>
+<h4>Alternatives</h4>
+<p>@cfallin suggested a variation on this idea, where we use some other heuristic to decide whether it's worth spending extra CPU time on heuristic-guided list scheduling. We can always fall back to the current topo-sort. One heuristic for this could be some function of the critical path length of the block as a whole (that is, the maximum CP for any instruction) versus the number of instructions in the block, which is one way of estimating the maximum amount of parallelism available in the block. If there's very little parallelism then there aren't many choices of topo-sort and they're probably all pretty close to equivalent.</p>
+<p>Critical path length could be defined in terms of an estimate of the number of CPU cycles needed to evaluate the instruction, rather than assuming that all CLIF instructions take the same amount of time. This is probably not worth bothering with but, given a suitable cost model, it's easy to integrate by using a priority queue instead of a FIFO queue when computing CP length.</p>
+<p>There are no doubt other ordering heuristics we could try.</p>
+</blockquote>
+
+
+
+<a name="351488355"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/351488355" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#351488355">(Apr 21 2023 at 01:24)</a>:</h4>
+<p>jameysharp labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<h4>Feature</h4>
+<p>When any optimization level is enabled, Cranelift runs e-graph equality saturation, which removes all pure instructions from the function layout and leaves only a data-flow graph representation. We then have to put those instructions back into a linear order before we can emit machine code.</p>
+<p>Currently, we pick an arbitrary topo-sort of the instructions. Instead, I propose implementing list scheduling and, when there are multiple instructions whose operands are all ready, using a heuristic to decide between them.</p>
+<h4>Benefit</h4>
+<p>See #6159 for one in-depth analysis of a workload where our instruction scheduling has a measurable impact on performance.</p>
+<h4>Implementation</h4>
+<p>I suggest a combination of two heuristics, based on the results in this paper:</p>
+<p>Shobaki, G., Sakka, L., Abu Rmaileh, N. E., and Al-Hamash, H. (2015) Experimental evaluation of various register-pressure-reduction heuristics. Softw. Pract. Exper., 45: 1497– 1517. doi: <a href="https://doi.org/10.1002/spe.2297">10.1002/spe.2297</a></p>
+<p>The first heuristic is called "Last Use Count" (LUC). It counts how many live-ranges will end if we place this instruction now. Put another way, for each operand, check whether there are any other instructions that will use the same value but haven't been scheduled yet. If there aren't any, then this instruction is the last user of that value. Count how many operands that applies to. We want to choose an instruction with maximum LUC at each point, because that tends to reduce register pressure.</p>
+<p>LUC should have frequent ties. Since most instructions have at most two operands, they can end zero, one, or two live ranges. So we need a tie-breaker.</p>
+<p>The tie-breaker heuristic is "Critical Path" (CP) length. It counts the maximum length of any data-dependent chain of instructions that must execute after this instruction before the end of the block. By itself, CP optimizes for instruction-level parallelism (ILP) by starting long chains of operations as soon as possible, but it tends to increase register pressure. However, when used as a tie-breaker for LUC, it can reduce register pressure more than LUC alone. We want to choose an instruction with maximum CP.</p>
+<p>If both LUC and CP are tied, we need a last-resort tie-breaker. Prefer the instruction with the smallest instruction number. That will tend to keep instructions in the same order that they appeared in the input.</p>
+<p>Computing CP for each instruction can be done in linear time with a breadth-first traversal starting from the block terminator. If there's an edge from instruction A to instruction B, then the CP length for B is whichever is higher of: 1) A's CP length plus 1, or 2) any CP length from any other path. Note that each instruction in the side-effecting skeleton should be treated as if it has an edge to the side-effecting instruction immediately before it.</p>
+<p>While visiting all the instructions in the block we should also record the reverse edges: the set of instructions which use each value. Also initialize a side table recording, for each instruction, the number of values it uses which are defined by instructions inside the current block.</p>
+<p>The main scheduling loop should proceed like this:</p>
+<ul>
+<li>Pick the highest-priority instruction that's currently ready and append it to the current block's layout.</li>
+<li>For each operand of this instruction, remove this instruction from the set of the value's users. If the value now has exactly one user left, find that user and increment its LUC.</li>
+<li>For each result defined by this instruction, find all instructions which use the value and decrement their count of unready operands. If any now has zero unready operands, add it to the priority queue of ready instructions.</li>
+<li>If this instruction was in the side-effecting skeleton, check the next side-effecting instruction to see if it's ready. Add it to the queue if so.</li>
+</ul>
+<p>Because the LUC can increase while an instruction is waiting in the ready queue, we need a priority queue which supports an efficient "decrease-key" operation. (Textbooks and academic papers generally assume you want to find/extract the minimum element, so we need to reverse the order.) "Rank-pairing heaps" (by Haeupler, Sen, and Tarjan) are the newest option I found in a literature review, and they cite all the earlier papers that I found, so that paper is a good starting point for picking a suitable data structure. It should be possible to get O(1) time for all the operations we need except for extract-min, which should be O(log n); but depending on the data structure chosen these bounds will either be worst-case or amortized time.</p>
+<p>I _think_ the overall running time of this algorithm is then O(n log n) in the number of instructions in the block. (There should maybe be a factor for the number of edges as well, but we can treat that as bounded by a constant factor of the number of instructions. Again, for most instructions that bound is 2.)</p>
+<h4>Alternatives</h4>
+<p>@cfallin suggested a variation on this idea, where we use some other heuristic to decide whether it's worth spending extra CPU time on heuristic-guided list scheduling. We can always fall back to the current topo-sort. One heuristic for this could be some function of the critical path length of the block as a whole (that is, the maximum CP for any instruction) versus the number of instructions in the block, which is one way of estimating the maximum amount of parallelism available in the block. If there's very little parallelism then there aren't many choices of topo-sort and they're probably all pretty close to equivalent.</p>
+<p>Critical path length could be defined in terms of an estimate of the number of CPU cycles needed to evaluate the instruction, rather than assuming that all CLIF instructions take the same amount of time. This is probably not worth bothering with but, given a suitable cost model, it's easy to integrate by using a priority queue instead of a FIFO queue when computing CP length.</p>
+<p>There are no doubt other ordering heuristics we could try.</p>
+</blockquote>
+
+
+
+<a name="439886306"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/439886306" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#439886306">(May 21 2024 at 19:19)</a>:</h4>
+<p>dimitris-aspetakis <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2123288457">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<p>Hello!</p>
+<p>As part of a university project, me and a colleague of mine (Panagiotis Karouzakis) have started working on this proposal in <a href="https://github.com/karouzakisp/wasmtime/tree/instr_sched-heuristics_opt">this branch of our fork</a>. We are of course hitting a few assertions in the code we shouldn't.</p>
+<p>We believe we have implemented every part of the algorithm proposed, but we might have missed some important things, since (despite our efforts) our understanding of the elaboration stack machinery would probably be considered incomplete...</p>
+<p><strong>Current Approach</strong><br>
+Currently, we have three passes over every block:</p>
+<ol>
+<li>The elaboration pass mostly as it was (<code>elaborate_block(...)</code>), only with the actual layout placement removed.</li>
+<li>The breadth-first pass for the construction of critical paths, the <code>value_uses</code> map and the reverse edges using <code>dependencies_count</code> (the last one includes the manufactured dependencies among skeleton instructions too).</li>
+<li>The ready-queue pass, inside which we place the instruction to the current place in the layout, or where the LICM optimization from the elaboration pass told us.</li>
+</ol>
+<p><strong>Our Open Questions</strong></p>
+<ul>
+<li>We temporarily removed rematerialization to focus on other bugs. When we re-enable it, it should be placed right before instruction layout placement in our ready-queue pass, right?</li>
+<li>We are not certain if the work that elaboration pass does (namely <code>value_to_best_value</code> and <code>value_to_elaborated_value</code> construction) is independent of the layout order of instructions. Should we leave it as a separate pass, or should we integrate it somehow into the ready-queue pass? Our uncertainty applies to LICM optimizations as well.</li>
+</ul>
+<p>In general, any comments on our approach would be much appreciated!</p>
+</blockquote>
+
+
+
+<a name="440030462"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/440030462" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#440030462">(May 22 2024 at 07:21)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2124050501">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<p>This is so cool. I don't understand your implementation yet and can't give much feedback right now, but I'm very excited that you're working on this!</p>
+<p>Regarding the construction of <code>value_to_best_value</code>, at least, I can tell you that I'm pretty sure <code>compute_best_values</code> can be merged into the initial <code>remove_pure_and_optimize</code> pass. It requires visiting definitions before uses, but the initial pass that's visiting all the original instructions and adding union nodes and alternative instructions also requires that order. Computing best values does not require knowing either the original layout or the final layout, though.</p>
+<p>For <code>value_to_elaborated_value</code>, that reflects which layout decisions have been made by elaboration in the current branch of the dominator tree, so I'd guess you need something like it, but maybe you have something else that's equivalent. Or maybe not having that is why you have comments about trying to place instructions which have already been placed elsewhere?</p>
+<p>I think it's an excellent idea to figure out how to make this work without rematerialization or LICM first, and then add those back later. I'd love to see this get to the point where we can look at what effect it has on <code>cargo test -p cranelift-tools --test filetests</code> (probably with <code>CRANELIFT_TEST_BLESS=1</code> set so you can just look at <code>git diff</code> after it rewrites all the tests for you). Even better to see what effect this has on our benchmark suite, <a href="https://github.com/bytecodealliance/sightglass/">Sightglass</a>, but don't worry about that yet.</p>
+</blockquote>
+
+
+
+<a name="443055186"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/443055186" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#443055186">(Jun 06 2024 at 13:12)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2152428151">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<p>Just want to note again that I'm very excited you're working on this. I'm not sure what you need right now; let me know how I can help!</p>
+</blockquote>
+
+
+
+<a name="443083310"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/443083310" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#443083310">(Jun 06 2024 at 15:07)</a>:</h4>
+<p>dimitris-aspetakis <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2152774645">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<p>Thanks for the encouraging words!</p>
+<p>We're trying to pass all tests from cranelift-tools right now, and (since today) we are down to seemingly 12 not passing (most of which probably come from 2–3 distinct problems). We'll probably give them a go for a few more days, and then reach for possible help, since the cost of explaining our implementation in detail is probably non-trivial <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span></p>
+</blockquote>
+
+
+
+<a name="443083373"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/443083373" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#443083373">(Jun 06 2024 at 15:07)</a>:</h4>
+<p>dimitris-aspetakis edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2152774645">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<p>Thanks for the encouraging words!</p>
+<p>We're trying to pass all tests from <code>cranelift-tools</code> right now, and (since today) we are down to seemingly 12 not passing (most of which probably come from 2–3 distinct problems). We'll probably give them a go for a few more days, and then reach for possible help, since the cost of explaining our implementation in detail is probably non-trivial <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span></p>
+</blockquote>
+
+
+
+<a name="450706075"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/450706075" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#450706075">(Jul 11 2024 at 13:09)</a>:</h4>
+<p>dimitris-aspetakis <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2222900218">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<h2>Progress Update</h2>
+<p>We believe we have now basically fixed every bug we encountered, and are able to successfully execute all Sightglass benchmarks! There might be some <code>cranelift-tools</code> or <code>disas</code> tests we fail, but those are most probably from checks that implicitly check for scheduling according to the currently used dependency-driven approach (we have manually checked and changed some already in <code>cranelift-tools</code>).</p>
+<p>We removed entirely the elaboration pass mentioned in <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2123288457">https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2123288457</a>, merging its functionality to the other two passes. We also re-implemented rematerialization and LICM.</p>
+<p>As for the correctness of our implementation, while we have checked a couple of small examples manually, we have not created any tests to reassure us that we conform to the expected scheduling of the LUC-CP-sequence heuristic. I'm thinking it might be useful to manually create some in <code>cranelift/filetests/filetests/egraph/</code> (or possibly in a new directory) whenever we find time.</p>
+<h2>Compilation Performance</h2>
+<p>Iterating through flamegraph sessions, we have managed to reduce compilation penalties to ~15–30% in spidermonkey (on a Ryzen 5700G with an isolated core). There are some parts of our implementation (e.g. use of <code>FxHashSet</code> for <code>value_users</code> sets) that we aren't sure how much optimization opportunities they might hold. As for the priority queue, <a href="https://github.com/mstange/samply">samply</a> recordings tell us its pushes and pops take ~13% of the <code>elaborate_domtree()</code> function.</p>
+<p>For the priority queue, we initially used <a href="https://crates.io/crates/heapz"><code>heapz</code></a>, a Rank-Pairing heap implementation. Due to some bugs we encountered with its implementation though, we switched to a <a href="https://crates.io/crates/hashheap">Hash Heap implementation</a>. The performance profile seemed similar to that of <code>heapz</code> (specifically for the compilation metrics).</p>
+<p>I'm not certain about this, but I believe we might be able to create a simpler and (in practice) better structure for the priority queue, given that the majority of our LUC values are 0, 1 and 2. I was thinking something like three separate buckets for each LUC value, each using some structure with fast insertion, and a fourth bucket for the slow-path of LUC values higher than 2. Another idea was to do a merge of the three metrics (LUC, CP and sequences) into a single value for the structure's ordering fields, with the expectation of reducing comparisons — since their importance is linear and well-defined.</p>
+<h2>Execution Performance</h2>
+<p>Unfortunately, our changes do not seem to have the expected execution-time improvements, with some benchmarks giving us regressions too. The best results we got were from Sightglass's <code>regex</code> benchmark, and the sparse FP32 benchmarks from XNNPACK (as used in <a href="https://github.com/bytecodealliance/wasmtime/issues/6159">https://github.com/bytecodealliance/wasmtime/issues/6159</a>). <a href="https://github.com/user-attachments/files/16177449/benchmark_results.txt">This text file</a> includes results from a set of five implementations. The original, dependency-driven approach (dep-driven), our heuristics implementation using all three metrics (LUC, CP and sequence), an implementation without the LUC, one without the CP and one using just sequences (original program order sequence numbers). For the last three implementations we just changed the ordering implementation of the key structure for the priority queue — meaning that the compilation performance of those is not optimized.</p>
+</blockquote>
+
+
+
+<a name="450760146"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/450760146" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#450760146">(Jul 11 2024 at 16:55)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2223430428">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<blockquote>
+<p>I'm not certain about this, but I believe we might be able to create a simpler and (in practice) better structure for the priority queue</p>
+</blockquote>
+<p>Did you happen to try <a href="https://doc.rust-lang.org/nightly/std/collections/struct.BinaryHeap.html">https://doc.rust-lang.org/nightly/std/collections/struct.BinaryHeap.html</a> ? Not that I think it is probably the best option but if it is easy to swap in/out it is at least worth trying.</p>
+</blockquote>
+
+
+
+<a name="450770931"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/450770931" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#450770931">(Jul 11 2024 at 17:51)</a>:</h4>
+<p>dimitris-aspetakis <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2223536704">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<blockquote>
+<p>Did you happen to try <a href="https://doc.rust-lang.org/nightly/std/collections/struct.BinaryHeap.html">https://doc.rust-lang.org/nightly/std/collections/struct.BinaryHeap.html</a> ?</p>
+</blockquote>
+<p>The problem with it is that (as far as I saw from its interface) it does not support an "update" or at least a "promote" operation on the keys (assuming the keys are used for sorting — I kinda got confused with all the implementations we tested). We need an efficient implementation of that because LUC get dynamically upgraded in nodes while they are in the priority queue. We could simply remove the node and re-insert it, resulting in a (theoretically) asymptotically worse implementation.</p>
+<p>That's kinda what I was thinking of when suggesting this four-bucket structure — each bucket would have a simpler structure compared to Rank Pairing Heaps / Hash Heaps (e.g. Rust's <code>BinaryHeap</code>), with the expectation that while this would have higher theoretical time complexity, it would be faster in practice. I guess we could have one <code>BinaryHeap</code> instead of four, but splitting it in four would give us smaller sizes in each collection (without any regressions?) — resulting in faster removals &amp; insertions.</p>
+<p>I have to add though, that I believe we should first focus on seeing what is wrong with execution performance in the benchmarks before trying to optimize compilation any further. Of course, if anyone wants to help with the modules' compilation optimizations, he should feel more than free to help <span aria-label="upside down" class="emoji emoji-1f643" role="img" title="upside down">:upside_down:</span>. One thing we could probably do is start diffing machine code from V8 / node with our implementation just like in <a href="https://github.com/bytecodealliance/wasmtime/issues/6159">https://github.com/bytecodealliance/wasmtime/issues/6159</a> and work backwards from there to see what our scheduling is missing.</p>
+</blockquote>
+
+
+
+<a name="450772257"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/450772257" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#450772257">(Jul 11 2024 at 17:58)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2223549627">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<p>That all makes perfect sense, thanks for explaining!</p>
+</blockquote>
+
+
+
+<a name="450772794"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/450772794" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#450772794">(Jul 11 2024 at 18:01)</a>:</h4>
+<p>dimitris-aspetakis edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2223536704">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<blockquote>
+<p>Did you happen to try <a href="https://doc.rust-lang.org/nightly/std/collections/struct.BinaryHeap.html">https://doc.rust-lang.org/nightly/std/collections/struct.BinaryHeap.html</a> ?</p>
+</blockquote>
+<p>The problem with it is that (as far as I saw from its interface) it does not support an "update" or at least a "promote" operation on the keys (assuming the keys are used for sorting — I kinda got confused with all the implementations we tested). We need an efficient implementation of that because LUC get dynamically upgraded in nodes while they are in the priority queue. We could simply remove the node and re-insert it, resulting in a (theoretically) asymptotically worse implementation.</p>
+<p>That's kinda what I was thinking of when suggesting this four-bucket structure — each bucket would have a simpler structure compared to Rank Pairing Heaps / Hash Heaps (e.g. Rust's <code>BinaryHeap</code>), with the expectation that while this would have higher theoretical time complexity, it would be faster in practice. I guess we could have one <code>BinaryHeap</code> instead of four, but splitting it in four would give us smaller sizes in each collection (without any regressions?) — resulting in faster removals &amp; insertions.</p>
+<p>I have to add though, that I believe we should first focus on seeing what is wrong with execution performance in the benchmarks before trying to optimize compilation any further. Of course, if anyone wants to help with the modules' compilation optimizations, they should feel more than free to help <span aria-label="upside down" class="emoji emoji-1f643" role="img" title="upside down">:upside_down:</span>. One thing we could probably do is start diffing machine code from V8 / node with our implementation just like in <a href="https://github.com/bytecodealliance/wasmtime/issues/6159">https://github.com/bytecodealliance/wasmtime/issues/6159</a> and work backwards from there to see what our scheduling is missing.</p>
+</blockquote>
+
+
+
+<a name="450773192"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/450773192" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#450773192">(Jul 11 2024 at 18:02)</a>:</h4>
+<p>dimitris-aspetakis edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2223536704">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<blockquote>
+<p>Did you happen to try <a href="https://doc.rust-lang.org/nightly/std/collections/struct.BinaryHeap.html">https://doc.rust-lang.org/nightly/std/collections/struct.BinaryHeap.html</a> ?</p>
+</blockquote>
+<p>The problem with it is that (as far as I saw from its interface) it does not support an "update" or at least a "promote" operation on the keys (assuming the keys are used for sorting — I kinda got confused with all the implementations we tested). We need an efficient implementation of that because LUC gets dynamically upgraded in nodes while they are in the priority queue. We could simply remove the node and re-insert it, resulting in a (theoretically) asymptotically worse implementation.</p>
+<p>That's kinda what I was thinking of when suggesting this four-bucket structure — each bucket would have a simpler structure compared to Rank Pairing Heaps / Hash Heaps (e.g. Rust's <code>BinaryHeap</code>), with the expectation that while this would have higher theoretical time complexity, it would be faster in practice. I guess we could have one <code>BinaryHeap</code> instead of four, but splitting it in four would give us smaller sizes in each collection (without any regressions?) — resulting in faster removals &amp; insertions.</p>
+<p>I have to add though, that I believe we should first focus on seeing what is wrong with execution performance in the benchmarks before trying to optimize compilation any further. Of course, if anyone wants to help with the modules' compilation optimizations, they should feel more than free to help <span aria-label="upside down" class="emoji emoji-1f643" role="img" title="upside down">:upside_down:</span>. One thing we could probably do is start diffing machine code from V8 / node with our implementation just like in <a href="https://github.com/bytecodealliance/wasmtime/issues/6159">https://github.com/bytecodealliance/wasmtime/issues/6159</a> and work backwards from there to see what our scheduling is missing.</p>
+</blockquote>
+
+
+
+<a name="450965241"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/450965241" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#450965241">(Jul 12 2024 at 12:52)</a>:</h4>
+<p>dimitris-aspetakis edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2222900218">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<h2>Progress Update</h2>
+<p>We believe we have now basically fixed every bug we encountered, and are able to successfully execute all Sightglass benchmarks! There might be some <code>cranelift-tools</code> or <code>disas</code> tests we fail, but those are most probably from checks that implicitly check for scheduling according to the currently used dependency-driven approach (we have manually checked and changed some already in <code>cranelift-tools</code>).</p>
+<p>We removed entirely the elaboration pass mentioned in <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2123288457">https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2123288457</a>, merging its functionality to the other two passes. We also re-implemented rematerialization and LICM.</p>
+<p>As for the correctness of our implementation, while we have checked a couple of small examples manually, we have not created any tests to reassure ourselves that we conform to the expected scheduling of the LUC-CP-sequence heuristic. I'm thinking it might be useful to manually create some in <code>cranelift/filetests/filetests/egraph/</code> (or possibly in a new directory) whenever we find time.</p>
+<h2>Compilation Performance</h2>
+<p>Iterating through flamegraph sessions, we have managed to reduce compilation penalties to ~15–30% in spidermonkey (on a Ryzen 5700G with an isolated core). There are some parts of our implementation (e.g. use of <code>FxHashSet</code> for <code>value_users</code> sets) that we aren't sure how much optimization opportunities they might hold. As for the priority queue, <a href="https://github.com/mstange/samply">samply</a> recordings tell us its pushes and pops take ~13% of the <code>elaborate_domtree()</code> function.</p>
+<p>For the priority queue, we initially used <a href="https://crates.io/crates/heapz"><code>heapz</code></a>, a Rank-Pairing heap implementation. Due to some bugs we encountered with its implementation though, we switched to a <a href="https://crates.io/crates/hashheap">Hash Heap implementation</a>. The performance profile seemed similar to that of <code>heapz</code> (specifically for the compilation metrics).</p>
+<p>I'm not certain about this, but I believe we might be able to create a simpler and (in practice) better structure for the priority queue, given that the majority of our LUC values are 0, 1 and 2. I was thinking something like three separate buckets for each LUC value, each using some structure with fast insertion, and a fourth bucket for the slow-path of LUC values higher than 2. Another idea was to do a merge of the three metrics (LUC, CP and sequences) into a single value for the structure's ordering fields, with the expectation of reducing comparisons — since their importance is linear and well-defined.</p>
+<h2>Execution Performance</h2>
+<p>Unfortunately, our changes do not seem to have the expected execution-time improvements, with some benchmarks giving us regressions too. The best results we got were from Sightglass's <code>regex</code> benchmark, and the sparse FP32 benchmarks from XNNPACK (as used in <a href="https://github.com/bytecodealliance/wasmtime/issues/6159">https://github.com/bytecodealliance/wasmtime/issues/6159</a>). <a href="https://github.com/user-attachments/files/16177449/benchmark_results.txt">This text file</a> includes results from a set of five implementations. The original, dependency-driven approach (dep-driven), our heuristics implementation using all three metrics (LUC, CP and sequence), an implementation without the LUC, one without the CP and one using just sequences (original program order sequence numbers). For the last three implementations we just changed the ordering implementation of the key structure for the priority queue — meaning that the compilation performance of those is not optimized.</p>
+</blockquote>
+
+
+
+<a name="450965712"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/450965712" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#450965712">(Jul 12 2024 at 12:54)</a>:</h4>
+<p>dimitris-aspetakis edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2123288457">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<p>Hello!</p>
+<p>As part of a university project, me and a colleague of mine (Panagiotis Karouzakis) have started working on this proposal in <a href="https://github.com/karouzakisp/wasmtime/tree/heuristics">this branch of our fork</a>. We are of course hitting a few assertions in the code we shouldn't.</p>
+<p>We believe we have implemented every part of the algorithm proposed, but we might have missed some important things, since (despite our efforts) our understanding of the elaboration stack machinery would probably be considered incomplete...</p>
+<p><strong>Current Approach</strong><br>
+Currently, we have three passes over every block:</p>
+<ol>
+<li>The elaboration pass mostly as it was (<code>elaborate_block(...)</code>), only with the actual layout placement removed.</li>
+<li>The breadth-first pass for the construction of critical paths, the <code>value_uses</code> map and the reverse edges using <code>dependencies_count</code> (the last one includes the manufactured dependencies among skeleton instructions too).</li>
+<li>The ready-queue pass, inside which we place the instruction to the current place in the layout, or where the LICM optimization from the elaboration pass told us.</li>
+</ol>
+<p><strong>Our Open Questions</strong></p>
+<ul>
+<li>We temporarily removed rematerialization to focus on other bugs. When we re-enable it, it should be placed right before instruction layout placement in our ready-queue pass, right?</li>
+<li>We are not certain if the work that elaboration pass does (namely <code>value_to_best_value</code> and <code>value_to_elaborated_value</code> construction) is independent of the layout order of instructions. Should we leave it as a separate pass, or should we integrate it somehow into the ready-queue pass? Our uncertainty applies to LICM optimizations as well.</li>
+</ul>
+<p>In general, any comments on our approach would be much appreciated!</p>
+</blockquote>
+
+
+
+<a name="468207695"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236260%20cranelift%3A%20Better%20heuristics%20for%20i.../near/468207695" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236260.20cranelift.3A.20Better.20heuristics.20for.20i.2E.2E.2E.html#468207695">(Sep 06 2024 at 14:45)</a>:</h4>
+<p>dimitris-aspetakis <a href="https://github.com/bytecodealliance/wasmtime/issues/6260#issuecomment-2334223393">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6260">issue #6260</a>:</p>
+<blockquote>
+<p>After writing <a href="https://github.com/bytecodealliance/wasmtime/issues/6154#issuecomment-2334157945">https://github.com/bytecodealliance/wasmtime/issues/6154#issuecomment-2334157945</a>, I retroactively understood that I should probably write it here, referencing #6154.</p>
+<p>The comment summarized:</p>
+<blockquote>
+<p>I can't help but note here my feeling (...) that instruction scheduling should be more integrated with the register allocation and lowering stages. I believe the heuristics we use for register spilling might benefit from some sort of integration with the register allocator specifically.</p>
+<p>In that spirit, I tend to support the suggestion where elaborating instructions back to the layout is delayed.</p>
+<p>As a side-note: would it make sense for pattern-matching fusing optimizations from the instruction lowering stage to work on an AST-like representation directly generated from e-graphs? It sounds more expensive, but it also seems like it could catch more of such optimizations.</p>
+</blockquote>
+<p>Any feedback (how hard would this be, is it even a practical approach in terms of efficiency etc) would be much appreciated :)</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

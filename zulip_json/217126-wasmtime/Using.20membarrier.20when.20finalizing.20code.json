@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>SpiderMonkey emits a <a href=\"https://man7.org/linux/man-pages/man2/membarrier.2.html\">membarrier</a> call while finalizing wasm code for execution. Right now we only do this if we compile a second tier of code, and I've been trying to understand why we don't do this for all module compilations (as modules can migrate between threads).</p>\n<p>I found this previous <a href=\"#narrow/stream/217126-wasmtime/topic/Code.20generation.20and.20CPU.20cache.20maintenance\">discussion</a> and <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3426\">issue</a> for why wasmtime uses <code>membarrier</code> which has some nice context. Those discussions also refer to earlier discussions that led to SM using <code>membarrier</code>. This led to me thinking that we should likely use <code>membarrier</code> for all compilations to match wasmtime's behavior.</p>\n<p>However, trying to use <code>membarrier</code> for all compilation runs into the issue that the syscall is only available on linux &gt;=4.16, which is problematic for a significant number of android devices we support below that kernel version.</p>\n<p>I looked at other VM's (V8/Dart/dotnetcore/mono) to see what they do, and could not find them using <code>membarrier</code> at all. They would just perform the icache synchronization step, but nothing beyond AFAICT. I can provide links if useful. V8 for sure shares the code between threads, not sure on the others.</p>\n<p><span class=\"user-mention\" data-user-id=\"300050\">@Anton Kirilov</span> do you know if there's some other trick that VM's use for broadcasting context synchronization that doesn't use membarrier? Or is it likely they're depending on some hidden behavior to make this not an issue in practice?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/3426\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/949065d9f94542c7972f9147b2c1e14b201fcf4d\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f373239646236373939386238383230343339646539646637653933623562393535396133303733656661383266303334646333663435316139356432303531302f62797465636f6465616c6c69616e63652f7761736d74696d652f70756c6c2f33343236)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/3426\" title=\"Call membarrier() after making JIT mappings executable on AArch64 Linux by akirilov-arm · Pull Request #3426 · bytecodealliance/wasmtime\">Call membarrier() after making JIT mappings executable on AArch64 Linux by akirilov-arm · Pull Request #3426 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This is the first part of a fix to issue #3310. Unfortunately, there are more calls than necessary to rsix::process::membarrier(rsix::process::MembarrierCommand::RegisterPrivateExpeditedSyncCore) (...</div></div></div>",
+        "id": 290106803,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1658240969
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254394\">Ryan Hunt</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Using.20membarrier.20when.20finalizing.20code/near/290106803\">said</a>:</p>\n<blockquote>\n<p>I looked at other VM's (V8/Dart/dotnetcore/mono) to see what they do, and could not find them using <code>membarrier</code> at all. They would just perform the icache synchronization step, but nothing beyond AFAICT. I can provide links if useful. V8 for sure shares the code between threads, not sure on the others.</p>\n</blockquote>\n<p>Unfortunately some of those engines may simply not be compliant with the Arm memory model. As usual with issues of that nature, things may appear to work most of the time, with occasional problems that are hard to diagnose, so no immediate incentive to use <code>membarrier()</code>. V8 is an interesting case because some of my teammates work on it actively, so they should be aware of this issue - I will check with them.</p>",
+        "id": 290109256,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658241936
+    },
+    {
+        "content": "<p>In principle rolling your own inter-thread messaging system (which the application may already implement for other purposes) and then defining a message that causes the receiver thread to execute an <code>ISB</code> should be enough. In fact, on Unix-like platforms sending a signal should work, since it is going to result in at least one transition from user- to kernelspace. Of course, enumerating all running threads is a bit of a challenge.</p>",
+        "id": 290110207,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658242318
+    },
+    {
+        "content": "<p>Thank you. If it helps, here are some links for V8's wasm compiler generating code.</p>\n<ol>\n<li><a href=\"https://source.chromium.org/chromium/chromium/src/+/main:v8/src/wasm/module-compiler.cc;l=1525;drc=976acf743990444ca28d34b359af36fa3366d4dd\">module-compiler.cpp ExecuteCompilationUnits (run on any thread)</a></li>\n<li><a href=\"https://source.chromium.org/chromium/chromium/src/+/main:v8/src/wasm/wasm-code-manager.cc;l=2335;drc=976acf743990444ca28d34b359af36fa3366d4dd\">wasm-code-manager.cpp AddCompiledCode, called by above</a></li>\n<li><a href=\"https://source.chromium.org/chromium/chromium/src/+/main:v8/src/wasm/wasm-code-manager.cc;l=1260\">wasm-code-manager.cpp AddCodeWithCodeSpace, called by above</a></li>\n<li><a href=\"https://source.chromium.org/chromium/chromium/src/+/main:v8/src/codegen/arm64/cpu-arm64.cc;l=49;bpv=1;bpt=0\">FlushInstructionCache on ARM64</a></li>\n</ol>\n<p>It's possible there is some extra synchronization in V8 somewhere, the codebase is quite large. But grepping for membarrier doesn't find it. And I've not seen any references in wasm-code-manager.cpp to this problem. There is reference to <code>isb</code> in their tiering code, with a justification for why their solution is safe. But nothing for their general multi-threaded compilation scheme.</p>",
+        "id": 290111248,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1658242707
+    },
+    {
+        "content": "<p>Oh, another point about what other engines are doing - they may have determined that <em>currently</em> they already have an <code>ISB</code> in the right place in their JIT flow. However, that's IMHO quite fragile - complex codebases tend to evolve constantly and any change might break that guarantee.</p>",
+        "id": 290111307,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658242732
+    },
+    {
+        "content": "<p>The problem is that this is a bit of a complex implicit dependency/coupling that is difficult to track and affects only one platform (well, 2 if you distinguish between AArch32 and AArch64).</p>",
+        "id": 290111508,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658242805
+    },
+    {
+        "content": "<p>Good point re: inter-thread messaging. Outside of tiering, it's well defined when a thread receives a new module and we can execute an <code>isb</code> at that point.</p>",
+        "id": 290111522,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1658242811
+    },
+    {
+        "content": "<p>The <code>membarrier()</code> mechanism is quite robust becomes it keeps the solution localized and independent of what the surrounding code is doing (including with respect to recycling code buffers, etc.).</p>",
+        "id": 290112019,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658242997
+    },
+    {
+        "content": "<p>Is there guidance on the cost of an <code>isb</code>?  I'm wondering how much effort it's worth to avoid redundant ones if we're placing them manually when receiving a module (which may have been compiled on the same thread, and already ran an isb).</p>",
+        "id": 290112032,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1658243002
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254394\">Ryan Hunt</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Using.20membarrier.20when.20finalizing.20code/near/290111248\">said</a>:</p>\n<blockquote>\n<p>There is reference to <code>isb</code> in their tiering code, with a justification for why their solution is safe.</p>\n</blockquote>\n<p>That's probably the answer you are looking for. What we need in Wasmtime (or any JIT runtime for that matter) is an <code>ISB</code> instruction that is broadcast to and executed by all processors. Such a functionality does not exist in the Arm architecture, so the <code>membarrier()</code> system call with the particular arguments used by Wasmtime simulates it.</p>",
+        "id": 290112537,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658243189
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254394\">Ryan Hunt</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Using.20membarrier.20when.20finalizing.20code/near/290112032\">said</a>:</p>\n<blockquote>\n<p>Is there guidance on the cost of an <code>isb</code>?</p>\n</blockquote>\n<p>It's a bit of a special instruction, but it is essentially equivalent to a pipeline flush, so it is comparable to a branch mispredict (e.g. on Arm Neoverse V1 an 11 cycle pause until execution resumes normally). It definitely doesn't have any place in the middle of a hot loop (e.g. a matrix multiplication), but personally I wouldn't be too worried about it as part of a JIT code workflow (in the absence of profiling data, of course), hence its usage in Wasmtime.</p>",
+        "id": 290115274,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658244272
+    },
+    {
+        "content": "<p>Okay, thank you. This was very helpful!</p>",
+        "id": 290116703,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1658244763
+    },
+    {
+        "content": "<p>I also got some comments from my colleagues - you might be able to avoid this requirement if you don't recycle code buffers.</p>",
+        "id": 290117041,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658244896
+    },
+    {
+        "content": "<p>The architecture allows you to do a limited amount of code editing without the <code>ISB</code> requirement.</p>",
+        "id": 290117162,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658244944
+    },
+    {
+        "content": "<p>For example, you can change a direct branch to one code buffer into another direct branch to a different code buffer.</p>",
+        "id": 290117320,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658244998
+    },
+    {
+        "content": "<p>The architecture has prefetch speculation protection that guarantees that if the updated branch is visible, then the code buffer is visible as well.</p>",
+        "id": 290117690,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658245159
+    },
+    {
+        "content": "<p>However, there are caveats and I think I am simplifying the explanation.</p>",
+        "id": 290117815,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658245193
+    },
+    {
+        "content": "<p>(e.g. the bit about not recycling code buffers is important in this case)</p>",
+        "id": 290120110,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658246122
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"300050\">Anton Kirilov</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Using.20membarrier.20when.20finalizing.20code/near/290117041\">said</a>:</p>\n<blockquote>\n<p>I also got some comments from my colleagues - you might be able to avoid this requirement if you don't recycle code buffers.</p>\n</blockquote>\n<p>What does 'recycle code buffers' mean? We may re-use virtual addresses of previous code, but will always decommit and recommit the pages using mmap when creating a new buffer in the virtual address space a previous buffer may have existed in.</p>",
+        "id": 290120146,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1658246143
+    },
+    {
+        "content": "<p>Not a kernel expert, but that may not be enough because the kernel is not required to do much more than updating the page tables and flushing TLBs.</p>",
+        "id": 290120400,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1658246236
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"300050\">Anton Kirilov</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Using.20membarrier.20when.20finalizing.20code/near/290117690\">said</a>:</p>\n<blockquote>\n<p>The architecture has prefetch speculation protection that guarantees that if the updated branch is visible, then the code buffer is visible as well.</p>\n</blockquote>\n<p>Interesting. The case we'd have isn't a direct branch being re-written, but an indirect branch to call into the JIT'ed wasm. The operand to the indirect branch is a code pointer stored in our function objects.</p>\n<p>I think this argument is the justification V8 uses for how they <a href=\"https://source.chromium.org/chromium/chromium/src/+/main:v8/src/wasm/jump-table-assembler.h;l=55;drc=976acf743990444ca28d34b359af36fa3366d4dd\">patch their jump tables when tiering</a> though.</p>",
+        "id": 290121819,
+        "sender_full_name": "Ryan Hunt",
+        "timestamp": 1658246729
+    }
+]

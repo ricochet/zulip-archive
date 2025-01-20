@@ -1,0 +1,92 @@
+<html>
+<head><meta charset="utf-8"><title>✔ high performance workers · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html">✔ high performance workers</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="438358700"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438358700" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> René Rössler <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438358700">(May 13 2024 at 13:11)</a>:</h4>
+<p>Hi,</p>
+<p>I'm building a service which pipelines many gigabytes of data from a couchdb cluster into a elasticsearch cluster. As the data needs to get transformed and the code for the transformation comes directly from my clients, I want to use wasm components here. The transform code can load more data from the cluster via a host function. As loading from the cluster should be batched I collect all requests for some time and do one big request to the cluster.</p>
+<p>At the moment I simulate both clusters as if they have unlimited resources.</p>
+<p>I made a poc which performs ok (about 100mbit throughput on my laptop) with 1000 instances of the same component all running on the same engine with async support enabled. I have a central queue (deadqueue::limited) and each instance runs on its own tokio task.<br>
+It runs a little bit better if I have more engines and have the 1000 instances split over the engines. But the sweet spot seems to be around 2 engines. (My CPU has 20 Threads).</p>
+<p>I searched all over the documentation but can't find any best efforts on how to design such a system. Especially I don't know if having multiple engines is supported at all? If I understood correctly, all instance on one engine run each on an own stack but on the same cpu. So having multiple engines should help here.</p>
+<p>On one engine it does not really help to have the component function itself async  as component instances are not <code>Clone</code> so I had to clone the linker, component and engine to get a new instance for each runner (which runs in its own tokio task). So async here only helps me with the host function itself, or am I missing something here?</p>
+
+
+
+<a name="438359535"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438359535" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438359535">(May 13 2024 at 13:14)</a>:</h4>
+<p>By "engines" are you referring to <code>wasmtime::Engine</code>? There shouldn't be any reason to use multiple engines (assuming they would all have the same <code>wasmtime::Config</code>).</p>
+
+
+
+<a name="438361802"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438361802" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ramon Klass <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438361802">(May 13 2024 at 13:24)</a>:</h4>
+<p>I think you are looking for the instantiate_pre family of functions. It does everything that can be shared between instances and then returns to you a preinitialized module that can be instantiated as often as you want with minimum overhead, each of these instances is separate and can run on a different CPU core</p>
+
+
+
+<a name="438362818"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438362818" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> René Rössler <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438362818">(May 13 2024 at 13:28)</a>:</h4>
+<p>Yes, multiple <code>wasmtime::engine::Engine</code>. I changed some code and it seems I was wrong with the assumption that having multiple engines perform better. Thanks for the tip with <code>instantiate_pre</code>!</p>
+<p>I still wonder how to call multiple functions on the same instance which should run on one core with multiple stacks as I can not clone an instance and I need a mutable pointer to a store to call a function on an instance.</p>
+
+
+
+<a name="438363718"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438363718" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438363718">(May 13 2024 at 13:32)</a>:</h4>
+<p>You cannot run parallel function calls on a single instance or sharing a single <code>Store</code> today. An <code>InstancePre</code> (returned by <code>instantiate_pre</code>) can be cloned and run with its own <code>Store</code></p>
+
+
+
+<a name="438363826"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438363826" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ramon Klass <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438363826">(May 13 2024 at 13:32)</a>:</h4>
+<p>yes the only reason for multiple Engines is if you have diverging configs, reuse as much as possible if you want performance :)</p>
+
+
+
+<a name="438363967"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438363967" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ramon Klass <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438363967">(May 13 2024 at 13:33)</a>:</h4>
+<p>each thread can have its own separate version of your function, but they can't share data, so you have to design your code in a map reduce way</p>
+
+
+
+<a name="438364568"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438364568" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> René Rössler <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438364568">(May 13 2024 at 13:36)</a>:</h4>
+<p>Alright, that's good to know. I read a lot about stack switching in the wasmtime documentation and was really confused how I'm able to use it</p>
+
+
+
+<a name="438365816"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438365816" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438365816">(May 13 2024 at 13:41)</a>:</h4>
+<p>Wasmtime's own stack switching (fibers) is an internal detail of its <a href="https://docs.rs/wasmtime/20.0.2/wasmtime/struct.Config.html#method.async_support">async support</a>. There is - separately - a proposal for stack switching in guest wasm code, which is not yet implemented afaik</p>
+
+
+
+<a name="438365883"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438365883" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> René Rössler <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438365883">(May 13 2024 at 13:41)</a>:</h4>
+<p>As I'm already discussing performance with you. As I don't want my tokio executor to lock up too much I would need too use <code>engine.increment_epoch</code> every maybe 100ns? There's only one example which uses 1 second which seems a bit much for the tokio executor in my experience.</p>
+
+
+
+<a name="438366720"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438366720" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438366720">(May 13 2024 at 13:45)</a>:</h4>
+<p>Depends on the workload. Spin, which expects relatively IO-heavy workloads, currently uses 10ms. I haven't really tried to tune this experimentally</p>
+
+
+
+<a name="438534739"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/%E2%9C%94%20high%20performance%20workers/near/438534739" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Notification Bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/.E2.9C.94.20high.20performance.20workers.html#438534739">(May 14 2024 at 09:18)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="719555">René Rössler</span> has marked this topic as resolved.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

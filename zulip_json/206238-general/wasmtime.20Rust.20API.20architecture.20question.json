@@ -1,0 +1,50 @@
+[
+    {
+        "content": "<p>I want to have something kinda like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">Context</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">programs</span>: <span class=\"nb\">Vec</span><span class=\"o\">&lt;</span><span class=\"p\">(</span><span class=\"nb\">Option</span><span class=\"o\">&lt;</span><span class=\"n\">wasmtime</span>::<span class=\"n\">Store</span><span class=\"o\">&lt;</span><span class=\"n\">Context</span><span class=\"o\">&gt;&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">wasmtime</span>::<span class=\"n\">Instance</span><span class=\"p\">)</span><span class=\"o\">&gt;&gt;</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>I'd like to provide a host function that allows calling into <em>any</em> program to get a return value, or read from its memory. What I do right now is <code>take</code> a program's <code>Store</code> from the <code>Option</code> before executing it, but that means that reentrancy into any program in the call-stack is impossible.</p>\n<p>What I'm struggling with architecturally is the fact that the <code>Store</code> is mutably borrowed during calls. <code>wasmtime::Caller&lt;'_, Context&gt;</code>is passed into the provided host functions, so I do have access that way, but if calls between programs get deeply nested I can't think of a good way to pass around the temporary reference.</p>\n<p>Am I thinking about this the wrong way, or is there something I'm overlooking?</p>",
+        "id": 384342781,
+        "sender_full_name": "Ian Kettlewell",
+        "timestamp": 1691870341
+    },
+    {
+        "content": "<p>I can understand how to make it work if host functions could take temporary ownership of the <code>Store</code>, but that's now how the API works.</p>",
+        "id": 384344698,
+        "sender_full_name": "Ian Kettlewell",
+        "timestamp": 1691871356
+    },
+    {
+        "content": "<p>For each (?) runtime there is a more complex function api which gives exclusive access to the store from within called functions, at least I have used this from wasmtime, wamr and wasmer.<br>\nIf you need a more complex setup I fear that you are looking for the stack switching proposal.</p>",
+        "id": 384410270,
+        "sender_full_name": "Christof Petig",
+        "timestamp": 1691909596
+    },
+    {
+        "content": "<p>the Store is always passed to the wasmtime as &amp;mut to guarantee unique access.</p>",
+        "id": 384824013,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1692027873
+    },
+    {
+        "content": "<p>if you need some sort of non-unique access to data inside the <code>T</code> of <code>Store&lt;T&gt;</code> you'll need to use some other primitive that provides that, e.g. Arc&lt;Mutex&lt;...&gt;&gt;</p>",
+        "id": 384824419,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1692027949
+    },
+    {
+        "content": "<p>The problem I'm facing is that I can't put that &amp;mut Store into another data structure without it also having that lifetime. I could probably use unsafe to ignore the lifetime, but that's not ideal.</p>\n<p>Conceptually if the thing passed in were a <code>&amp;mut Option&lt;Store&gt;</code> I could <code>take</code> out of the <code>Option&lt;Store&gt;</code>, put into my data structure and make sure to put it back before returning.</p>",
+        "id": 384911996,
+        "sender_full_name": "Ian Kettlewell",
+        "timestamp": 1692047835
+    },
+    {
+        "content": "<p>What I'm trying to accomplish is an architecture where a bunch of Wasm programs can call into and read memory from each-other. Right now I can I make that work in a simple scenario like program A calling B. But if A calls B and then something in the call-stack tries to read from A it's tough to make that work without resorting to unsafe.</p>",
+        "id": 384912579,
+        "sender_full_name": "Ian Kettlewell",
+        "timestamp": 1692048066
+    },
+    {
+        "content": "<p>I think that the API you're trying to achieve is probably nontrivial and difficult to achieve with Wasmtime. One possible idea is to have a <code>ContextTmp&lt;'a&gt;</code> which stores <code>StoreContextMut&lt;'a, Context&gt;</code> instead of <code>Store&lt;Context&gt;</code>. When a callback is invoked you're effectively given <code>StoreContextMut&lt;'a,T&gt;</code> back for the store that was invoked (for recursive calls), so you'd take that and construct a <code>ContextTmp</code> from the outer context information (perhaps threaded through TLS? unsure.  That's still pretty gnarly though and probably not that feasible.</p>\n<p>I'll note though that I would highly recommend not using <code>unsafe</code> to achieve your goal here. Lots and lots of Wasmtime relies on the actual guarantees of uniqueness for safety and we heavily rely on all of Rust's guarantees. Using <code>unsafe</code> can very easily break many of those assumptions and lead to actual unsafety even if you didn't intend.</p>",
+        "id": 385930456,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1692369241
+    }
+]

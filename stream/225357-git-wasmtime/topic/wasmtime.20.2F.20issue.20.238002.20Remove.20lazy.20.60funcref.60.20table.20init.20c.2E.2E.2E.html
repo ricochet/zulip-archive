@@ -1,0 +1,318 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #8002 Remove lazy `funcref` table init c... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html">wasmtime / issue #8002 Remove lazy `funcref` table init c...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="423682800"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/423682800" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#423682800">(Feb 27 2024 at 19:39)</a>:</h4>
+<p>fitzgen opened <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>Right now, whenever we do an indirect call, we have an extra branch in the codegen to check whether the table has been initialized or not yet.</p>
+<p>We have these checks because, among other reasons, we can't create CoW images for <code>funcref</code> tables since the <code>funcref</code> elements are closures over the vmctx, and therefore are different for every instance.</p>
+<p>However, we could</p>
+<ol>
+<li>create a CoW table image</li>
+<li>and remove the is-it-initialized check</li>
+<li>while still supporting lazy <code>funcref</code> tables</li>
+</ol>
+<p>by initializing tables to contain generic trampolines that do the lazy initialization when invoked:</p>
+<ul>
+<li>define trampoline(s) to initialize a vmctx's <code>i</code>th <code>funcref</code> table<ul>
+<li>where <code>i</code> is static and we only have <code>i=0</code> for the common case, other tables do what we do today</li>
+<li>and then this trampoline is either handwritten asm that works for all wasm signatures, or</li>
+<li>we have one of these per wasm signature in the module</li>
+<li>the trampolines use the caller vmctx to find the table being accessed and initialize it when they are invoked, and then they tail call to the actual initialized <code>funcref</code> element</li>
+</ul>
+</li>
+<li>create <code>VMFuncRef</code>s of these trampolines where the vmctx is null<ul>
+<li>the trampolines don't use their callee_vmctx</li>
+<li>and this, crucially, means that they can be shared across all instances of the module</li>
+</ul>
+</li>
+<li>the CoW init image for a lazy <code>funcref</code> table is then an array of these trampolines</li>
+<li>and since lazy <code>funcref</code> tables are always filled with callable <code>VMFuncRef</code>s now, we don't need to branch on whether the table is initialized or not in an indirect call</li>
+</ul>
+<p>I think we would still need checks for general table access like <code>table.{get,set,fill,copy}</code>.</p>
+<p>(Also note that this doesn't require actual CoW and virtual memory, we could do all this with memcpy depending on configuration and perf trade offs)</p>
+</blockquote>
+
+
+
+<a name="426595921"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/426595921" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#426595921">(Mar 14 2024 at 17:46)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-1998007854">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>I'd considered something like this (I was thinking of it like Haskell's implementation of lazy thunks) but I thought we couldn't afford to write anything but zeroes into the table at instantiation time.</p>
+<p>One way to deal with that is if the pointers we store in the table are xor'd with the lazy-init pointer. So every time we load a funcref from the table, xor it with the lazy-init pointer before dereferencing it. As long as computing the lazy-init pointer is cheap, I'd expect that should be better than the current conditional branch and function call.</p>
+<p>If we place the lazy-init <code>VMFuncRef</code> inline in the VM context, then computing the lazy-init pointer doesn't require any memory accesses, just adding a constant to <code>vmctx</code>. So I think that should be cheap enough.</p>
+<blockquote>
+<p>where <code>i</code> is static and we only have <code>i=0</code> for the common case, other tables do what we do today</p>
+</blockquote>
+<p>I think I'd prefer to only do this if we can do it for all funcref tables, to avoid implementation complexity from maintaining two versions of table codegen. Given that there are typically a small number of tables, I think emitting a trampoline per table isn't a big deal.</p>
+<hr>
+<p>That said: How should the lazy-init trampoline find out which table element to initialize and tail-call into?</p>
+<p>If we had to generate a trampoline per table element with the table index hard-coded into it, then building an array of <code>VMFuncRef</code>s to point to all those trampolines would be just as expensive as eagerly initializing the table in the first place.</p>
+<p>And I don't think including that array in the CoW image would help, because we'd have to apply relocations to every entry, right?</p>
+</blockquote>
+
+
+
+<a name="427811861"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427811861" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427811861">(Mar 19 2024 at 21:08)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008139279">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>Just had a good talk with @jameysharp and I think we can resolve this (and <a href="https://github.com/bytecodealliance/wasmtime/issues/8160">https://github.com/bytecodealliance/wasmtime/issues/8160</a>, which is a less general and more specific case of this issue) without trampolines and without relying on overly-specific preconditions (only funcref tables that are completely initialized to null) via essentially what we used to do with userfaultfd for linear memory heap images:</p>
+<ul>
+<li>Stop doing the setting-of-the-bottom-bit-to-represent-initialized-funcrefs<ul>
+<li>funcrefs are either null or not null, that's it</li>
+<li>can remove related explicit is-this-element-initialized checks and associated lazy init code paths from <code>call_indirect</code> / <code>table.get</code> / etc... </li>
+</ul>
+</li>
+<li>Instead, we do lazy initialization at the page granularity<ul>
+<li>we map uninitialized table pages without any read/write permissions</li>
+<li>when we fault on trying to read the <code>i</code>th funcref from the table, we initialize that whole page of the table<ul>
+<li>we should always be able to recover the faulting address via the signal's machine context</li>
+<li>we should always be able to recover the store/vmctx that contains the table we need to initialize via the <code>CallThreadState</code> in TLS</li>
+</ul>
+</li>
+<li>after the signal handler initializes that page, it restarts the faulting instruction, which will not fault now that the table page is initialized</li>
+<li>additionally, we maintain a bitset of which table pages are initialized vs not in the <code>wasmtime_runtime::Table</code><ul>
+<li>this is used by VM code when accessing tables, which we don't want to raise signals within</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p>What's nice about this approach is that it gives us lazy-initialized funcref tables, it makes the JIT code for <code>call_indirect</code> tighter, it simplifies our data representation for funcref table elements, and it is applicable to <em>all</em> funcref tables (not just funcref tables that are initialized to all null elements).</p>
+<p>The open question is how this would interact with horizontal scaling, since it is relying on the OS's virtual memory subsystem. But I don't think it introduces any new IPIs, since my understanding is that they primarily happen with <code>madvise</code> and <em>removing</em> mappings, not when changing permissions of mappings or creating new mappings, and we already <code>madvise</code> away page tables in the pooling allocator on table deallocation.</p>
+<p>Ideally we could use this approach to get to a world where we have a single option to either:</p>
+<ul>
+<li>lazy init with virtual-memory tricks (as described above), or</li>
+<li>eager init (no virtual-memory tricks involved here).</li>
+</ul>
+<p>I think it would be unfortunate if we ended up with three options we had to maintain:</p>
+<ul>
+<li>lazy init with virtual-memory tricks (as described above),</li>
+<li>lazy init with explicit checks for the bottom bit being set (what we have today), or</li>
+<li>eager init (no virtual-memory tricks, no bottom bits).<br>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="427812792"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427812792" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427812792">(Mar 19 2024 at 21:14)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008148039">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<blockquote>
+<p>The open question is how this would interact with horizontal scaling, since it is relying on the OS's virtual memory subsystem. But I don't think it introduces any new IPIs, since my understanding is that they primarily happen with madvise and removing mappings, not when changing permissions of mappings or creating new mappings, and we already madvise away page tables in the pooling allocator on table deallocation.</p>
+</blockquote>
+<p>Unfortunately I think this is likely to hit some of the same bottlenecks we observed before. There are two main sources of contention:</p>
+<ul>
+<li>Removing or changing page mappings (in this case: no), and</li>
+<li>Updating the mmap address space tree when a new mapping is added or permissions or backing store is changed (in this case: yes)</li>
+</ul>
+<p>So to flip the page from inaccessible to accessible, one needs to <code>mprotect</code> the page, and that will split one VMA (virtual memory area) into two if needed as each VMA has one set of permissions across its page. That takes a process-wide lock, which contends with any other mmap activity as well as pagefaults.</p>
+</blockquote>
+
+
+
+<a name="427813029"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427813029" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427813029">(Mar 19 2024 at 21:16)</a>:</h4>
+<p>cfallin edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008148039">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<blockquote>
+<p>The open question is how this would interact with horizontal scaling, since it is relying on the OS's virtual memory subsystem. But I don't think it introduces any new IPIs, since my understanding is that they primarily happen with madvise and removing mappings, not when changing permissions of mappings or creating new mappings, and we already madvise away page tables in the pooling allocator on table deallocation.</p>
+</blockquote>
+<p>Unfortunately I think this is likely to hit some of the same bottlenecks we observed before. There are two main sources of contention:</p>
+<ul>
+<li>Removing or changing page mappings (in this case: no), and</li>
+<li>Updating the mmap address space tree when a new mapping is added or permissions or backing store is changed (in this case: yes)</li>
+</ul>
+<p>So to flip the page from inaccessible to accessible, one needs to <code>mprotect</code> the page, and that will split one VMA (virtual memory area) into two if needed as each VMA has one set of permissions across its pages. That takes a process-wide lock, which contends with any other mmap activity as well as pagefaults.</p>
+</blockquote>
+
+
+
+<a name="427815312"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427815312" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427815312">(Mar 19 2024 at 21:33)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008173336">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>IPI-wise I think Nick/Jamey's idea might actually improve over the status quo with the pooling allocator?</p>
+<p>Today we have:</p>
+<ul>
+<li>Instantiation - no IPIs, it's all already unmapped but read/write/zero if used</li>
+<li>Read an element of the table - fault in a page, but no IPI since it wasn't present anywhere else</li>
+<li>Write the initialized element into the table - fault in a writable page, IPI as it was previously readonly</li>
+<li>Cleanup - IPI as <code>madvise</code> makes things go away</li>
+</ul>
+<p>In contrast to:</p>
+<ul>
+<li>Instantiation - no IPIs, everything is unmapped</li>
+<li>Read an element of the table - take a fault, map in a page as read/write, no IPI as there was no mapping prior</li>
+<li>Write the initialized element - N/A in this scheme</li>
+<li>Cleanup - <code>madvise</code> makes things go away, then <code>mprotect</code> to not-read and not-write, no IPI as nothing has it mapped</li>
+</ul>
+<p>So more-or-less, isn't the copy-on-write behavior causing extra IPIs/remapping-as-writable than if we initialize a page-at-a-time?</p>
+<hr>
+<p>As for the idea specifically, I'm at least personally not a fan of recovering from faults. I know it's possible but my gut says that it's going to be quite complicated. For example today the only way to determine the table in question would be to search the entire <code>Store</code> for all tables and see which one encompasses the faulting address and then perform initialization logic. We don't actually have the <code>Store</code> in thread-local storage right now either. There's also complications where on macOS we catch faults on a handler thread and would need to access the other thread's state to figure out the store and such. Now I don't mean to say that this won't be surmountable, but mostly that I think it'll be complicated.</p>
+<p>I thought I had an idea which was to prepare an image for the table at the time we create an <code>InstancePre</code> since host functions are all resolved at that point, but that idea won't pan out because instance-local functions don't have their <code>VMContext</code> yet, so scratch that idea.</p>
+</blockquote>
+
+
+
+<a name="427815434"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427815434" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427815434">(Mar 19 2024 at 21:34)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008174457">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>Oh, also, for VMA locking, I think recent 6.7 kernels have per-VMA locks which should alleviate that bottleneck of contention? (I've yet to prove this out via testing though)</p>
+</blockquote>
+
+
+
+<a name="427815443"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427815443" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427815443">(Mar 19 2024 at 21:34)</a>:</h4>
+<p>alexcrichton edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008174457">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>Oh, also, for VMA locking, I think recent 6.7+ kernels have per-VMA locks which should alleviate that bottleneck of contention? (I've yet to prove this out via testing though)</p>
+</blockquote>
+
+
+
+<a name="427816146"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427816146" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427816146">(Mar 19 2024 at 21:39)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008180601">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>Ah, yeah, you're right, as long as the first touch after mprotect'ing is a write, this would avoid that IPI.</p>
+<p>One other thing to consider: granularity of initialization might matter too, especially for workloads with a lot of function-pointer table entries statically but not so much dynamic footprint (e.g.: interpreters with a lot of functionality linked in). The status quo today performs lazy init on a single-entry granularity, whereas this would imply widening the breadth of each update to at least one page. If almost all possible function pointer values will actually be used, that's a win (batching), otherwise it's likely additional cost.</p>
+</blockquote>
+
+
+
+<a name="427825076"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427825076" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427825076">(Mar 19 2024 at 23:00)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008307068">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>I took <code>spidermonkey.wasm</code> from sightglass as-is and it has a table of 3312 elements. Locally a memcpy of that many <code>usize</code>s is 0.3-0.5us, so not necessarily a break-the-bank measurement in a single-digit-microsecond instantiation. This got me thinking to the original thinking of this issue:</p>
+<blockquote>
+<p>How should the lazy-init trampoline find out which table element to initialize and tail-call into?</p>
+</blockquote>
+<p>We could, instead of a trampoline per-table, have a trampoline per-element. This element would (a) call a libcall to get the real pointer, (b) store it to the table, and (c) call it forwarding all arguments. That's a lot of trampolines, but hey we already have a lot of trampolines.</p>
+<blockquote>
+<p>because we'd have to apply relocations to every entry, right?</p>
+</blockquote>
+<p>I think we could avoid this. Creation of a <code>Module</code> could prepare a block memcpy-able or CoW-able table image. No relocations needed in any entry (as the libcall would go through the caller's <code>VMContext</code> which is guaranteed to be a core wasm <code>VMContext</code>). </p>
+<hr>
+<p>So with a per-element trampoline instead of a per-table trampoline I think we can recover the original idea? And it'd be no worse than today if we do a VM-based CoW region.</p>
+</blockquote>
+
+
+
+<a name="427840312"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427840312" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427840312">(Mar 20 2024 at 02:04)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008562147">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>A question before I get into more ideas: given a WebAssembly module which declares a funcref table, what do we know statically about the initial entries in the table?</p>
+<p>I think we know if an entry is null, and if it isn't, we know at least the type of the function it's initialized to. We may know exactly which function it's initialized to, if the function is declared within the module; otherwise we know which import to get the function from at runtime. Is that right?</p>
+<p>I think we need to know the type of the target function in order to construct a correct VMFuncRef, but if we do know that for every initializer element then that's fine.</p>
+<p>By the way, if we want to ignore the callee vmctx field of VMFuncRef for lazy-init trampolines, then we need to ensure that the table is not exported, right? Otherwise the host or another module might try to call through elements of the table using a different caller vmctx pointer. Maybe for any table which is exported, we should eagerly initialize it during instantiation?</p>
+<p>And if we don't need the callee vmctx, we could encode other data in that field, such as which table and element to initialize, and maybe get back to having a single trampoline shared by everything…</p>
+<hr>
+<p>This all sounds great for <code>call_indirect</code>. And for <code>table.get</code> followed by <code>call_ref</code>, this arrangement will cause <code>call_ref</code> to have the side effect of initializing whichever table entry <code>table.get</code> looked up, if necessary.</p>
+<p>But how should we handle <code>table.get</code> followed by some non-call use of the funcref, or other ways of reading?</p>
+<p>I guess we can set a bit somewhere inside the VMFuncRef (perhaps in the callee vmctx, assuming every real vmctx is aligned) to indicate that it's for lazy initialization, and have various instructions check that. It seems a shame to have to add explicit checks back like that though.</p>
+<hr>
+<p>Among the variety of different ideas Nick and I discussed before deciding we liked the "recover from segfault" plan, here's another one I rather liked.</p>
+<p>We need to construct a VMFuncRef for each lazy-initialized element, and those can't currently be mapped directly from disk because we don't know the address the trampoline was loaded at until we know where the module's code got mapped. (We also don't know the callee vmctx but we're claiming we don't need that.)</p>
+<p>I think your suggestion, Alex, is that we build all the VMFuncRefs and a table pointing to them at runtime once when loading the module. Then each time we instantiate that module, we can CoW-map the table to different addresses, and have them all refer to the common set of pre-built VMFuncRefs.</p>
+<p>As a variant of that idea, we could place all of the trampoline VMFuncRefs in the rodata/text section on disk if the pointers are all stored relative to the address of the VMFuncRef itself. So to call indirect through a VMFuncRef, we'd do something like this:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">;</span><span class="w"> </span><span class="n">get</span><span class="w"> </span><span class="n">VMFuncRef</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="n">into</span><span class="w"> </span><span class="n">v2</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">element</span><span class="w"> </span><span class="n">at</span><span class="w"> </span><span class="n">v1</span>
+<span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">table_oob</span><span class="w"> </span><span class="n">aligned</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">v1</span>
+<span class="p">;</span><span class="w"> </span><span class="n">get</span><span class="w"> </span><span class="n">relative</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">VMFuncRef</span>
+<span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">null_reference</span><span class="w"> </span><span class="n">aligned</span><span class="w"> </span><span class="n">readonly</span><span class="w"> </span><span class="n">v2</span><span class="o">+</span><span class="mi">16</span>
+<span class="p">;</span><span class="w"> </span><span class="n">get</span><span class="w"> </span><span class="n">callee</span><span class="w"> </span><span class="n">vmctx</span><span class="w"> </span><span class="p">(</span><span class="n">unused</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">lazy</span><span class="o">-</span><span class="n">init</span><span class="w"> </span><span class="n">trampolines</span><span class="p">)</span>
+<span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="p">.</span><span class="kt">i64</span><span class="w"> </span><span class="n">notrap</span><span class="w"> </span><span class="n">aligned</span><span class="w"> </span><span class="n">readonly</span><span class="w"> </span><span class="n">v2</span><span class="o">+</span><span class="mi">32</span>
+<span class="p">;</span><span class="w"> </span><span class="n">turn</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="n">into</span><span class="w"> </span><span class="n">absolute</span><span class="w"> </span><span class="n">address</span><span class="w"> </span><span class="n">based</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">VMFuncRef</span><span class="w"> </span><span class="n">address</span>
+<span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">iadd</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span>
+<span class="n">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">call_indirect</span><span class="w"> </span><span class="n">sig1</span><span class="p">,</span><span class="w"> </span><span class="n">v5</span><span class="p">(</span><span class="n">v4</span><span class="p">,</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span>
+</code></pre></div>
+<p>I don't think the extra 64-bit add should hurt performance at all compared to everything else that's happening here, and it means we don't have to construct the VMFuncRefs at load time.</p>
+<p>This doesn't prevent constructing a VMFuncRef dynamically, such as for a hostcall. In that case we'd allocate space for the structure, then subtract the address we allocated from the function pointers we're storing into it.</p>
+</blockquote>
+
+
+
+<a name="427841117"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427841117" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427841117">(Mar 20 2024 at 02:13)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008567343">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>A meta-observation: above it was suggested that if we solve this issue properly, it subsumes #8160 (definitely true) and for maintainability we should just solve this and not #8160; initially it seemed basically within reach, with debatable tradeoffs; we're now talking about "adding explicit checks back" and a whole bunch of design axes are reopening again. I might gently suggest that we put "solve the immediate/specific use case" (#8160) back on the table, since we know exactly how to do it and it has a much more limited footprint?</p>
+<p>(I'll have to think more about the above ideas and they may very well be worth it; I just wanted to note and mention the "subsume then balloon" pattern that can sometimes hide options)</p>
+</blockquote>
+
+
+
+<a name="427853602"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427853602" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427853602">(Mar 20 2024 at 04:46)</a>:</h4>
+<p>jameysharp <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2008654969">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>Yeah, that is certainly a fair meta-observation, Chris. I still want to put some more thought into finding a general solution, but I'm also thinking through the specialized case.</p>
+</blockquote>
+
+
+
+<a name="427937164"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/427937164" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#427937164">(Mar 20 2024 at 14:13)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2009673514">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<blockquote>
+<p>what do we know statically about the initial entries in the table?</p>
+</blockquote>
+<p>I think you're mostly right but I'm realizing now we don't always know the type of the function. For example a table can have one of its elements initialized with a <code>global.get</code> and we wouldn't know the type of that until runtime if it's an imported global.</p>
+<p>That being said that isn't the end of the world. We already represent <a href="https://github.com/bytecodealliance/wasmtime/blob/03dc78b192f1d645bff55041b801e632dd5a9344/crates/environ/src/module.rs#L748-L771">a few different ways to initialize a table</a> with the important part there being <code>precomputed</code>. During <a href="https://github.com/bytecodealliance/wasmtime/blob/03dc78b192f1d645bff55041b801e632dd5a9344/crates/runtime/src/instance/allocator.rs#L525-L576">table initialization</a> we apply all segments and the only thing we ignore is <code>precomputed</code>. It's during <a href="https://github.com/bytecodealliance/wasmtime/blob/03dc78b192f1d645bff55041b801e632dd5a9344/crates/environ/src/module.rs#L397"><code>try_func_table_init</code></a> that we convert from segments to <code>precomputed</code>, and there's lots of bailouts in that function for things we can't represent.</p>
+<p>Effectively I think it's ok to say that we don't handle all tables exactly the same way. It's ok if some tables are slower to initialize than others, we mostly just need to cover the various patterns we see in the wild. For example with spidermonkey.wasm we don't deal with <code>global.get</code>, it's all local/imported functions, and the table is exported. Other table shapes are interesting to optimize but I think it's ok if we leave them out.</p>
+<blockquote>
+<p>then we need to ensure that the table is not exported, right?</p>
+</blockquote>
+<p>That's a good point yeah, I had thought that the host would be able to special-case this but you've got a good point about cross-module tables, and you're right that in such a situation we'd be using the wrong <code>VMContext</code>. That may nix this entire idea because I think LLVM might export the function table by default.</p>
+<blockquote>
+<p>And if we don't need the callee vmctx, we could encode other data in that field, such as which table and element to initialize, and maybe get back to having a single trampoline shared by everything…</p>
+</blockquote>
+<p>True!</p>
+<blockquote>
+<p>But how should we handle table.get followed by some non-call use of the funcref, or other ways of reading?</p>
+</blockquote>
+<p>No you're right, and this may be another point which nix's the whole lazy init through functions idea too. If you call <code>table.get</code> you could then pass that <code>funcref</code> anywhere, even to another module, and we wouldn't have a way of recovering the original <code>VMContext</code> once it's called.</p>
+<blockquote>
+<p>We also don't know the callee vmctx but we're claiming we don't need that</p>
+</blockquote>
+<p>I like where your idea is going, but given your above comments I'm fearful we can no longer assume this. We might not be able to escape the "we need to know the callee vmctx" property...</p>
+<hr>
+<blockquote>
+<p>I might gently suggest that we put "solve the immediate/specific use case" (<a href="https://github.com/bytecodealliance/wasmtime/issues/8160">https://github.com/bytecodealliance/wasmtime/issues/8160</a>) back on the table, since we know exactly how to do it and it has a much more limited footprint?</p>
+</blockquote>
+<p>IMO the point Nick made about maintainability above is a pretty big one. Having two different representations of a null function pointer is ripe for misinterpretation and mistakes and (possibly) CVEs. I would not personally want to take such a step without considering other options and ruling them out first.</p>
+</blockquote>
+
+
+
+<a name="428016378"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%238002%20Remove%20lazy%20%60funcref%60%20table%20init%20c.../near/428016378" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.238002.20Remove.20lazy.20.60funcref.60.20table.20init.20c.2E.2E.2E.html#428016378">(Mar 20 2024 at 21:11)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/8002#issuecomment-2010647643">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/8002">issue #8002</a>:</p>
+<blockquote>
+<p>We talked more about funcref tables this morning in the Cranelift meeting and I wanted to summarize here as well. We ended up <a href="https://github.com/bytecodealliance/wasmtime/issues/8160#issuecomment-2010644011">concluding all-null init doesn't require two kinds of null pointers</a> which (IMO) makes that a desirable route for the near-future.</p>
+<p>For this specifically there's still a fair bit of open questions about the details of how this precisely works, not the least of which is all the machinery required to translate a fault into initialization of a table and returning back to wasm (portably). We're also not certain whether this will be a performance benefit given the high cost of the fault in that case, so it's something we'd need to evaluate.</p>
+<p>Jamey also wrote up related ideas in <a href="https://github.com/bytecodealliance/wasmtime/issues/8195">https://github.com/bytecodealliance/wasmtime/issues/8195</a>, which I'll defer over there for discussion of them.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

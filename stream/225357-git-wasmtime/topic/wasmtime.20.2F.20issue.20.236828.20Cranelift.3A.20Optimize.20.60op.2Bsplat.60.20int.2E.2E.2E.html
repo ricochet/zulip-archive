@@ -1,0 +1,367 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #6828 Cranelift: Optimize `op+splat` int... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html">wasmtime / issue #6828 Cranelift: Optimize `op+splat` int...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="383424545"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/383424545" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#383424545">(Aug 09 2023 at 21:56)</a>:</h4>
+<p>afonso360 opened <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p><span aria-label="wave" class="emoji emoji-1f44b" role="img" title="wave">:wave:</span> Hey,</p>
+<h4>Feature</h4>
+<p>This was pointed out by @jameysharp  in <a href="https://github.com/bytecodealliance/wasmtime/pull/6815#pullrequestreview-1570118805">https://github.com/bytecodealliance/wasmtime/pull/6815#pullrequestreview-1570118805</a>!</p>
+<p>We should try to transform <code>(op (splat x) (splat y) ...)</code> into <code>(splat (op x y ...))</code> for operations that support this.</p>
+<h4>Benefit</h4>
+<p>This transforms SIMD operations into their scalar counterpart which should be beneficial. We also have better constant propagation on scalars, so this is also an opportunity to do that further.</p>
+<p>RISC-V specifically really benefits from this optimization since we have opcodes that can eat the splat on the transformed version.</p>
+<h4>Implementation</h4>
+<p>The e-graphs mid end is <em>awesome</em> for stuff like this! Here's one rule:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">simplify</span><span class="w"> </span><span class="p">(</span><span class="n">imul</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+<span class="w">      </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">imul</span><span class="w"> </span><span class="p">(</span><span class="n">lane_type</span><span class="w"> </span><span class="n">ty</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+</code></pre></div>
+<p>Pasting this into <code>cranelift/codegen/src/opts/vector.isle</code> makes this tranform work on <code>imul</code>!</p>
+<p>You can try running this test to verify that it works:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">test</span><span class="w"> </span><span class="n">optimize</span>
+<span class="n">set</span><span class="w"> </span><span class="n">opt_level</span><span class="o">=</span><span class="n">speed</span>
+<span class="n">target</span><span class="w"> </span><span class="n">x86_64</span>
+
+<span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">imul_splat_into_splat_imul</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="p">{</span>
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i64</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">imul</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">imul</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v6</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>(Run this with <code>cargo run -- test ./the-above.clif</code> from the <code>/cranelift</code> directory)</p>
+<p>This is also a good test to add to our testsuite in <code>cranelift/filetests/filetests/egraph/...</code>.</p>
+<p>There are so many opcodes that this optimization works for that I actually can't list them all. Here's a few: <code>iadd</code>,<code>isub</code>,<code>imul</code>,<code>ineg</code>,<code>iabs</code>,<code>umulhi</code>,<code>smulhi</code>,... Just look at our <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/trait.InstBuilder.html">opcode list</a> and a lot of them will work out.</p>
+<p>Where it <em>wont</em> work:</p>
+<ul>
+<li>Trapping operations (i.e. <code>idiv</code> / <code>urem</code> / <code>srem</code>). This doesn't work because we currently don't perform optimizations on these operations (see #5908)</li>
+</ul>
+<p>Where it may not work:</p>
+<ul>
+<li>Floating point operations. I'm not 100% sure about this one, it logically makes sense that it wouldn't change the result, but I'm just afraid of doing transforms on floats.</li>
+</ul>
+<h4>Alternatives</h4>
+<p>There are so many opcodes for which this rule can be implemented that it may be worth considering auto-generating it. However I doubt it would be worth the effort + maintenance complexity of that. Copy pasting a bunch of times is sometimes better!<br>
+</p>
+</blockquote>
+
+
+
+<a name="383424546"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/383424546" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#383424546">(Aug 09 2023 at 21:56)</a>:</h4>
+<p><a href="https://github.com/afonso360">afonso360</a> added the good first issue label to <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">Issue #6828</a>.</p>
+
+
+
+<a name="383424547"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/383424547" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#383424547">(Aug 09 2023 at 21:56)</a>:</h4>
+<p><a href="https://github.com/afonso360">afonso360</a> added the cranelift label to <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">Issue #6828</a>.</p>
+
+
+
+<a name="383424548"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/383424548" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#383424548">(Aug 09 2023 at 21:56)</a>:</h4>
+<p><a href="https://github.com/afonso360">afonso360</a> added the cranelift:E-compiler label to <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">Issue #6828</a>.</p>
+
+
+
+<a name="383424551"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/383424551" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#383424551">(Aug 09 2023 at 21:56)</a>:</h4>
+<p><a href="https://github.com/afonso360">afonso360</a> added the cranelift<span aria-label="goal" class="emoji emoji-1f945" role="img" title="goal">:goal:</span>optimize-speed label to <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">Issue #6828</a>.</p>
+
+
+
+<a name="383424552"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/383424552" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#383424552">(Aug 09 2023 at 21:56)</a>:</h4>
+<p><a href="https://github.com/afonso360">afonso360</a> added the cranelift:E-easy label to <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">Issue #6828</a>.</p>
+
+
+
+<a name="384740425"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/384740425" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#384740425">(Aug 14 2023 at 11:24)</a>:</h4>
+<p>gurry <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1677144122">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p>@afonso360 I'd like to pick this one up. Will be doing some reading on ISLE first.</p>
+</blockquote>
+
+
+
+<a name="385435480"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385435480" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385435480">(Aug 16 2023 at 10:47)</a>:</h4>
+<p>gurry <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1680377713">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p>@afonso360 How do I see the optimized CLIF code for a given func after all the mid-end opts are applied to it? In the case of some operators my test cases are failing. For example for <code>band_not</code> if I use this simplify rule:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">simplify</span><span class="w"> </span><span class="p">(</span><span class="n">band_not</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+<span class="w">      </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">band_not</span><span class="w"> </span><span class="p">(</span><span class="n">lane_type</span><span class="w"> </span><span class="n">ty</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+</code></pre></div>
+<p>the following test is failing:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">band_not_splat_into_splat_band_not</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="p">{</span>
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i64</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v6</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>with the following message:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">FAIL</span><span class="w"> </span><span class="n">filetests</span><span class="err">\</span><span class="n">filetests</span><span class="err">\</span><span class="n">egraph</span><span class="err">\</span><span class="n">simd</span><span class="o">-</span><span class="n">splat</span><span class="o">-</span><span class="n">simplify</span><span class="p">.</span><span class="n">clif</span>: <span class="nc">optimize</span>
+
+<span class="n">Caused</span><span class="w"> </span><span class="n">by</span>:
+    <span class="nc">filecheck</span><span class="w"> </span><span class="n">failed</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">line</span><span class="w"> </span><span class="mi">38</span>:
+    #<span class="mi">0</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span>#<span class="mi">1</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">    </span>#<span class="mi">2</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v6</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">band_not_splat_into_splat_band_not</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="n">fast</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Missed</span><span class="w"> </span>#<span class="mi">0</span>: <span class="err">\</span><span class="n">bv5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="err">\</span><span class="n">b</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i64</span><span class="p">)</span>:
+    <span class="o">&gt;</span><span class="w">     </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bnot</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="k">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="mi">1356</span><span class="w"> </span><span class="n">tests</span>
+<span class="n">Error</span>: <span class="mi">1</span><span class="w"> </span><span class="n">failure</span>
+<span class="n">error</span>: <span class="nc">test</span><span class="w"> </span><span class="n">failed</span><span class="p">,</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">rerun</span><span class="w"> </span><span class="n">pass</span><span class="w"> </span><span class="err">`</span><span class="o">--</span><span class="n">test</span><span class="w"> </span><span class="n">filetests</span><span class="err">`</span>
+</code></pre></div>
+<p>So I just wanted to debug and see how the generated code differs from the the expectation in the test.</p>
+</blockquote>
+
+
+
+<a name="385435550"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385435550" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385435550">(Aug 16 2023 at 10:47)</a>:</h4>
+<p>gurry deleted a <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1680377713">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p>@afonso360 How do I see the optimized CLIF code for a given func after all the mid-end opts are applied to it? In the case of some operators my test cases are failing. For example for <code>band_not</code> if I use this simplify rule:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">simplify</span><span class="w"> </span><span class="p">(</span><span class="n">band_not</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+<span class="w">      </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">band_not</span><span class="w"> </span><span class="p">(</span><span class="n">lane_type</span><span class="w"> </span><span class="n">ty</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+</code></pre></div>
+<p>the following test is failing:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">band_not_splat_into_splat_band_not</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="p">{</span>
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i64</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v6</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>with the following message:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">FAIL</span><span class="w"> </span><span class="n">filetests</span><span class="err">\</span><span class="n">filetests</span><span class="err">\</span><span class="n">egraph</span><span class="err">\</span><span class="n">simd</span><span class="o">-</span><span class="n">splat</span><span class="o">-</span><span class="n">simplify</span><span class="p">.</span><span class="n">clif</span>: <span class="nc">optimize</span>
+
+<span class="n">Caused</span><span class="w"> </span><span class="n">by</span>:
+    <span class="nc">filecheck</span><span class="w"> </span><span class="n">failed</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">line</span><span class="w"> </span><span class="mi">38</span>:
+    #<span class="mi">0</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span>#<span class="mi">1</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">    </span>#<span class="mi">2</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v6</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">band_not_splat_into_splat_band_not</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="n">fast</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Missed</span><span class="w"> </span>#<span class="mi">0</span>: <span class="err">\</span><span class="n">bv5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="err">\</span><span class="n">b</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i64</span><span class="p">)</span>:
+    <span class="o">&gt;</span><span class="w">     </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bnot</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="k">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="mi">1356</span><span class="w"> </span><span class="n">tests</span>
+<span class="n">Error</span>: <span class="mi">1</span><span class="w"> </span><span class="n">failure</span>
+<span class="n">error</span>: <span class="nc">test</span><span class="w"> </span><span class="n">failed</span><span class="p">,</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">rerun</span><span class="w"> </span><span class="n">pass</span><span class="w"> </span><span class="err">`</span><span class="o">--</span><span class="n">test</span><span class="w"> </span><span class="n">filetests</span><span class="err">`</span>
+</code></pre></div>
+<p>So I just wanted to debug and see how the generated code differs from the the expectation in the test.</p>
+</blockquote>
+
+
+
+<a name="385436313"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385436313" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385436313">(Aug 16 2023 at 10:53)</a>:</h4>
+<p>gurry <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1680385520">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p>@afonso360 How do I see the generated code after all the mid-end opts are applied to a func? Some of my tests are failing for some operators. For example for <code>band_not</code>  for this simplify rule:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">simplify</span><span class="w"> </span><span class="p">(</span><span class="n">band_not</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+<span class="w">      </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">band_not</span><span class="w"> </span><span class="p">(</span><span class="n">lane_type</span><span class="w"> </span><span class="n">ty</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+</code></pre></div>
+<p>the following test fails:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">band_not_splat_into_splat_band_not</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="p">{</span>
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i64</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v6</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>with the following error:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">FAIL</span><span class="w"> </span><span class="n">filetests</span><span class="err">\</span><span class="n">filetests</span><span class="err">\</span><span class="n">egraph</span><span class="err">\</span><span class="n">simd</span><span class="o">-</span><span class="n">splat</span><span class="o">-</span><span class="n">simplify</span><span class="p">.</span><span class="n">clif</span>: <span class="nc">optimize</span>
+
+<span class="n">Caused</span><span class="w"> </span><span class="n">by</span>:
+    <span class="nc">filecheck</span><span class="w"> </span><span class="n">failed</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">line</span><span class="w"> </span><span class="mi">38</span>:
+    #<span class="mi">0</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span>#<span class="mi">1</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">    </span>#<span class="mi">2</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v6</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">band_not_splat_into_splat_band_not</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="n">fast</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Missed</span><span class="w"> </span>#<span class="mi">0</span>: <span class="err">\</span><span class="n">bv5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band_not</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span><span class="err">\</span><span class="n">b</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i64</span><span class="p">)</span>:
+    <span class="o">&gt;</span><span class="w">     </span><span class="n">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bnot</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">band</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w">     </span><span class="k">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="w">    </span><span class="o">&gt;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="mi">1356</span><span class="w"> </span><span class="n">tests</span>
+<span class="n">Error</span>: <span class="mi">1</span><span class="w"> </span><span class="n">failure</span>
+<span class="n">error</span>: <span class="nc">test</span><span class="w"> </span><span class="n">failed</span><span class="p">,</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">rerun</span><span class="w"> </span><span class="n">pass</span><span class="w"> </span><span class="err">`</span><span class="o">--</span><span class="n">test</span><span class="w"> </span><span class="n">filetests</span><span class="err">`</span>
+</code></pre></div>
+<p>So I just wanted to debug and see how the generated code differs from the test expectation.</p>
+</blockquote>
+
+
+
+<a name="385437510"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385437510" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385437510">(Aug 16 2023 at 11:01)</a>:</h4>
+<p>afonso360 <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1680394998">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p>Oh! Right I forgot that we have a few special opcodes like <code>band_not</code> that are transformed into multiple ops.</p>
+<p>We should be able to ignore those since the mid-end will never see them (I think!) before they are expanded into multiple operations. With everything that you have on that PR, I think you are just missing the transform for <code>bnot</code> and that test should start passing.</p>
+<hr>
+<p>But to check the optimized code you can use the slightly complicated command:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">--</span><span class="n">target</span><span class="w"> </span><span class="n">x86_64</span><span class="w"> </span><span class="o">--</span><span class="n">set</span><span class="w"> </span><span class="n">opt_level</span><span class="o">=</span><span class="n">speed</span><span class="w"> </span><span class="o">-</span><span class="n">p</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">the</span><span class="o">-</span><span class="n">file</span><span class="p">.</span><span class="n">clif</span>
+</code></pre></div>
+<p>This runs the whole compile pipeline, and <code>-p</code> prints the clif file before being sent to the backends for converting into machine code.</p>
+</blockquote>
+
+
+
+<a name="385437718"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385437718" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385437718">(Aug 16 2023 at 11:02)</a>:</h4>
+<p>afonso360 edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1680394998">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p>Oh! Right I forgot that we have a few special opcodes like <code>band_not</code> that are transformed into multiple ops.</p>
+<p>We should be able to ignore those since the mid-end will never see them (I think!) before they are expanded into multiple operations. With everything that you have on that PR, I think you are just missing the transform for <code>bnot</code> and we should be able to transform those two ops.</p>
+<hr>
+<p>But to check the optimized code you can use the slightly complicated command:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">--</span><span class="n">target</span><span class="w"> </span><span class="n">x86_64</span><span class="w"> </span><span class="o">--</span><span class="n">set</span><span class="w"> </span><span class="n">opt_level</span><span class="o">=</span><span class="n">speed</span><span class="w"> </span><span class="o">-</span><span class="n">p</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">the</span><span class="o">-</span><span class="n">file</span><span class="p">.</span><span class="n">clif</span>
+</code></pre></div>
+<p>This runs the whole compile pipeline, and <code>-p</code> prints the clif file before being sent to the backends for converting into machine code.</p>
+</blockquote>
+
+
+
+<a name="385443730"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385443730" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385443730">(Aug 16 2023 at 11:42)</a>:</h4>
+<p>gurry <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1680449389">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p>Thanks for the info @afonso360 .</p>
+<p>The test for <code>bnot</code> was failing for me for some reason. I'll investigate it now with the help of the command you shared.</p>
+<p>What about the family of shift and rotate ops such as <code>ishl</code> and <code>rotl</code>? Will this optimization be applicable to them?</p>
+</blockquote>
+
+
+
+<a name="385445276"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385445276" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385445276">(Aug 16 2023 at 11:53)</a>:</h4>
+<p>afonso360 <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1680463791">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<blockquote>
+<p>What about the family of shift and rotate ops such as ishl and rotl? Will this optimization be applicable to them?</p>
+</blockquote>
+<p>Yeah, they should be! However note that <code>ishl</code> and friends only support a scalar rhs (the number of bits to shift) and reject vectors in that position.</p>
+<p>So the optimization is slightly different. We only need to ensure that the lhs is splatted. So it would look something like this<br>
+<code>(ishl (splat lhs) rhs) -&gt; (splat (ishl lhs rhs))</code></p>
+<p>The verifier shouldn't even let you build a <code>ishl</code> with a vector rhs. A good way to check what kinds of values are supported by each operation is to read the <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/trait.InstBuilder.html#method.ishl">documentation</a> for it. We'll usually have a remark stating: "this supports scalar or vectors", or this is scalar only. Something along those lines.</p>
+</blockquote>
+
+
+
+<a name="385445425"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385445425" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385445425">(Aug 16 2023 at 11:54)</a>:</h4>
+<p>afonso360 edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/6828#issuecomment-1680463791">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<blockquote>
+<p>What about the family of shift and rotate ops such as ishl and rotl? Will this optimization be applicable to them?</p>
+</blockquote>
+<p>Yeah, they should be! However note that <code>ishl</code> and friends only support a scalar rhs (the number of bits to shift) and reject vectors in that position.</p>
+<p>So the optimization is slightly different. We only need to ensure that the lhs is splatted. So it would look something like this<br>
+<code>(ishl (splat lhs) rhs) -&gt; (splat (ishl lhs rhs))</code>.</p>
+<p>It's also probably worth adding a comment with that reasoning in the code! I didn't remember it myself until I tried it.</p>
+<p>The verifier shouldn't even let you build a <code>ishl</code> with a vector rhs. A good way to check what kinds of values are supported by each operation is to read the <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/trait.InstBuilder.html#method.ishl">documentation</a> for it. We'll usually have a remark stating: "this supports scalar or vectors", or this is scalar only. Something along those lines.</p>
+</blockquote>
+
+
+
+<a name="385865539"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%236828%20Cranelift%3A%20Optimize%20%60op%2Bsplat%60%20int.../near/385865539" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.236828.20Cranelift.3A.20Optimize.20.60op.2Bsplat.60.20int.2E.2E.2E.html#385865539">(Aug 18 2023 at 09:02)</a>:</h4>
+<p>afonso360 closed <a href="https://github.com/bytecodealliance/wasmtime/issues/6828">issue #6828</a>:</p>
+<blockquote>
+<p><span aria-label="wave" class="emoji emoji-1f44b" role="img" title="wave">:wave:</span> Hey,</p>
+<h4>Feature</h4>
+<p>This was pointed out by @jameysharp  in <a href="https://github.com/bytecodealliance/wasmtime/pull/6815#pullrequestreview-1570118805">https://github.com/bytecodealliance/wasmtime/pull/6815#pullrequestreview-1570118805</a>!</p>
+<p>We should try to transform <code>(op (splat x) (splat y) ...)</code> into <code>(splat (op x y ...))</code> for operations that support this.</p>
+<h4>Benefit</h4>
+<p>This transforms SIMD operations into their scalar counterpart which should be beneficial. We also have better constant propagation on scalars, so this is also an opportunity to do that further.</p>
+<p>RISC-V specifically really benefits from this optimization since we have opcodes that can eat the splat on the transformed version.</p>
+<h4>Implementation</h4>
+<p>The e-graphs mid end is <em>awesome</em> for stuff like this! Here's one rule:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">rule</span><span class="w"> </span><span class="p">(</span><span class="n">simplify</span><span class="w"> </span><span class="p">(</span><span class="n">imul</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+<span class="w">      </span><span class="p">(</span><span class="n">splat</span><span class="w"> </span><span class="n">ty</span><span class="w"> </span><span class="p">(</span><span class="n">imul</span><span class="w"> </span><span class="p">(</span><span class="n">lane_type</span><span class="w"> </span><span class="n">ty</span><span class="p">)</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="p">)))</span>
+</code></pre></div>
+<p>Pasting this into <code>cranelift/codegen/src/opts/vector.isle</code> makes this tranform work on <code>imul</code>!</p>
+<p>You can try running this test to verify that it works:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">test</span><span class="w"> </span><span class="n">optimize</span>
+<span class="n">set</span><span class="w"> </span><span class="n">opt_level</span><span class="o">=</span><span class="n">speed</span>
+<span class="n">target</span><span class="w"> </span><span class="n">x86_64</span>
+
+<span class="n">function</span><span class="w"> </span><span class="o">%</span><span class="n">imul_splat_into_splat_imul</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">i64x2</span><span class="w"> </span><span class="p">{</span>
+<span class="n">block0</span><span class="p">(</span><span class="n">v0</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>: <span class="kt">i64</span><span class="p">)</span>:
+  <span class="nc">v2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v0</span>
+<span class="w">  </span><span class="n">v3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="n">v4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">imul</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="n">v3</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">v4</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v5</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">imul</span><span class="w"> </span><span class="n">v0</span><span class="p">,</span><span class="w"> </span><span class="n">v1</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">v6</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">splat</span><span class="p">.</span><span class="n">i64x2</span><span class="w"> </span><span class="n">v5</span>
+<span class="w">  </span><span class="p">;</span><span class="w"> </span><span class="n">check</span>: <span class="nc">return</span><span class="w"> </span><span class="n">v6</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>(Run this with <code>cargo run -- test ./the-above.clif</code> from the <code>/cranelift</code> directory)</p>
+<p>This is also a good test to add to our testsuite in <code>cranelift/filetests/filetests/egraph/...</code>.</p>
+<p>There are so many opcodes that this optimization works for that I actually can't list them all. Here's a few: <code>iadd</code>,<code>isub</code>,<code>imul</code>,<code>ineg</code>,<code>iabs</code>,<code>umulhi</code>,<code>smulhi</code>,... Just look at our <a href="https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/trait.InstBuilder.html">opcode list</a> and a lot of them will work out.</p>
+<p>Where it <em>wont</em> work:</p>
+<ul>
+<li>Trapping operations (i.e. <code>idiv</code> / <code>urem</code> / <code>srem</code>). This doesn't work because we currently don't perform optimizations on these operations (see #5908)</li>
+</ul>
+<p>Where it may not work:</p>
+<ul>
+<li>Floating point operations. I'm not 100% sure about this one, it logically makes sense that it wouldn't change the result, but I'm just afraid of doing transforms on floats.</li>
+</ul>
+<h4>Alternatives</h4>
+<p>There are so many opcodes for which this rule can be implemented that it may be worth considering auto-generating it. However I doubt it would be worth the effort + maintenance complexity of that. Copy pasting a bunch of times is sometimes better!<br>
+</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

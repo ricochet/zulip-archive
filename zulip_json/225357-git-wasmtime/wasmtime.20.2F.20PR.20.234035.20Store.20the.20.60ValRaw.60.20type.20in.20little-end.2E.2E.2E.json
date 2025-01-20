@@ -1,0 +1,86 @@
+[
+    {
+        "content": "<p>alexcrichton opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035\">PR #4035</a> from <code>val-raw-little-endian</code> to <code>main</code>:</p>\n<blockquote>\n<p>This commit changes the internal representation of the <code>ValRaw</code> type to<br>\nan unconditionally little-endian format instead of its current<br>\nnative-endian format. The documentation and various accessors here have<br>\nbeen updated as well as the associated trampolines that read <code>ValRaw</code><br>\nto always work with little-endian values, converting to the host<br>\nendianness as necessary.</p>\n<p>The motivation for this change originally comes from the implementation<br>\nof the component model that I'm working on. One aspect of the component<br>\nmodel's canonical ABI is how variants are passed to functions as<br>\nimmediate arguments. For example for a component model function:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">foo</span>: <span class=\"nc\">function</span><span class=\"p\">(</span><span class=\"n\">x</span>: <span class=\"nc\">expected</span><span class=\"o\">&lt;</span><span class=\"kt\">i32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">f64</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"></span>\n</code></pre></div>\n<p>This translates to a core wasm function:</p>\n<div class=\"codehilite\" data-code-language=\"wasm\"><pre><span></span><code>(module\n  (func (export \"foo\") (param i32 i64)\n    ;; ...\n  )\n)\n</code></pre></div>\n<p>The first <code>i32</code> parameter to the core wasm function is the discriminant<br>\nof whether the result is an \"ok\" or an \"err\". The second <code>i64</code>, however,<br>\nis the \"join\" operation on the <code>i32</code> and <code>f64</code> payloads. Essentially<br>\nthese two types are unioned into one type to get passed into the function.</p>\n<p>Currently in the implementation of the component model my plan is to<br>\nconstruct a <code>*mut [ValRaw]</code> to pass through to WebAssembly, always<br>\ninvoking component exports through host trampolines. This means that the<br>\nimplementation for <code>Result&lt;T, E&gt;</code> needs to do the correct \"join\"<br>\noperation here when encoding a particular case into the corresponding<br>\n<code>ValRaw</code>.</p>\n<p>I personally found this particularly tricky to do structurally. The<br>\nsolution that I settled on with fitzgen was that if <code>ValRaw</code> was always<br>\nstored in a little endian format then we could employ a trick where when<br>\nencoding a variant we first set all the <code>ValRaw</code> slots to zero, then the<br>\nassociated case we have is encoding. Afterwards the <code>ValRaw</code> values are<br>\nalready encoded into the correct format as if they'd been \"join\"ed.</p>\n<p>For example if we were to encode <code>Ok(1i32)</code> then this would produce<br>\n<code>ValRaw { i32: 1 }</code>, which memory-wise is equivalent to <code>ValRaw { i64: 1 }</code><br>\nif the other bytes in the <code>ValRaw</code> are guaranteed to be zero. Similarly<br>\nstoring <code>ValRaw { f64 }</code> is equivalent to the storage required for<br>\n<code>ValRaw { i64 }</code> here in the join operation.</p>\n<p>Note, though, that this equivalence relies on everything being<br>\nlittle-endian. Otherwise the in-memory representations of <code>ValRaw { i32: 1 }</code><br>\nand <code>ValRaw { i64: 1 }</code> are different.</p>\n<p>That motivation is what leads to this change. It's expected that this is<br>\na low-to-zero cost change in the sense that little-endian platforms will<br>\nsee no change and big-endian platforms are already required to<br>\nefficiently byte-swap loads/stores as WebAssembly requires that.<br>\nAdditionally the <code>ValRaw</code> type is an esoteric niche use case primarily<br>\nused for accelerating the C API right now, so it's expected that not<br>\nmany users will have to update for this change.</p>\n<p>&lt;!--</p>\n<p>Please ensure that the following steps are all taken care of before submitting<br>\nthe PR.</p>\n<ul>\n<li>[ ] This has been discussed in issue #..., or if not, please tell us why<br>\n  here.</li>\n<li>[ ] A short description of what this does, why it is needed; if the<br>\n  description becomes long, the matter should probably be discussed in an issue<br>\n  first.</li>\n<li>[ ] This PR contains test cases, if meaningful.</li>\n<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>\n  If you don't know who could review this, please indicate so. The list of<br>\n  suggested reviewers on the right can help you.</li>\n</ul>\n<p>Please ensure all communication adheres to the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md\">code of\nconduct</a>.<br>\n--&gt;<br>\n</p>\n</blockquote>",
+        "id": 278981364,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649950510
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942533711\">PR review</a>.</p>",
+        "id": 278989617,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649954304
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035\">PR #4035</a> from <code>val-raw-little-endian</code> to <code>main</code>.</p>",
+        "id": 278991270,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649955133
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942571259\">PR review</a>.</p>",
+        "id": 278994390,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649956516
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r850647439\">PR review comment</a>:</p>\n<blockquote>\n<p>Maybe store <code>char[4]</code>, <code>char[8]</code>, ... instead? Otherwise people will likely forget to do the endianness transform. Especially as all common architectures are little endian too.</p>\n</blockquote>",
+        "id": 278994391,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649956517
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942571941\">PR review</a>.</p>",
+        "id": 278994480,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649956556
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r850647870\">PR review comment</a>:</p>\n<blockquote>\n<p>*ValRaw</p>\n</blockquote>",
+        "id": 278994482,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649956556
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942627976\">PR review</a>.</p>",
+        "id": 279001201,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649959739
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r850686504\">PR review comment</a>:</p>\n<blockquote>\n<p>I would prefer to leave this in to avoid the need for funky casts and such in C. This is not intended to be super heavily used either and other language bindings will have to deal with this anyway.</p>\n</blockquote>",
+        "id": 279001202,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649959739
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942629041\">PR review</a>.</p>",
+        "id": 279001249,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649959769
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r850686937\">PR review comment</a>:</p>\n<blockquote>\n<p>The comment here is actually intended to point to <code>Val</code> in that <code>ValRaw</code> is the unsafe way of working with what is otherwise a wasm <code>Val</code> value.</p>\n</blockquote>",
+        "id": 279001250,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649959769
+    },
+    {
+        "content": "<p>alexcrichton merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035\">PR #4035</a>.</p>",
+        "id": 279001263,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1649959773
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-943257378\">PR review</a>.</p>",
+        "id": 279060311,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1650011472
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r851145625\">PR review comment</a>:</p>\n<blockquote>\n<p>You need funky casts either way to support big endian systems.</p>\n</blockquote>",
+        "id": 279060314,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1650011473
+    }
+]

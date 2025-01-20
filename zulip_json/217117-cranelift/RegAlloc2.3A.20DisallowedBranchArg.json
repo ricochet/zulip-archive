@@ -1,0 +1,218 @@
+[
+    {
+        "content": "<p>Hello, I am using RegAlloc2 and have a question. I have produced the following MachineCode instructions. Their Mnemonics and Operands Vec can be seen here:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">   </span><span class=\"n\">cmp_r_m</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">Use</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">v23i</span><span class=\"w\"> </span><span class=\"n\">reg</span><span class=\"p\">),(</span><span class=\"n\">Use</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">v25i</span><span class=\"w\"> </span><span class=\"n\">reg</span><span class=\"p\">),(</span><span class=\"n\">Def</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">v28v</span><span class=\"w\"> </span><span class=\"n\">fixed</span><span class=\"p\">(</span><span class=\"n\">p6v</span><span class=\"p\">)),</span>\n<span class=\"w\">   </span><span class=\"n\">jne</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">Use</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">v0i</span><span class=\"w\"> </span><span class=\"n\">any</span><span class=\"p\">),(</span><span class=\"n\">Use</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"nc\">v28v</span><span class=\"w\"> </span><span class=\"n\">fixed</span><span class=\"p\">(</span><span class=\"n\">p6v</span><span class=\"p\">)),</span>\n</code></pre></div>\n<p>However, the second operand(v28v) in the JNE is an x86 flag. The zero flag. This needs to be used by the JNE as it needs to be materialized in the actual ZF bit in the EFLAGS register however none of the successor blocks actually use this and so it isn't a branch parameter. The only real block parameter here is v0i, passed to both successors of the JNE.</p>\n<p>When running RegAlloc2 over this, I get the DisallowedBranchArg(inst) specifying that JNE.</p>\n<p>The docs say to create an \"edge block\" to solve this issue. I assume that means I need to insert blocks in between the current block and each of its predecessors that expects an additional parameter(which would be the ZF value used by the JNE). Then this could be discarded in the edge blocks before unconditionally branching to the real successors.</p>\n<p>Alternatively, could I just add this extra operand to each of the successor blocks parameter lists, even though they don't actually use it? Seems like that might be the best option.</p>\n<p>Thank you.</p>",
+        "id": 448205056,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719800505
+    },
+    {
+        "content": "<p>More basic question (X-Y issue at play here): why track eflags via register allocation? It has special constraints (only one register, can't easily be spilled), is implicitly written by many instructions, and is usually handled specially during isel</p>",
+        "id": 448209630,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719803510
+    },
+    {
+        "content": "<p>What we do in Cranelift is to implicitly get the eflags dataflow right by generating the cmp right before the conditional jump; RA2 doesn't otherwise know anything about it</p>",
+        "id": 448209699,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719803539
+    },
+    {
+        "content": "<p>If I could avoid having to model the flags I would, but as it stands I cannot. I have them modeled each with their own individual PREG and instructions that use them can require that they come in in the right place. Then define MachineInstructions like this. This one is for x86 setne.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"n\">setne</span><span class=\"p\">(</span>\n<span class=\"w\">        </span><span class=\"n\">Data</span><span class=\"p\">(),</span>\n<span class=\"w\">        </span><span class=\"n\">RegIn</span><span class=\"p\">(),</span>\n<span class=\"w\">        </span><span class=\"n\">FlagIn</span><span class=\"p\">(</span>\n<span class=\"w\">            </span><span class=\"p\">(</span><span class=\"n\">zf</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">OperandConstraint</span><span class=\"p\">::</span><span class=\"n\">FixedReg</span><span class=\"p\">(</span><span class=\"n\">PREG_ZF</span><span class=\"p\">))</span>\n<span class=\"w\">        </span><span class=\"p\">),</span>\n<span class=\"w\">        </span><span class=\"n\">RegOut</span><span class=\"p\">(</span>\n<span class=\"w\">            </span><span class=\"p\">(</span><span class=\"n\">output</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">OperandConstraint</span><span class=\"p\">::</span><span class=\"n\">Any</span><span class=\"p\">)</span>\n<span class=\"w\">        </span><span class=\"p\">),</span>\n<span class=\"w\">        </span><span class=\"n\">FlagOut</span><span class=\"p\">()</span>\n<span class=\"w\">    </span><span class=\"p\">),</span>\n</code></pre></div>",
+        "id": 448210415,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719804098
+    },
+    {
+        "content": "<p>Ofc modeling them this way is really annoying when regalloc2 DOES create an edit which moves from one flag to another. But this is kinda rare.</p>",
+        "id": 448210535,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719804182
+    },
+    {
+        "content": "<p>Can you say more <em>why</em> you need to model flags in this way? regalloc2 unfortunately is not designed to handle this (as you're seeing with the constraints around conditional-jump inputs).</p>",
+        "id": 448210590,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804230
+    },
+    {
+        "content": "<p>The input is the result of an x86 lifter. The flags have to be modeled and ideally I'd like to keep them in their original registers whenever possible. Trust me I know regalloc2 isn't setup to handle this <span aria-label=\"rofl\" class=\"emoji emoji-1f923\" role=\"img\" title=\"rofl\">:rofl:</span>. If there were more(unlimited) RegClasses I could prevent flag-to-flag moves. I considered forking and trying to implement this(side question: do you think that would be difficult to do?)</p>",
+        "id": 448210817,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719804404
+    },
+    {
+        "content": "<p>It's an interesting question! The constraint around jump inputs comes mainly from the move-insertion (edge cases around where to place moves); I have vague recollections of running into some fuzzbugs and inserting this constraint, but no solid summary of what the problems will be, so it's worth removing the check, fuzzing, and seeing what comes up.</p>",
+        "id": 448211000,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804543
+    },
+    {
+        "content": "<p>(And as it goes, there is one free regclass: we have two bits now and only have three classes defined, Int, Float and Vector)</p>",
+        "id": 448211033,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804567
+    },
+    {
+        "content": "<p>Need at least 6 more unfortunately <span aria-label=\"pensive\" class=\"emoji emoji-1f614\" role=\"img\" title=\"pensive\">:pensive:</span></p>",
+        "id": 448211061,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719804594
+    },
+    {
+        "content": "<p>How does regalloc 2 handle MIPs like branching, where there are uses of registers in the branch?</p>",
+        "id": 448211136,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719804615
+    },
+    {
+        "content": "<p>Ah, if you know your function bodies won't be large, you could steal more bits from the vreg index</p>",
+        "id": 448211154,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804626
+    },
+    {
+        "content": "<p>(I'm not sure what a \"MIP\" is but branch instructions are handled mostly like any other in terms of uses and defs; they're only special w.r.t. move insertion for edge-moves)</p>",
+        "id": 448211194,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804667
+    },
+    {
+        "content": "<p>Might try doing that^ shouldn't be very large.</p>\n<p>MIPS as in the architecture:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">BNE</span><span class=\"w\"> </span><span class=\"cp\">$t0</span><span class=\"p\">,</span><span class=\"cp\">$t1</span><span class=\"p\">,</span><span class=\"n\">Target</span>\n</code></pre></div>\n<p>It has uses of registers, so they would be in the operand slice, but it conceivably might not be passing these values on to the successor blocks.</p>",
+        "id": 448211262,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719804695
+    },
+    {
+        "content": "<p>ah, MIPS, sorry, parse error! We do generate <code>cbz</code>/<code>cbnz</code> in Cranelift on aarch64 which takes one register arg, and branch insts on risc-v which take two; I'm honestly blanking on how this works but that would be the place to start</p>",
+        "id": 448211385,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804797
+    },
+    {
+        "content": "<p><span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span> thank you. I think however that's solved should be similar to the solution I'm looking for. Similar case at least, ignoring the fact that I'm doing dumb things with the flags.</p>",
+        "id": 448211478,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719804854
+    },
+    {
+        "content": "<p>Ah, OK, that's how: as per <a href=\"https://github.com/bytecodealliance/regalloc2/blob/f4812a23efc82466ed8377c6e11113134e13f425/src/cfg.rs#L73-L77\">here</a> we ensure the CFG is such that moves can be placed in successor blocks instead</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/regalloc2/blob/f4812a23efc82466ed8377c6e11113134e13f425/src/cfg.rs#L73-L77\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/af458113e7a18995a49b5f29f1e16ce70d03e0f5/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f386230636636346462643633636139333063623862343338306130383530626630353332333364623031386631383764653763653830623539656233623430322f62797465636f6465616c6c69616e63652f726567616c6c6f6332&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/regalloc2/blob/f4812a23efc82466ed8377c6e11113134e13f425/src/cfg.rs#L73-L77\" title=\"regalloc2/src/cfg.rs at f4812a23efc82466ed8377c6e11113134e13f425 · bytecodealliance/regalloc2\">regalloc2/src/cfg.rs at f4812a23efc82466ed8377c6e11113134e13f425 · bytecodealliance/regalloc2</a></div><div class=\"message_embed_description\">A new register allocator. Contribute to bytecodealliance/regalloc2 development by creating an account on GitHub.</div></div></div>",
+        "id": 448211496,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804868
+    },
+    {
+        "content": "<p>so, back to your original message, something like \"split the edge blocks\" sounds like the right answer :-)</p>",
+        "id": 448211512,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804884
+    },
+    {
+        "content": "<p>(in Cranelift's BlockLoweringOrder we always ensure we split critical edges)</p>",
+        "id": 448211537,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719804916
+    },
+    {
+        "content": "<p>If I just tacked on the flag's needed by the branch to the params of each of the successors, would that work too?</p>\n<p>So that now the flag(s) are used by the branch, and used in the params of the successor blocks.</p>",
+        "id": 448211654,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719805008
+    },
+    {
+        "content": "<p>not necessarily, as the edge moves may (should) happen in the successor blocks' starts if there are multiple successors</p>",
+        "id": 448211852,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719805173
+    },
+    {
+        "content": "<p>in other words the flags will be alive, somewhere, but RA2 isn't set up to tell you where</p>",
+        "id": 448211869,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719805196
+    },
+    {
+        "content": "<p>better to split the block edges and use a true arg, then all the machinery will naturally work to give you the location</p>",
+        "id": 448211926,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719805218
+    },
+    {
+        "content": "<p>are the operands of the branch instruction itself ignored then? I would put the flag in an use operand to the branch with a FixedReg constraint(which would force the move to happen before?)</p>",
+        "id": 448211980,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719805275
+    },
+    {
+        "content": "<p>no, the normal args to the branch (not block args) should work properly</p>",
+        "id": 448212111,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719805344
+    },
+    {
+        "content": "<p>(and yes, moves necessary to put things in place would happen before the branch)</p>",
+        "id": 448212210,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719805380
+    },
+    {
+        "content": "<p>Ok I'll give it a shot and report back <span aria-label=\"salute\" class=\"emoji emoji-1fae1\" role=\"img\" title=\"salute\">:salute:</span></p>",
+        "id": 448212244,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719805391
+    },
+    {
+        "content": "<p>best of luck!</p>",
+        "id": 448212265,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719805398
+    },
+    {
+        "content": "<p>Going to look into increasing VReg size as well <span aria-label=\"eyes\" class=\"emoji emoji-1f440\" role=\"img\" title=\"eyes\">:eyes:</span></p>",
+        "id": 448212301,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719805409
+    },
+    {
+        "content": "<p>Ok so here is what is the problem now: </p>\n<div class=\"message_inline_image\"><a href=\"https://i.imgur.com/HMmTWzv.png\"><img src=\"https://uploads.zulipusercontent.net/b165b2c9a79082a141a430cc37111467d11f6d4e/68747470733a2f2f692e696d6775722e636f6d2f484d6d54577a762e706e67\"></a></div>",
+        "id": 448213262,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719806124
+    },
+    {
+        "content": "<p>And I will solve it by doing this.<br>\n<a href=\"https://i.imgur.com/BP6XmjB.png\">https://i.imgur.com/BP6XmjB.png</a></p>\n<div class=\"message_inline_image\"><a href=\"https://i.imgur.com/BP6XmjB.png\"><img src=\"https://uploads.zulipusercontent.net/ba969411450a34695e235f9754075b6427ddeb65/68747470733a2f2f692e696d6775722e636f6d2f425036586d6a422e706e67\"></a></div>",
+        "id": 448213272,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719806134
+    },
+    {
+        "content": "<p>Dummy edge blocks that consume the ZF, and pass only the expected args to the true successors.</p>",
+        "id": 448213289,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719806156
+    },
+    {
+        "content": "<p>Sounds good except I don't think it should be necessary to consume ZF in the successor blocks: the branch itself using ZF should be enough (i.e., encode only the actual dependence)</p>",
+        "id": 448216406,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719808127
+    },
+    {
+        "content": "<p>the purpose of the edge-split blocks is to give the regalloc a place to put moves that have to happen \"on the edge\"; without that, there'd be no place to put such moves for the top-center-to-bottom-left edge (because prior to the cond branch, we could go either way, we don't know we're taking that edge; and in teh bottom-left block, we could have come from top-center or top-left)</p>",
+        "id": 448216589,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719808191
+    },
+    {
+        "content": "<p>once that block is there, regalloc is happy to let the cond br consume things, because it knows it doesn't have to put moves before the branch</p>",
+        "id": 448216726,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719808219
+    },
+    {
+        "content": "<p>yep noticed that too as implementing, adding the block alone will remove the multiple predecessors on successor violation.</p>",
+        "id": 448223433,
+        "sender_full_name": "Leaves",
+        "timestamp": 1719810750
+    }
+]

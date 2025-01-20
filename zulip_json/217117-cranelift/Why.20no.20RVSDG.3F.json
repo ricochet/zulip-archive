@@ -1,0 +1,68 @@
+[
+    {
+        "content": "<p>Reading the RFC, it feels like egraphs would work particularly well with RVSDGs. They both work on the same principle of \"instead of doing a ton of fixpoint passes on poorly-structured IR, have an IR with semantic information baked in the structure and run forward passes on it\".</p>\n<p>The RFC says:</p>\n<blockquote>\n<p>Predicates and/or regions implied by a PDG or [R]VSDG are difficult to transition into and out of when the rest of the compiler works in terms of traditional control-flow graphs. It can be done -- for example, the Relooper algorithm exists to extract structured control flow out of an arbitrary CFG, and Bahmann et al.4 show that one can recover the original CFG out of an RVSDG perfectly. Regarding the interaction of e-graph merging and RVSDGs, a recent prototype by @jameysharp shows a working example. Still, if we can help it, ideally we do not want to pay the cost of the semantic gap in control-flow representation (relooping and then recovering a CFG). Such complexity yields both bugs and slow compilation!</p>\n</blockquote>\n<p>But... it feels like cranelift should have a very loop-centered IR?</p>\n<p>The two main use-cases for cranelift are compiling WebAssembly and compiling Rust, both of which have a loop-centered control flow with no arbitrary back-edges allowed (though I think Rust MIR uses a CFG). Even if CLIF uses a CFG, it feels like you should be able to give it hints (dominator nodes, which blocks correspond to loops, I dunno) to help it reconstruct loops from.</p>\n<p>And on the long term, if you want to support LLVM-grade optimizations, then the \"every single side effect is a unique snowflake\" approach is not going to scale. By contrast, RVSDG gives you loop unrolling, free inlining, better code motion, DCE, etc.</p>\n<p>Thoughts?</p>",
+        "id": 300242555,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1663879499
+    },
+    {
+        "content": "<blockquote>\n<p>Thoughts?</p>\n</blockquote>\n<p>Yes! So I did pretty deeply consider region-based approaches, but the fundamental issue is that it they have a quite high impedance mismatch with the rest of the compiler. \"Even if CLIF uses a CFG\" is carrying a lot of weight in the above argument: it's easy to wave hands about this, but doing conversion between CFG form (with support for arbitrary irreducible control flow) and region form, in a robust, watertight way with no fuzzbugs and no performance regressions or blowups, is really really hard.</p>\n<p>That's pretty much the end of it; we could rearchitect the whole compiler to support reducible control flow only, but that is a much larger project than a retrofit of the mid-end, and not something that would likely make engineering sense without a really compelling \"this optimization is possible only if...\" story.</p>\n<p>I do think conversations of the form \"why can't the whole compiler be rewritten in X form?\" are useful to consider sometimes, but it's worth also thinking about the stage that the project is in and the costs involved -- this is not simply an academic question :-) A \"why don't you simply...\" question could imply several engineer-years of work, and associated instability and re-tuning, so it would have to be really worth it.</p>",
+        "id": 300246451,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1663881118
+    },
+    {
+        "content": "<p>Fair enough!</p>",
+        "id": 300247953,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1663881783
+    },
+    {
+        "content": "<p>Regarding your comment that \"it feels like egraphs would work particularly well with RVSDGs\": I agree! The details are a little tricky but I prototyped that idea in a toy compiler a few months ago (<a href=\"https://github.com/jameysharp/optir\">https://github.com/jameysharp/optir</a>).<br>\nAt the same time, I also agree with Chris that major changes to Cranelift's architecture are not the way to go here. One of the things that I'm impressed by in the aegraph work is that Chris got an e-graph representation into a production compiler, basically single-handedly, in just a few months of work. Even better, despite the inherent overhead of keeping multiple representations of the same expression around, he put in the engineering time to actually make both compile time and generated code better on real programs. Those are both not only amazing accomplishments, but also necessary for a compiler that's in active use on servers around the world.<br>\nOnce this lands and stabilizes, I'm sure we'll start experimenting with control-flow representations and all sorts of other fun stuff. I definitely hope to revisit the RVSDG question at some point. But we have to keep everything working at the same time.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/jameysharp/optir\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/a98506d4627b4328f9039152da4cc3277142f223\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f633463623333313863383133356464643930303564626661326437663161653261303036353763653762376634633866383534303563303633326338653439362f6a616d657973686172702f6f70746972)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/jameysharp/optir\" title=\"GitHub - jameysharp/optir: Compiler optimizer for arbitrary control flow based on equality saturation\">GitHub - jameysharp/optir: Compiler optimizer for arbitrary control flow based on equality saturation</a></div><div class=\"message_embed_description\">Compiler optimizer for arbitrary control flow based on equality saturation - GitHub - jameysharp/optir: Compiler optimizer for arbitrary control flow based on equality saturation</div></div></div>",
+        "id": 300275868,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1663896482
+    },
+    {
+        "content": "<p>Right, I was thinking of optir when I wrote this.</p>",
+        "id": 300313008,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1663922260
+    },
+    {
+        "content": "<p>In particular, this part:</p>\n<blockquote>\n<p>The e-graph for this program can represent both the inlined and non-inlined variants at the same time. This allows rewriting based on facts learned from inlining, even if extraction later decides that it's worth keeping the function un-inlined.</p>\n</blockquote>\n<p>This seems like an extremely promising direction, and something that could make cranelift not just catch up with state-of-the-art compilers (llvm/gcc) but actively compete with them. Inlining in particular is something that LLVM seems to struggle with (eg the top-down inlining algorithm being disabled by the Rust front-end), so having a framework that handles inlining in a first-class way would be pretty exciting.</p>\n<p>But yeah, I get the point about engineering costs.</p>",
+        "id": 300314236,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1663922743
+    },
+    {
+        "content": "<p>Re-reading the egraphs RFC, it does feel like the egraphs middle-end would benefit from a form that has a representation for side-effects. It would still need to represent irreducible control flow, but it could maybe be achieved with something like <a href=\"https://github.com/WebAssembly/funclets/blob/main/proposals/funclets/Overview.md\">the wasm funclet proposal</a> (which basically proposes a regionalized CFG).</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/funclets/blob/main/proposals/funclets/Overview.md\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/2edabf5b2d3bdcf9656770561e3e970be2a383e1\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f386232643366656161633365626166386631313964343439316438626638383966646562376639363732346133303761333938366135326332336236663639662f576562417373656d626c792f66756e636c657473)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/funclets/blob/main/proposals/funclets/Overview.md\" title=\"funclets/Overview.md at main · WebAssembly/funclets\">funclets/Overview.md at main · WebAssembly/funclets</a></div><div class=\"message_embed_description\">Proposal for adding funclets - flexible intraprocedural control flow - funclets/Overview.md at main · WebAssembly/funclets</div></div></div>",
+        "id": 311260708,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1669029201
+    },
+    {
+        "content": "<p>I wonder if there's been any research on the subject of representing side-effects within egraphs. It does seem like the \"Analysis\" metadata in the egg crate would be helpful for alias analysis and other reordering transformation.</p>",
+        "id": 311261076,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1669029339
+    },
+    {
+        "content": "<p>Because if you do represent side-effects (including \"this point in the control flow was reach\") within the egraph, then you can do alias analysis and other transformations within the egraph too, and the \"control flow skeleton\" is already included.</p>",
+        "id": 311262365,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1669029808
+    },
+    {
+        "content": "<p>(I don't know how hard that would be to implement in practice, I'm mostly thinking aloud. From what I've seen of the cranelift's egraph implementation, it already does a lot of compromises to be usable in practice)</p>",
+        "id": 311262556,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1669029891
+    },
+    {
+        "content": "<p>The Cranelift version of egraphs already has the same notion of <code>Analysis</code> as egg, though it's currently only used for a loop-level analysis that's used to implement loop-invariant code motion.<br>\nChris and I are working on rewriting the egraph implementation to operate directly on Cranelift's existing <code>DataFlowGraph</code> structure, rather than copying out to a separate egraph and back in again, and it looks like that will simplify a lot without limiting the optimizations we can apply.<br>\nI'd say there are two fundamental compromises in Cranelift's implementation of egraphs: the restriction against cycles in the egraph, and the preservation of the control-flow graph. We need to get more experience with this implementation to say anything with certainty, but now that I've investigated it thoroughly, I'm not convinced we're losing much by making those particular compromises. I guess we'll find out, though!</p>",
+        "id": 311471005,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1669063266
+    }
+]

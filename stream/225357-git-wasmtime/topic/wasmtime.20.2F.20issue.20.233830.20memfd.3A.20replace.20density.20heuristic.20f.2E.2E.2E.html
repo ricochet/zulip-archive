@@ -1,0 +1,91 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #3830 memfd: replace density heuristic f... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233830.20memfd.3A.20replace.20density.20heuristic.20f.2E.2E.2E.html">wasmtime / issue #3830 memfd: replace density heuristic f...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="272356456"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233830%20memfd%3A%20replace%20density%20heuristic%20f.../near/272356456" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233830.20memfd.3A.20replace.20density.20heuristic.20f.2E.2E.2E.html#272356456">(Feb 18 2022 at 03:32)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/issues/3830">issue #3830</a>:</p>
+<blockquote>
+<p>In #3815, we saw a case where a fuzzer came up with a Wasm heap consisting of (i) a byte at address 0, and (ii) a byte at address 1 GiB. With memfd enabled, this produces a <code>.cwasm</code> with a data segment, ready to mmap, that takes a full 1GiB.</p>
+<p>We probably don't want that, so in #3819 we added some heuristics based on "density" of the data segments: if less than half the bytes are set, then the image is sparse and we don't do memfd.</p>
+<p>Unfortunately this creates a really subtle performance cliff: if the user's toolchain happens to produce a Wasm with more than 50% of its bytes in its heap zero, it will slow down the whole instantiation significantly (often pushing from microsecond to millisecond range). This is unfortunate both because it's a cliff and because it affects <em>all</em> memory contents, not just those that exceed e.g. some bound. (In other words it's a "non-graduated" penalty: adding just one more thing penalizes all of the things, instead of just the new thing.)</p>
+<p>I was able to get close to the 50% limit with a "real" Wasm toolchain (specifically, one based on Wizer and SpiderMonkey that produces wasm binaries for services).</p>
+<p>An alternative proposed in #3815 was a simpler static limit: all data segments below some bound go into a memfd image, and those above some bound go into a list of segments to eagerly initialize on instantiation. This was rejected because it is also a cliff, but IMHO a static limit is easier to understand than a ratio, and can often also be aligned to other limits in the system (e.g. if a platform already bounds the maximum module or heap size, then it can set the memfd-image limit  to that size and get a guarantee that it will never see the slow case).</p>
+<p>In addition, we could perhaps generate the memfd image for all data segments that <em>are</em> within a limit, then only keep a sparse list of those that are out of bound. This bounds our image size to O(kMaxDenseSize) + O(|wasm|), and importantly, gives a "graduated" cost: if the module grows to slightly exceed the limit someday, then the new bytes cost more, but the whole thing doesn't get 100x slower to instantiate.</p>
+<p>cc @alexcrichton </p>
+</blockquote>
+
+
+
+<a name="272364560"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233830%20memfd%3A%20replace%20density%20heuristic%20f.../near/272364560" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233830.20memfd.3A.20replace.20density.20heuristic.20f.2E.2E.2E.html#272364560">(Feb 18 2022 at 06:23)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/3830#issuecomment-1043983446">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3830">issue #3830</a>:</p>
+<blockquote>
+<p>Here's a proof-of-concept of the issue: I produced <a href="http://cfallin.org/assets/sparse-spidermonkey-wizened.wasm">this Wasm module</a> by Wizening a SpiderMonkey-based JS project that includes a markdown renderer and does some pre-rendering at the toplevel (which runs at wizening time), and simulates some more init-time alloc/free by allocating a large array. (I played with the sizes until it got just past the threshold, for full disclosure, which is why this is "suspiciously close", but the point I was trying to convince myself of was that this is indeed possible to hit.) <a href="https://github.com/cfallin/sparse-wasm-module">Source is here</a>.</p>
+<p>I observe the following stats:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">[</span><span class="n">crates</span><span class="o">/</span><span class="n">environ</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">module</span><span class="p">.</span><span class="n">rs</span>:<span class="mi">372</span><span class="p">]</span><span class="w"> </span><span class="n">memory_init_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">11993088</span><span class="w"></span>
+<span class="p">[</span><span class="n">crates</span><span class="o">/</span><span class="n">environ</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">module</span><span class="p">.</span><span class="n">rs</span>:<span class="mi">372</span><span class="p">]</span><span class="w"> </span><span class="n">data_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5963776</span><span class="w"></span>
+</code></pre></div>
+<p>which is just under the 50%-dense threshold, so this module would fail to use memfd with the new heuristics.</p>
+</blockquote>
+
+
+
+<a name="272821133"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233830%20memfd%3A%20replace%20density%20heuristic%20f.../near/272821133" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233830.20memfd.3A.20replace.20density.20heuristic.20f.2E.2E.2E.html#272821133">(Feb 22 2022 at 15:45)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/3830#issuecomment-1047930787">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3830">issue #3830</a>:</p>
+<blockquote>
+<p>cc <a href="https://github.com/bytecodealliance/wasmtime/pull/3831">https://github.com/bytecodealliance/wasmtime/pull/3831</a> to have the link here</p>
+<p>I'm all for a fancier mmap scheme where we either have mmap+leftovers or something a bit fancier like up to N mmap images plus leftovers. I'm not sure off the top of my head how we'd determine what's appropriate for what module but I'm all for making this a more intelligent decision in Wasmtime.</p>
+</blockquote>
+
+
+
+<a name="276393183"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233830%20memfd%3A%20replace%20density%20heuristic%20f.../near/276393183" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233830.20memfd.3A.20replace.20density.20heuristic.20f.2E.2E.2E.html#276393183">(Mar 23 2022 at 20:13)</a>:</h4>
+<p>alexcrichton labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/3830">issue #3830</a>:</p>
+<blockquote>
+<p>In #3815, we saw a case where a fuzzer came up with a Wasm heap consisting of (i) a byte at address 0, and (ii) a byte at address 1 GiB. With memfd enabled, this produces a <code>.cwasm</code> with a data segment, ready to mmap, that takes a full 1GiB.</p>
+<p>We probably don't want that, so in #3819 we added some heuristics based on "density" of the data segments: if less than half the bytes are set, then the image is sparse and we don't do memfd.</p>
+<p>Unfortunately this creates a really subtle performance cliff: if the user's toolchain happens to produce a Wasm with more than 50% of its bytes in its heap zero, it will slow down the whole instantiation significantly (often pushing from microsecond to millisecond range). This is unfortunate both because it's a cliff and because it affects <em>all</em> memory contents, not just those that exceed e.g. some bound. (In other words it's a "non-graduated" penalty: adding just one more thing penalizes all of the things, instead of just the new thing.)</p>
+<p>I was able to get close to the 50% limit with a "real" Wasm toolchain (specifically, one based on Wizer and SpiderMonkey that produces wasm binaries for services).</p>
+<p>An alternative proposed in #3815 was a simpler static limit: all data segments below some bound go into a memfd image, and those above some bound go into a list of segments to eagerly initialize on instantiation. This was rejected because it is also a cliff, but IMHO a static limit is easier to understand than a ratio, and can often also be aligned to other limits in the system (e.g. if a platform already bounds the maximum module or heap size, then it can set the memfd-image limit  to that size and get a guarantee that it will never see the slow case).</p>
+<p>In addition, we could perhaps generate the memfd image for all data segments that <em>are</em> within a limit, then only keep a sparse list of those that are out of bound. This bounds our image size to O(kMaxDenseSize) + O(|wasm|), and importantly, gives a "graduated" cost: if the module grows to slightly exceed the limit someday, then the new bytes cost more, but the whole thing doesn't get 100x slower to instantiate.</p>
+<p>cc @alexcrichton </p>
+</blockquote>
+
+
+
+<a name="313403724"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233830%20memfd%3A%20replace%20density%20heuristic%20f.../near/313403724" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233830.20memfd.3A.20replace.20density.20heuristic.20f.2E.2E.2E.html#313403724">(Dec 02 2022 at 00:13)</a>:</h4>
+<p>alexcrichton closed <a href="https://github.com/bytecodealliance/wasmtime/issues/3830">issue #3830</a>:</p>
+<blockquote>
+<p>In #3815, we saw a case where a fuzzer came up with a Wasm heap consisting of (i) a byte at address 0, and (ii) a byte at address 1 GiB. With memfd enabled, this produces a <code>.cwasm</code> with a data segment, ready to mmap, that takes a full 1GiB.</p>
+<p>We probably don't want that, so in #3819 we added some heuristics based on "density" of the data segments: if less than half the bytes are set, then the image is sparse and we don't do memfd.</p>
+<p>Unfortunately this creates a really subtle performance cliff: if the user's toolchain happens to produce a Wasm with more than 50% of its bytes in its heap zero, it will slow down the whole instantiation significantly (often pushing from microsecond to millisecond range). This is unfortunate both because it's a cliff and because it affects <em>all</em> memory contents, not just those that exceed e.g. some bound. (In other words it's a "non-graduated" penalty: adding just one more thing penalizes all of the things, instead of just the new thing.)</p>
+<p>I was able to get close to the 50% limit with a "real" Wasm toolchain (specifically, one based on Wizer and SpiderMonkey that produces wasm binaries for services).</p>
+<p>An alternative proposed in #3815 was a simpler static limit: all data segments below some bound go into a memfd image, and those above some bound go into a list of segments to eagerly initialize on instantiation. This was rejected because it is also a cliff, but IMHO a static limit is easier to understand than a ratio, and can often also be aligned to other limits in the system (e.g. if a platform already bounds the maximum module or heap size, then it can set the memfd-image limit  to that size and get a guarantee that it will never see the slow case).</p>
+<p>In addition, we could perhaps generate the memfd image for all data segments that <em>are</em> within a limit, then only keep a sparse list of those that are out of bound. This bounds our image size to O(kMaxDenseSize) + O(|wasm|), and importantly, gives a "graduated" cost: if the module grows to slightly exceed the limit someday, then the new bytes cost more, but the whole thing doesn't get 100x slower to instantiate.</p>
+<p>cc @alexcrichton </p>
+</blockquote>
+
+
+
+<a name="313403725"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%233830%20memfd%3A%20replace%20density%20heuristic%20f.../near/313403725" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.233830.20memfd.3A.20replace.20density.20heuristic.20f.2E.2E.2E.html#313403725">(Dec 02 2022 at 00:13)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/3830#issuecomment-1334604981">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/3830">issue #3830</a>:</p>
+<blockquote>
+<p>I think this was more-or-less done at the time and appears to have served us well in the meantime, so I'm going to close.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

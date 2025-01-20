@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>Hello!<br>\nWhat would involve making Cranelift support PGO? Would the current infrastructure with perf/vtune suffice?<br>\nAbout the second question, I think perf and vtune would -- with my understanding -- but currently are only capable of profiling JIT compiled modules. Actually, using libcalls, making a simple profiling scheme wouldn't be that bad, but probably redundant. <br>\nWhat do you think?</p>",
+        "id": 342372456,
+        "sender_full_name": "ghostway",
+        "timestamp": 1678985725
+    },
+    {
+        "content": "<p>it depends what kind of transforms you wanted to do informed by the profiling</p>\n<p>probably you would want to have a profiling mode of compilation that inserts counters for which way conditional branches go, what the function pointer is used as the callee of indirect calls, etc</p>\n<p>and then you need a system for mapping the results of those counters back into CLIF so that you can actually use the results in the following PGO build</p>",
+        "id": 342373643,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1678985949
+    },
+    {
+        "content": "<p>Yes, exactly. I don't know Cranelift too well, I've only read a tiny bit of its code. Do all of these have to be written?<br>\nAnyway, seems like I misunderstood the code. It looks like the vtune feature only profiles the backend itself, and not the code it is running. If that's actually the case and I'm double-misunderstanding. Then my plan would be to have a profiling pass, and make some libcalls to initialize the profiling and log them (there you don't have to map back to CLIF, because the exact spots would be marked for you). Then the PGO passes would use that metadata<br>\nThe profiling pass would, as you said, just add counters of every function and branch etc</p>",
+        "id": 342377709,
+        "sender_full_name": "ghostway",
+        "timestamp": 1678986975
+    },
+    {
+        "content": "<p>none of these things exist today, it all would need to be implemented</p>",
+        "id": 342379557,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1678987455
+    },
+    {
+        "content": "<p>I do think there's one small misunderstanding; Wasmtime's profiling support does profile the code that Cranelift generates, not just the implementation of Wasmtime and Cranelift themselves.</p>",
+        "id": 342380275,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1678987644
+    },
+    {
+        "content": "<p>If so, <a href=\"https://docs.wasmtime.dev/examples-profiling-vtune.html\">https://docs.wasmtime.dev/examples-profiling-vtune.html</a> isn't updated (apart from me not grasping the codebase yet)</p>",
+        "id": 342388646,
+        "sender_full_name": "ghostway",
+        "timestamp": 1678989969
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"598026\">@ghostway</span> can you point to where things are out of date? AFAICT that page does describe profiling the generated code (see e.g. the screenshot where \"dynamic code\" is on the stack)</p>",
+        "id": 342389277,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1678990169
+    },
+    {
+        "content": "<p>Yes, the \"dynamic code\" exists, but I'd imagine you can't browse what's in it? You don't have debug symbols it can open AFAIK. But I'd like to be wrong</p>",
+        "id": 342392396,
+        "sender_full_name": "ghostway",
+        "timestamp": 1678991094
+    },
+    {
+        "content": "<p>I've seen it work before -- it might require DWARF to be turned on for line numbers, but at least function names are present</p>",
+        "id": 342392696,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1678991190
+    },
+    {
+        "content": "<p>(in perf in my case, but the screenshot of VTune seems to show a function name \"fib\")</p>",
+        "id": 342392753,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1678991212
+    },
+    {
+        "content": "<p>Oh, indeed they do! I've missed it. If it is possible to get from that to clif and it logs all the necessary things (branches etc), then that would suffice</p>",
+        "id": 342393499,
+        "sender_full_name": "ghostway",
+        "timestamp": 1678991409
+    },
+    {
+        "content": "<p>going to CLIF is one extra step; in principle it seems like it should be possible to carry markers of some sort through, though</p>",
+        "id": 342393653,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1678991449
+    },
+    {
+        "content": "<p>If you were to make something like llvm's compiler-rt, do you have to take that trip from rust-&gt;wasm-&gt;clif (for sanitizers etc)? For profiling (if what's present currently isn't enough), you'd have to compile to wasi (which isn't that bad, probably)<br>\nAnyway, profiling in AOT would require that library/cranelift-rt (a cool name, isn't it?) to access internal structures of, for example, where the profiling data is (probably in a special section, but it has to get its address). So this might require some big changes. Or, only support JIT profiling which then can use VMContext and forward the data from there</p>",
+        "id": 342515947,
+        "sender_full_name": "ghostway",
+        "timestamp": 1679047673
+    },
+    {
+        "content": "<p>I'm not sure I understand this question.</p>\n<p>With cg-clif you can go directly from rust-&gt;clif. If you need something like compiler-rt there, you can emit additional clif functions and call them. If clif can't do what you need, you can use some form of linker to pull in native code.</p>\n<p>I don't know what profiling should look like with cg-clif. I think it might be possible to implement PGO entirely inside cg-clif, without any help from Cranelift. I think all of Wasmtime's current profiling support is also outside of Cranelift.</p>\n<p>If you're looking at a VMContext then I think you're looking at Wasmtime specifically, which passes a VM context struct pointer to every function it emits whether in JIT or AOT mode. (Even compiled AOT, Wasmtime-generated binaries can't run outside of the Wasmtime runtime.)</p>",
+        "id": 343251677,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1679358471
+    },
+    {
+        "content": "<p>With cg-clif (I imagine you mean the Cranelift backend for rust) it would be a lot easier -- I just ruled it out as something that shouldn't be used. I don't think, abstractly, you should implement PGO in the frontend. It would create some spaghetti.<br>\nDoes cg-clif respect the #[link_section] attribute (it does!)? And if so, does it in wasm map to a module (that I can then get the data from)? I tried to do this, but it actually didn't work (bug? I couldn't even see the incrementation and the module, so it's a no?)! It didn't increment the global static variable.<br>\nAbout the VMContext thing, that's cool! Already implemented something there (just a vector of counters in StoreData) but I haven't got that tested, and probably won't be able to work on it this week</p>",
+        "id": 343658517,
+        "sender_full_name": "ghostway",
+        "timestamp": 1679487336
+    },
+    {
+        "content": "<p>Cranelift currently doesn't have a wasm backend. Only a wasm frontend.</p>",
+        "id": 343703829,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1679497293
+    },
+    {
+        "content": "<p>Rust's <code>#[link_section]</code> doesn't map to anything in webassembly except in linking custon section which only exists in wasm object files to be passed to a linker and not in the final wasm module. Instead rust has the <code>#[wasm_import_module]</code> attribute to map to imported modules.</p>",
+        "id": 343704723,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1679497468
+    },
+    {
+        "content": "<p>And yes, cg_clif is the cranelift backend for rustc.</p>",
+        "id": 343705356,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1679497578
+    }
+]

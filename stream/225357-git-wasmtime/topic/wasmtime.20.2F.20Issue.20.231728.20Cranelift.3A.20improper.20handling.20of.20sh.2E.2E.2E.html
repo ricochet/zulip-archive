@@ -1,0 +1,386 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / Issue #1728 Cranelift: improper handling of sh... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231728.20Cranelift.3A.20improper.20handling.20of.20sh.2E.2E.2E.html">wasmtime / Issue #1728 Cranelift: improper handling of sh...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="198135040"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231728%20Cranelift%3A%20improper%20handling%20of%20sh.../near/198135040" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231728.20Cranelift.3A.20improper.20handling.20of.20sh.2E.2E.2E.html#198135040">(May 19 2020 at 22:28)</a>:</h4>
+<p>peterhuene opened <a href="https://github.com/bytecodealliance/wasmtime/issues/1728">Issue #1728</a>:</p>
+<blockquote>
+<ul>
+<li>What are the steps to reproduce the issue? Can you include a CLIF test case,<br>
+  ideally reduced with the <code>bugpoint</code> clif-util command?</li>
+</ul>
+<p><code>repro.clif</code>:</p>
+<div class="codehilite"><pre><span></span><code>set opt_level=speed_and_size
+set is_pic
+target x86_64 haswell
+
+function %foo() windows_fastcall {
+    fn0 = %bar(i64)
+    ss0 = explicit_slot 8
+block0:
+    v1 = stack_addr.i64 ss0
+    call fn0(v1)
+    return
+}
+</code></pre></div>
+
+
+<div class="codehilite"><pre><span></span><code>$ clif-util compile -D repro.clif
+</code></pre></div>
+
+
+<ul>
+<li>What do you expect to happen? What does actually happen? Does it panic, and<br>
+  if so, with which assertion?</li>
+</ul>
+<p>Actual output:</p>
+<div class="codehilite"><pre><span></span><code>.byte 85, 72, 137, 229, 87, 72, 131, 236, 40, 72, 141, 132, 36, 0, 0, 0, 0, 72, 137, 199, 232, 0, 0, 0, 0, 72, 131, 196, 40, 95, 93, 195
+
+Disassembly of 32 bytes:
+   0:   55                      push    rbp
+   1:   48 89 e5                mov     rbp, rsp
+   4:   57                      push    rdi
+   5:   48 83 ec 28             sub     rsp, 0x28
+   9:   48 8d 84 24 00 00 00 00 lea     rax, [rsp]
+  11:   48 89 c7                mov     rdi, rax
+  14:   e8 00 00 00 00          call    0x19
+  19:   48 83 c4 28             add     rsp, 0x28
+  1d:   5f                      pop     rdi
+  1e:   5d                      pop     rbp
+  1f:   c3                      ret
+</code></pre></div>
+
+
+<p>Note the instruction at <strong>offset 9</strong> that is loading the address of the explicit stack slot: <code>lea rax, [rsp]</code>.  The address loaded is actually <em>inside</em> the callee's 32 bytes of shadow space. </p>
+<p>I expect this instruction to actually account for the calling convention's shadow space: <code>lea rax, [rsp+0x20]</code>.</p>
+<p>Because of how we're currently saving callee-saved FPRs, we're actually saving the FPRs into this area of the stack as well, meaning that the callee might trash the caller's saved FPRs as they're allowed to use this space freely.</p>
+<p>Because Cranelift itself doesn't make use of the caller-provided shadow space, this won't happen for Cranelift-to-Cranelift calls; however, calling into external functions will certainly make use of the shadow space.</p>
+<ul>
+<li>Which Cranelift version / commit hash / branch are you using?</li>
+</ul>
+<p>26e06297957bbc06b3244bc96d2e92b4246e8d9b</p>
+<ul>
+<li>If relevant, can you include some extra information about your environment?<br>
+  (Rust version, operating system, architecture...)</li>
+</ul>
+<p>Rust: 1.43.1<br>
+Operating system: Arch Linux<br>
+Arch: x86-64</p>
+</blockquote>
+
+
+
+<a name="198135041"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231728%20Cranelift%3A%20improper%20handling%20of%20sh.../near/198135041" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231728.20Cranelift.3A.20improper.20handling.20of.20sh.2E.2E.2E.html#198135041">(May 19 2020 at 22:28)</a>:</h4>
+<p>peterhuene labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/1728">Issue #1728</a>:</p>
+<blockquote>
+<ul>
+<li>What are the steps to reproduce the issue? Can you include a CLIF test case,<br>
+  ideally reduced with the <code>bugpoint</code> clif-util command?</li>
+</ul>
+<p><code>repro.clif</code>:</p>
+<div class="codehilite"><pre><span></span><code>set opt_level=speed_and_size
+set is_pic
+target x86_64 haswell
+
+function %foo() windows_fastcall {
+    fn0 = %bar(i64)
+    ss0 = explicit_slot 8
+block0:
+    v1 = stack_addr.i64 ss0
+    call fn0(v1)
+    return
+}
+</code></pre></div>
+
+
+<div class="codehilite"><pre><span></span><code>$ clif-util compile -D repro.clif
+</code></pre></div>
+
+
+<ul>
+<li>What do you expect to happen? What does actually happen? Does it panic, and<br>
+  if so, with which assertion?</li>
+</ul>
+<p>Actual output:</p>
+<div class="codehilite"><pre><span></span><code>.byte 85, 72, 137, 229, 87, 72, 131, 236, 40, 72, 141, 132, 36, 0, 0, 0, 0, 72, 137, 199, 232, 0, 0, 0, 0, 72, 131, 196, 40, 95, 93, 195
+
+Disassembly of 32 bytes:
+   0:   55                      push    rbp
+   1:   48 89 e5                mov     rbp, rsp
+   4:   57                      push    rdi
+   5:   48 83 ec 28             sub     rsp, 0x28
+   9:   48 8d 84 24 00 00 00 00 lea     rax, [rsp]
+  11:   48 89 c7                mov     rdi, rax
+  14:   e8 00 00 00 00          call    0x19
+  19:   48 83 c4 28             add     rsp, 0x28
+  1d:   5f                      pop     rdi
+  1e:   5d                      pop     rbp
+  1f:   c3                      ret
+</code></pre></div>
+
+
+<p>Note the instruction at <strong>offset 9</strong> that is loading the address of the explicit stack slot: <code>lea rax, [rsp]</code>.  The address loaded is actually <em>inside</em> the callee's 32 bytes of shadow space. </p>
+<p>I expect this instruction to actually account for the calling convention's shadow space: <code>lea rax, [rsp+0x20]</code>.</p>
+<p>Because of how we're currently saving callee-saved FPRs, we're actually saving the FPRs into this area of the stack as well, meaning that the callee might trash the caller's saved FPRs as they're allowed to use this space freely.</p>
+<p>Because Cranelift itself doesn't make use of the caller-provided shadow space, this won't happen for Cranelift-to-Cranelift calls; however, calling into external functions will certainly make use of the shadow space.</p>
+<ul>
+<li>Which Cranelift version / commit hash / branch are you using?</li>
+</ul>
+<p>26e06297957bbc06b3244bc96d2e92b4246e8d9b</p>
+<ul>
+<li>If relevant, can you include some extra information about your environment?<br>
+  (Rust version, operating system, architecture...)</li>
+</ul>
+<p>Rust: 1.43.1<br>
+Operating system: Arch Linux<br>
+Arch: x86-64</p>
+</blockquote>
+
+
+
+<a name="198135042"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231728%20Cranelift%3A%20improper%20handling%20of%20sh.../near/198135042" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231728.20Cranelift.3A.20improper.20handling.20of.20sh.2E.2E.2E.html#198135042">(May 19 2020 at 22:28)</a>:</h4>
+<p>peterhuene labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/1728">Issue #1728</a>:</p>
+<blockquote>
+<ul>
+<li>What are the steps to reproduce the issue? Can you include a CLIF test case,<br>
+  ideally reduced with the <code>bugpoint</code> clif-util command?</li>
+</ul>
+<p><code>repro.clif</code>:</p>
+<div class="codehilite"><pre><span></span><code>set opt_level=speed_and_size
+set is_pic
+target x86_64 haswell
+
+function %foo() windows_fastcall {
+    fn0 = %bar(i64)
+    ss0 = explicit_slot 8
+block0:
+    v1 = stack_addr.i64 ss0
+    call fn0(v1)
+    return
+}
+</code></pre></div>
+
+
+<div class="codehilite"><pre><span></span><code>$ clif-util compile -D repro.clif
+</code></pre></div>
+
+
+<ul>
+<li>What do you expect to happen? What does actually happen? Does it panic, and<br>
+  if so, with which assertion?</li>
+</ul>
+<p>Actual output:</p>
+<div class="codehilite"><pre><span></span><code>.byte 85, 72, 137, 229, 87, 72, 131, 236, 40, 72, 141, 132, 36, 0, 0, 0, 0, 72, 137, 199, 232, 0, 0, 0, 0, 72, 131, 196, 40, 95, 93, 195
+
+Disassembly of 32 bytes:
+   0:   55                      push    rbp
+   1:   48 89 e5                mov     rbp, rsp
+   4:   57                      push    rdi
+   5:   48 83 ec 28             sub     rsp, 0x28
+   9:   48 8d 84 24 00 00 00 00 lea     rax, [rsp]
+  11:   48 89 c7                mov     rdi, rax
+  14:   e8 00 00 00 00          call    0x19
+  19:   48 83 c4 28             add     rsp, 0x28
+  1d:   5f                      pop     rdi
+  1e:   5d                      pop     rbp
+  1f:   c3                      ret
+</code></pre></div>
+
+
+<p>Note the instruction at <strong>offset 9</strong> that is loading the address of the explicit stack slot: <code>lea rax, [rsp]</code>.  The address loaded is actually <em>inside</em> the callee's 32 bytes of shadow space. </p>
+<p>I expect this instruction to actually account for the calling convention's shadow space: <code>lea rax, [rsp+0x20]</code>.</p>
+<p>Because of how we're currently saving callee-saved FPRs, we're actually saving the FPRs into this area of the stack as well, meaning that the callee might trash the caller's saved FPRs as they're allowed to use this space freely.</p>
+<p>Because Cranelift itself doesn't make use of the caller-provided shadow space, this won't happen for Cranelift-to-Cranelift calls; however, calling into external functions will certainly make use of the shadow space.</p>
+<ul>
+<li>Which Cranelift version / commit hash / branch are you using?</li>
+</ul>
+<p>26e06297957bbc06b3244bc96d2e92b4246e8d9b</p>
+<ul>
+<li>If relevant, can you include some extra information about your environment?<br>
+  (Rust version, operating system, architecture...)</li>
+</ul>
+<p>Rust: 1.43.1<br>
+Operating system: Arch Linux<br>
+Arch: x86-64</p>
+</blockquote>
+
+
+
+<a name="198135044"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231728%20Cranelift%3A%20improper%20handling%20of%20sh.../near/198135044" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231728.20Cranelift.3A.20improper.20handling.20of.20sh.2E.2E.2E.html#198135044">(May 19 2020 at 22:28)</a>:</h4>
+<p>peterhuene assigned <a href="https://github.com/bytecodealliance/wasmtime/issues/1728">Issue #1728</a>:</p>
+<blockquote>
+<ul>
+<li>What are the steps to reproduce the issue? Can you include a CLIF test case,<br>
+  ideally reduced with the <code>bugpoint</code> clif-util command?</li>
+</ul>
+<p><code>repro.clif</code>:</p>
+<div class="codehilite"><pre><span></span><code>set opt_level=speed_and_size
+set is_pic
+target x86_64 haswell
+
+function %foo() windows_fastcall {
+    fn0 = %bar(i64)
+    ss0 = explicit_slot 8
+block0:
+    v1 = stack_addr.i64 ss0
+    call fn0(v1)
+    return
+}
+</code></pre></div>
+
+
+<div class="codehilite"><pre><span></span><code>$ clif-util compile -D repro.clif
+</code></pre></div>
+
+
+<ul>
+<li>What do you expect to happen? What does actually happen? Does it panic, and<br>
+  if so, with which assertion?</li>
+</ul>
+<p>Actual output:</p>
+<div class="codehilite"><pre><span></span><code>.byte 85, 72, 137, 229, 87, 72, 131, 236, 40, 72, 141, 132, 36, 0, 0, 0, 0, 72, 137, 199, 232, 0, 0, 0, 0, 72, 131, 196, 40, 95, 93, 195
+
+Disassembly of 32 bytes:
+   0:   55                      push    rbp
+   1:   48 89 e5                mov     rbp, rsp
+   4:   57                      push    rdi
+   5:   48 83 ec 28             sub     rsp, 0x28
+   9:   48 8d 84 24 00 00 00 00 lea     rax, [rsp]
+  11:   48 89 c7                mov     rdi, rax
+  14:   e8 00 00 00 00          call    0x19
+  19:   48 83 c4 28             add     rsp, 0x28
+  1d:   5f                      pop     rdi
+  1e:   5d                      pop     rbp
+  1f:   c3                      ret
+</code></pre></div>
+
+
+<p>Note the instruction at <strong>offset 9</strong> that is loading the address of the explicit stack slot: <code>lea rax, [rsp]</code>.  The address loaded is actually <em>inside</em> the callee's 32 bytes of shadow space. </p>
+<p>I expect this instruction to actually account for the calling convention's shadow space: <code>lea rax, [rsp+0x20]</code>.</p>
+<p>Because of how we're currently saving callee-saved FPRs, we're actually saving the FPRs into this area of the stack as well, meaning that the callee might trash the caller's saved FPRs as they're allowed to use this space freely.</p>
+<p>Because Cranelift itself doesn't make use of the caller-provided shadow space, this won't happen for Cranelift-to-Cranelift calls; however, calling into external functions will certainly make use of the shadow space.</p>
+<ul>
+<li>Which Cranelift version / commit hash / branch are you using?</li>
+</ul>
+<p>26e06297957bbc06b3244bc96d2e92b4246e8d9b</p>
+<ul>
+<li>If relevant, can you include some extra information about your environment?<br>
+  (Rust version, operating system, architecture...)</li>
+</ul>
+<p>Rust: 1.43.1<br>
+Operating system: Arch Linux<br>
+Arch: x86-64</p>
+</blockquote>
+
+
+
+<a name="198135055"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231728%20Cranelift%3A%20improper%20handling%20of%20sh.../near/198135055" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231728.20Cranelift.3A.20improper.20handling.20of.20sh.2E.2E.2E.html#198135055">(May 19 2020 at 22:28)</a>:</h4>
+<p>github-actions[bot] <a href="https://github.com/bytecodealliance/wasmtime/issues/1728#issuecomment-631117595">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1728">Issue #1728</a>:</p>
+<blockquote>
+<h4>Subscribe to Label Action</h4>
+<p>cc @bnjbvr</p>
+<p>&lt;details&gt;<br>
+This issue or pull request has been labeled: "cranelift"</p>
+<p>Thus the following users have been cc'd because of the following labels:</p>
+<ul>
+<li>bnjbvr: cranelift</li>
+</ul>
+<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>
+<p><a href="https://github.com/bytecodealliance/subscribe-to-label-action">Learn more.</a><br>
+&lt;/details&gt;</p>
+</blockquote>
+
+
+
+<a name="198135557"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231728%20Cranelift%3A%20improper%20handling%20of%20sh.../near/198135557" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231728.20Cranelift.3A.20improper.20handling.20of.20sh.2E.2E.2E.html#198135557">(May 19 2020 at 22:34)</a>:</h4>
+<p>peterhuene <a href="https://github.com/bytecodealliance/wasmtime/issues/1728#issuecomment-631121380">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1728">Issue #1728</a>:</p>
+<blockquote>
+<p>Note that I'm currently in the process of fixing where we store callee saved FPRs as they should not be stored as explicit slots.</p>
+</blockquote>
+
+
+
+<a name="198482113"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231728%20Cranelift%3A%20improper%20handling%20of%20sh.../near/198482113" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231728.20Cranelift.3A.20improper.20handling.20of.20sh.2E.2E.2E.html#198482113">(May 22 2020 at 19:06)</a>:</h4>
+<p>peterhuene closed <a href="https://github.com/bytecodealliance/wasmtime/issues/1728">Issue #1728</a> (assigned to peterhuene):</p>
+<blockquote>
+<ul>
+<li>What are the steps to reproduce the issue? Can you include a CLIF test case,<br>
+  ideally reduced with the <code>bugpoint</code> clif-util command?</li>
+</ul>
+<p><code>repro.clif</code>:</p>
+<div class="codehilite"><pre><span></span><code>set opt_level=speed_and_size
+set is_pic
+target x86_64 haswell
+
+function %foo() windows_fastcall {
+    fn0 = %bar(i64)
+    ss0 = explicit_slot 8
+block0:
+    v1 = stack_addr.i64 ss0
+    call fn0(v1)
+    return
+}
+</code></pre></div>
+
+
+<div class="codehilite"><pre><span></span><code>$ clif-util compile -D repro.clif
+</code></pre></div>
+
+
+<ul>
+<li>What do you expect to happen? What does actually happen? Does it panic, and<br>
+  if so, with which assertion?</li>
+</ul>
+<p>Actual output:</p>
+<div class="codehilite"><pre><span></span><code>.byte 85, 72, 137, 229, 87, 72, 131, 236, 40, 72, 141, 132, 36, 0, 0, 0, 0, 72, 137, 199, 232, 0, 0, 0, 0, 72, 131, 196, 40, 95, 93, 195
+
+Disassembly of 32 bytes:
+   0:   55                      push    rbp
+   1:   48 89 e5                mov     rbp, rsp
+   4:   57                      push    rdi
+   5:   48 83 ec 28             sub     rsp, 0x28
+   9:   48 8d 84 24 00 00 00 00 lea     rax, [rsp]
+  11:   48 89 c7                mov     rdi, rax
+  14:   e8 00 00 00 00          call    0x19
+  19:   48 83 c4 28             add     rsp, 0x28
+  1d:   5f                      pop     rdi
+  1e:   5d                      pop     rbp
+  1f:   c3                      ret
+</code></pre></div>
+
+
+<p>Note the instruction at <strong>offset 9</strong> that is loading the address of the explicit stack slot: <code>lea rax, [rsp]</code>.  The address loaded is actually <em>inside</em> the callee's 32 bytes of shadow space. </p>
+<p>I expect this instruction to actually account for the calling convention's shadow space: <code>lea rax, [rsp+0x20]</code>.</p>
+<p>Because of how we're currently saving callee-saved FPRs, we're actually saving the FPRs into this area of the stack as well, meaning that the callee might trash the caller's saved FPRs as they're allowed to use this space freely.</p>
+<p>Because Cranelift itself doesn't make use of the caller-provided shadow space, this won't happen for Cranelift-to-Cranelift calls; however, calling into external functions will certainly make use of the shadow space.</p>
+<ul>
+<li>Which Cranelift version / commit hash / branch are you using?</li>
+</ul>
+<p>26e06297957bbc06b3244bc96d2e92b4246e8d9b</p>
+<ul>
+<li>If relevant, can you include some extra information about your environment?<br>
+  (Rust version, operating system, architecture...)</li>
+</ul>
+<p>Rust: 1.43.1<br>
+Operating system: Arch Linux<br>
+Arch: x86-64</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

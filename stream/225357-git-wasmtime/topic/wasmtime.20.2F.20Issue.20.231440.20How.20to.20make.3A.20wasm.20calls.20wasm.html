@@ -1,0 +1,385 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / Issue #1440 How to make: wasm calls wasm · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231440.20How.20to.20make.3A.20wasm.20calls.20wasm.html">wasmtime / Issue #1440 How to make: wasm calls wasm</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="192358816"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231440%20How%20to%20make%3A%20wasm%20calls%20wasm/near/192358816" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231440.20How.20to.20make.3A.20wasm.20calls.20wasm.html#192358816">(Mar 31 2020 at 08:32)</a>:</h4>
+<p>aleksmelnikov opened <a href="https://github.com/bytecodealliance/wasmtime/issues/1440" title="https://github.com/bytecodealliance/wasmtime/issues/1440">Issue #1440</a>:</p>
+<blockquote>
+<p>Hi,<br>
+please advise me how to make:</p>
+<ol>
+<li>I created a simple library crate:</li>
+</ol>
+<div class="codehilite"><pre><span></span>$cat a/src/lib.rs
+
+#[no_mangle]
+pub extern &quot;C&quot; fn funca() {
+   println!(&quot;funca&quot;);
+}
+
+#[no_mangle]
+pub extern &quot;C&quot; fn _start() {
+}
+</pre></div>
+
+
+<p>And compiled it:<br>
+<code>cargo build --manifest-path=a/Cargo.toml --target=wasm32-wasi</code></p>
+<p>I can invoke <code>funca</code>:</p>
+<div class="codehilite"><pre><span></span>$wasmtime run --invoke funca a/target/wasm32-wasi/debug/a.wasm
+funca
+</pre></div>
+
+
+<ol start="2">
+<li>I created a simple binary crate:</li>
+</ol>
+<div class="codehilite"><pre><span></span>$cat d/src/main.rs
+
+use anyhow::Result;
+use wasmtime::*;
+use wasmtime_wasi::{Wasi, WasiCtx};
+
+fn main() -&gt; Result&lt;()&gt; {
+    let store = Store::default();
+    let module = Module::from_file(&amp;store, &quot;/at/rust/wasmer/a/target/wasm32-wasi/debug/a.wasm&quot;)?;
+    let wasi = Wasi::new(&amp;store, WasiCtx::new(std::env::args())?);
+    let mut imports = Vec::new();
+    for import in module.imports() {
+        if import.module() == &quot;wasi_snapshot_preview1&quot; {
+            if let Some(export) = wasi.get_export(import.name()) {
+                imports.push(Extern::from(export.clone()));
+                continue;
+            }
+        }
+        panic!(
+            &quot;couldn&#39;t find import for `{}::{}`&quot;,
+            import.module(),
+            import.name()
+        );
+    }
+
+    let instance = Instance::new(&amp;module, &amp;imports)?;
+
+    // 1
+/*
+    let start = instance
+        .get_export(&quot;_start&quot;)
+        .and_then(|e| e.func())
+        .unwrap();
+    let start = start.get0::&lt;()&gt;()?;
+    start()?;
+*/
+    // 2
+    let funca = instance
+        .get_export(&quot;funca&quot;)
+        .expect(&quot;export named `answer` not found&quot;)
+        .func()
+        .expect(&quot;export `answer` was not a function&quot;);
+    let funca = funca.get0::&lt;()&gt;()?;
+    funca()?;
+
+    Ok(())
+}
+</pre></div>
+
+
+<p>And compiled it:<br>
+<code>cargo build --manifest-path=d/Cargo.toml</code></p>
+<p>I ran it and got:</p>
+<div class="codehilite"><pre><span></span>$cargo run --manifest-path=d/Cargo.toml
+funca
+</pre></div>
+
+
+<p>Good! Now I want change d from binary crate to library crate. So, I want wasm lib calls wasm lib.<br>
+The first, I tried to compile my bin crate with <code>--target=wasm32-wasi</code> to get <code>wasm</code> and failed:</p>
+<div class="codehilite"><pre><span></span>$cargo +nightly build --manifest-path=d/Cargo.toml --target=wasm32-wasi
+
+   Compiling wat v1.0.13
+   Compiling jobserver v0.1.21
+   Compiling generic-array v0.12.3
+   Compiling region v2.1.2
+   Compiling gimli v0.20.0
+error[E0425]: cannot find function `lock` in module `os`
+  --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/lock.rs:30:7
+   |
+30 |   os::lock(
+   |       ^^^^ not found in `os`
+   |
+help: possible candidate is found in another module, you can import it into scope
+   |
+1  | use lock::lock;
+   |
+
+error[E0425]: cannot find function `unlock` in module `os`
+  --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/lock.rs:58:7
+   |
+58 |   os::unlock(
+   |       ^^^^^^ not found in `os`
+   |
+help: possible candidate is found in another module, you can import it into scope
+   |
+1  | use lock::unlock;
+   |
+
+error[E0425]: cannot find function `page_size` in module `os`
+  --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/page.rs:16:39
+   |
+16 |     INIT.call_once(|| PAGE_SIZE = os::page_size());
+   |                                       ^^^^^^^^^ not found in `os`
+
+error[E0425]: cannot find function `set_protection` in module `os`
+  --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/protect.rs:40:7
+   |
+40 |   os::set_protection(
+   |       ^^^^^^^^^^^^^^ not found in `os`
+
+error[E0425]: cannot find function `get_region` in module `os`
+   --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/lib.rs:133:7
+    |
+133 |   os::get_region(page::floor(address as usize) as *const u8)
+    |       ^^^^^^^^^^ not found in `os`
+
+error: aborting due to 5 previous errors
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `region`.
+
+To learn more, run the command again with --verbose.
+warning: build failed, waiting for other jobs to finish...
+error: build failed
+</pre></div>
+
+
+<p>So, I think doesn't <code>region</code> support <code>--target=wasm32-wasi</code>? How to create wasm calls wasm?</p>
+</blockquote>
+
+
+
+<a name="192374392"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231440%20How%20to%20make%3A%20wasm%20calls%20wasm/near/192374392" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231440.20How.20to.20make.3A.20wasm.20calls.20wasm.html#192374392">(Mar 31 2020 at 11:11)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606561136" title="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606561136">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1440" title="https://github.com/bytecodealliance/wasmtime/issues/1440">Issue #1440</a>:</p>
+<blockquote>
+<p>You can't compile <code>wasmtime</code> for wasm, as wasm doesn't allow any JIT compilation. What do you want to actually do?</p>
+</blockquote>
+
+
+
+<a name="192395766"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231440%20How%20to%20make%3A%20wasm%20calls%20wasm/near/192395766" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231440.20How.20to.20make.3A.20wasm.20calls.20wasm.html#192395766">(Mar 31 2020 at 14:19)</a>:</h4>
+<p>aleksmelnikov <a href="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606657764" title="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606657764">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1440" title="https://github.com/bytecodealliance/wasmtime/issues/1440">Issue #1440</a>:</p>
+<blockquote>
+<p>@bjorn3 , ok. Thank you for the notes about <code>wasmtime</code>. I see my mistake.</p>
+</blockquote>
+
+
+
+<a name="192396244"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231440%20How%20to%20make%3A%20wasm%20calls%20wasm/near/192396244" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231440.20How.20to.20make.3A.20wasm.20calls.20wasm.html#192396244">(Mar 31 2020 at 14:23)</a>:</h4>
+<p>aleksmelnikov closed <a href="https://github.com/bytecodealliance/wasmtime/issues/1440" title="https://github.com/bytecodealliance/wasmtime/issues/1440">Issue #1440</a>:</p>
+<blockquote>
+<p>Hi,<br>
+please advise me how to make:</p>
+<ol>
+<li>I created a simple library crate:</li>
+</ol>
+<div class="codehilite"><pre><span></span>$cat a/src/lib.rs
+
+#[no_mangle]
+pub extern &quot;C&quot; fn funca() {
+   println!(&quot;funca&quot;);
+}
+
+#[no_mangle]
+pub extern &quot;C&quot; fn _start() {
+}
+</pre></div>
+
+
+<p>And compiled it:<br>
+<code>cargo build --manifest-path=a/Cargo.toml --target=wasm32-wasi</code></p>
+<p>I can invoke <code>funca</code>:</p>
+<div class="codehilite"><pre><span></span>$wasmtime run --invoke funca a/target/wasm32-wasi/debug/a.wasm
+funca
+</pre></div>
+
+
+<ol start="2">
+<li>I created a simple binary crate:</li>
+</ol>
+<div class="codehilite"><pre><span></span>$cat d/src/main.rs
+
+use anyhow::Result;
+use wasmtime::*;
+use wasmtime_wasi::{Wasi, WasiCtx};
+
+fn main() -&gt; Result&lt;()&gt; {
+    let store = Store::default();
+    let module = Module::from_file(&amp;store, &quot;/at/rust/wasmer/a/target/wasm32-wasi/debug/a.wasm&quot;)?;
+    let wasi = Wasi::new(&amp;store, WasiCtx::new(std::env::args())?);
+    let mut imports = Vec::new();
+    for import in module.imports() {
+        if import.module() == &quot;wasi_snapshot_preview1&quot; {
+            if let Some(export) = wasi.get_export(import.name()) {
+                imports.push(Extern::from(export.clone()));
+                continue;
+            }
+        }
+        panic!(
+            &quot;couldn&#39;t find import for `{}::{}`&quot;,
+            import.module(),
+            import.name()
+        );
+    }
+
+    let instance = Instance::new(&amp;module, &amp;imports)?;
+
+    // 1
+/*
+    let start = instance
+        .get_export(&quot;_start&quot;)
+        .and_then(|e| e.func())
+        .unwrap();
+    let start = start.get0::&lt;()&gt;()?;
+    start()?;
+*/
+    // 2
+    let funca = instance
+        .get_export(&quot;funca&quot;)
+        .expect(&quot;export named `answer` not found&quot;)
+        .func()
+        .expect(&quot;export `answer` was not a function&quot;);
+    let funca = funca.get0::&lt;()&gt;()?;
+    funca()?;
+
+    Ok(())
+}
+</pre></div>
+
+
+<p>And compiled it:<br>
+<code>cargo build --manifest-path=d/Cargo.toml</code></p>
+<p>I ran it and got:</p>
+<div class="codehilite"><pre><span></span>$cargo run --manifest-path=d/Cargo.toml
+funca
+</pre></div>
+
+
+<p>Good! Now I want change d from binary crate to library crate. So, I want wasm lib calls wasm lib.<br>
+The first, I tried to compile my bin crate with <code>--target=wasm32-wasi</code> to get <code>wasm</code> and failed:</p>
+<div class="codehilite"><pre><span></span>$cargo +nightly build --manifest-path=d/Cargo.toml --target=wasm32-wasi
+
+   Compiling wat v1.0.13
+   Compiling jobserver v0.1.21
+   Compiling generic-array v0.12.3
+   Compiling region v2.1.2
+   Compiling gimli v0.20.0
+error[E0425]: cannot find function `lock` in module `os`
+  --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/lock.rs:30:7
+   |
+30 |   os::lock(
+   |       ^^^^ not found in `os`
+   |
+help: possible candidate is found in another module, you can import it into scope
+   |
+1  | use lock::lock;
+   |
+
+error[E0425]: cannot find function `unlock` in module `os`
+  --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/lock.rs:58:7
+   |
+58 |   os::unlock(
+   |       ^^^^^^ not found in `os`
+   |
+help: possible candidate is found in another module, you can import it into scope
+   |
+1  | use lock::unlock;
+   |
+
+error[E0425]: cannot find function `page_size` in module `os`
+  --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/page.rs:16:39
+   |
+16 |     INIT.call_once(|| PAGE_SIZE = os::page_size());
+   |                                       ^^^^^^^^^ not found in `os`
+
+error[E0425]: cannot find function `set_protection` in module `os`
+  --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/protect.rs:40:7
+   |
+40 |   os::set_protection(
+   |       ^^^^^^^^^^^^^^ not found in `os`
+
+error[E0425]: cannot find function `get_region` in module `os`
+   --&gt; /opt/rust/cargo/registry/src/github.com-1ecc6299db9ec823/region-2.1.2/src/lib.rs:133:7
+    |
+133 |   os::get_region(page::floor(address as usize) as *const u8)
+    |       ^^^^^^^^^^ not found in `os`
+
+error: aborting due to 5 previous errors
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `region`.
+
+To learn more, run the command again with --verbose.
+warning: build failed, waiting for other jobs to finish...
+error: build failed
+</pre></div>
+
+
+<p>So, I think doesn't <code>region</code> support <code>--target=wasm32-wasi</code>? How to create wasm calls wasm?</p>
+</blockquote>
+
+
+
+<a name="192405487"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231440%20How%20to%20make%3A%20wasm%20calls%20wasm/near/192405487" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231440.20How.20to.20make.3A.20wasm.20calls.20wasm.html#192405487">(Mar 31 2020 at 15:29)</a>:</h4>
+<p>yurydelendik <a href="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606699557" title="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606699557">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1440" title="https://github.com/bytecodealliance/wasmtime/issues/1440">Issue #1440</a>:</p>
+<blockquote>
+<p>Per zullip chat, more notes:</p>
+<p>-<code>wasmtime-cli</code> does not have a way to configure a linking, (<code>--preload</code> is not a parameter that does that)</p>
+<ul>
+<li>it is expected that <code>wasmtime-cli</code> will automatically resolve and load dependent modules.</li>
+<li>currently, the embedding (e.g. <a href="https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs" title="https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs">https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs</a>) is easiest way to do that</li>
+</ul>
+</blockquote>
+
+
+
+<a name="192405516"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231440%20How%20to%20make%3A%20wasm%20calls%20wasm/near/192405516" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231440.20How.20to.20make.3A.20wasm.20calls.20wasm.html#192405516">(Mar 31 2020 at 15:29)</a>:</h4>
+<p>yurydelendik edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606699557" title="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606699557">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1440" title="https://github.com/bytecodealliance/wasmtime/issues/1440">Issue #1440</a>:</p>
+<blockquote>
+<p>Per zullip chat, more notes:</p>
+<ul>
+<li><code>wasmtime-cli</code> does not have a way to configure a linking, (<code>--preload</code> is not a parameter that does that)</li>
+<li>it is expected that <code>wasmtime-cli</code> will automatically resolve and load dependent modules.</li>
+<li>currently, the embedding (e.g. <a href="https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs" title="https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs">https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs</a>) is easiest way to do that</li>
+</ul>
+</blockquote>
+
+
+
+<a name="192405576"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231440%20How%20to%20make%3A%20wasm%20calls%20wasm/near/192405576" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231440.20How.20to.20make.3A.20wasm.20calls.20wasm.html#192405576">(Mar 31 2020 at 15:30)</a>:</h4>
+<p>yurydelendik edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606699557" title="https://github.com/bytecodealliance/wasmtime/issues/1440#issuecomment-606699557">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1440" title="https://github.com/bytecodealliance/wasmtime/issues/1440">Issue #1440</a>:</p>
+<blockquote>
+<p>Per zullip chat, more notes:</p>
+<ul>
+<li><code>wasmtime-cli</code> does not have a way to configure linking, (<code>--preload</code> is not a parameter that does that)</li>
+<li>it is expected that <code>wasmtime-cli</code> will automatically resolve and load dependent modules.</li>
+<li>currently, the embedding (e.g. <a href="https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs" title="https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs">https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs</a>) is easiest way to do that</li>
+</ul>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

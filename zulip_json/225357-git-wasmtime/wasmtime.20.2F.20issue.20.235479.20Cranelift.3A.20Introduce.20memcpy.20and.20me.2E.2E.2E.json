@@ -1,0 +1,50 @@
+[
+    {
+        "content": "<p>bjorn3 opened <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">issue #5479</a>:</p>\n<blockquote>\n<h4>Feature</h4>\n<p>Introduce instructions that behave like memcpy and memset. These should lower to <code>repe movsb</code> and <code>repe stosb</code> for memcpy and memset respectively on x86_64 with the ermsb feature. According to <a href=\"https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/arm-a-profile-architecture-developments-2021\">https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/arm-a-profile-architecture-developments-2021</a> there is also an AArch64 extension for this, but I couldn't find more details.</p>\n<h4>Benefit</h4>\n<p>Using a native instruction reduces instruction cache bloat and may be faster in some cases. It may also help future optimizations with recognizing these operations as such to allow optimizing them away in some cases. This is very important for runtime performance of rust code as rustc generates a lot of unnecessary copies of locals.</p>\n<h4>Implementation</h4>\n<p>The instructions should take an immediate as size argument and be lowered to native instructions if available, or as libcalls to an external memcpy or memset function.</p>\n</blockquote>",
+        "id": 316910257,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1671529610
+    },
+    {
+        "content": "<p>bjorn3 edited <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">issue #5479</a>:</p>\n<blockquote>\n<h4>Feature</h4>\n<p>Introduce instructions that behave like memcpy and memset. These should lower to <code>repe movsb</code> and <code>repe stosb</code> for memcpy and memset respectively on x86_64 with the ermsb feature. According to <a href=\"https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/arm-a-profile-architecture-developments-2021\">https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/arm-a-profile-architecture-developments-2021</a> there is also an AArch64 extension for this, but I couldn't find more details.</p>\n<h4>Benefit</h4>\n<p>Using a native instruction reduces instruction cache bloat and may be faster in some cases. It may also help future optimizations with recognizing these operations as such to allow optimizing them away in some cases. This is very important for runtime performance of rust code as rustc generates a lot of unnecessary copies of locals.</p>\n<h4>Implementation</h4>\n<p>The instructions should take an immediate as size argument and be lowered to native instructions if available, or as libcalls to an external memcpy or memset function if not available.</p>\n</blockquote>",
+        "id": 316910291,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1671529623
+    },
+    {
+        "content": "<p>jameysharp <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479#issuecomment-1360359274\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">issue #5479</a>:</p>\n<blockquote>\n<p>I have a few notes if somebody else takes this on. (I suspect bjorn3 already knows all this, having written some of it.)</p>\n<p>In Cranelift, the <code>ABIMachineSpec</code> trait implemented by backends has a <code>gen_memcpy</code> method. It's used during codegen for function calls by <code>Caller::emit_copy_regs_to_buffer</code>, so I suspect it's well-covered by tests. On x86 and aarch64 it always calls the library <code>memcpy</code> function, but since it's backend-specific it could do something else. (I didn't check the other backends, but they're probably the same.) Making this code available to frontends like cg-clif sounds good to me.</p>\n<p>The <a href=\"https://docs.rs/cranelift-frontend/latest/cranelift_frontend/struct.FunctionBuilder.html\"><code>cranelift_frontend::FunctionBuilder</code></a> type has methods <code>call_mem{cmp,cpy,move,set}</code> for unconditionally emitting a library call. It also offers <code>emit_small_{memory_compare,memory_copy,memset}</code> to generate an unrolled CLIF loop for buffers smaller than a threshold, falling back to using <code>call_*</code> for larger buffers. I don't see any significant uses of any of these functions in Cranelift or Wasmtime, at any time in the git history. So they probably aren't well tuned and might not even work in general.</p>\n<p>I think you're right that the best way to expose these is with CLIF instructions, rather than <code>cranelift_frontend</code> methods. But I'm curious if anybody (like @cfallin?) has other suggestions.</p>\n</blockquote>",
+        "id": 317045079,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1671572554
+    },
+    {
+        "content": "<p>bjorn3 <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479#issuecomment-1360369539\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">issue #5479</a>:</p>\n<blockquote>\n<p>I use emit_small_* once in cg_clif. It is definitively not well tuned though. It doesn't support copying 128bit chunks using xmm registers for example.</p>\n</blockquote>",
+        "id": 317046141,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1671573000
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479#issuecomment-1360433660\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">issue #5479</a>:</p>\n<blockquote>\n<p>Yeah, I think it's reasonable to create CLIF opcodes for these. memcpy/memset are among the canonical primitives you usually get in a compiler's intrinsics; we don't have a separate notion of intrinsic calls, so new opcodes are the way forward. This would then give us one central implementation we could use where needed (e.g. for struct args on the stack, as noted above) and that we could optimize well.</p>\n</blockquote>",
+        "id": 317056858,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1671577770
+    },
+    {
+        "content": "<p>jameysharp <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479#issuecomment-1380890437\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">issue #5479</a>:</p>\n<blockquote>\n<p>In #5564, @Kixiron suggested that these cranelift-frontend functions ought to take separate <code>MemFlags</code> for each address operand. I think that's a good suggestion, but that we should do it with these new proposed instructions instead of putting any more development into the cranelift-frontend versions.</p>\n</blockquote>",
+        "id": 321014774,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1673550952
+    },
+    {
+        "content": "<p>Kixiron <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479#issuecomment-1380895637\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">issue #5479</a>:</p>\n<blockquote>\n<p>I agree, cranelift-native instructions for memcpy/memset (probably memcmp too, though that's not mentioned here?) is definitely an overall better approach</p>\n</blockquote>",
+        "id": 321015217,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1673551110
+    },
+    {
+        "content": "<p>Kixiron edited a <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479#issuecomment-1380895637\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/5479\">issue #5479</a>:</p>\n<blockquote>\n<p>I agree, cranelift-native instructions for memcpy/memset (probably memcmp too, though that's not mentioned here?) is definitely an overall better approach since it'd allow everything that the current approach does and some, like automatically lowering calls with known lengths to unrolled versions (essentially giving us <code>emit_small_*</code> for free, but also applicable to const-eval'd and dataflow scenarios)</p>\n</blockquote>",
+        "id": 321015518,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1673551206
+    }
+]

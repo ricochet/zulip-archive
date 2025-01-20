@@ -1,0 +1,160 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #4829 Cranelift: Deduplicate ABI signatures... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html">wasmtime / PR #4829 Cranelift: Deduplicate ABI signatures...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="296243537"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296243537" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296243537">(Aug 31 2022 at 01:19)</a>:</h4>
+<p><strong>fitzgen</strong> requested <a href="https://github.com/cfallin">cfallin</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/4829">PR #4829</a>.</p>
+
+
+
+<a name="296243538"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296243538" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296243538">(Aug 31 2022 at 01:19)</a>:</h4>
+<p>fitzgen opened <a href="https://github.com/bytecodealliance/wasmtime/pull/4829">PR #4829</a> from <code>dedupe-abi-signatures</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit creates the <code>SigSet</code> type which interns and deduplicates the ABI<br>
+signatures that we create from <code>ir::Signature</code>s. The ABI signatures are now<br>
+referred to indirectly via a <code>Sig</code> (which is a <code>cranelift_entity</code> ID), and we<br>
+pass around a <code>SigSet</code> to anything that needs to access the actual underlying<br>
+<code>SigData</code> (which is what <code>ABISig</code> used to be).</p>
+<p>I had to change a couple methods to return a <code>SmallInstVec</code> instead of emitting<br>
+directly to work around what would otherwise be shared and exclusive borrows of<br>
+the lowering context overlapping. I don't expect any of these to heap allocate<br>
+in practice.</p>
+<p>This does not remove the often-unnecessary allocations caused by<br>
+<code>ensure_struct_return_ptr_is_returned</code>. That is left for follow up work.</p>
+<p>This also opens the door for further shuffling of signature data into more<br>
+efficient representations in the future, now that we have <code>SigSet</code> to store it<br>
+all in one place and it is threaded through all the code. We could potentially<br>
+move each signature's parameter and return vectors into one big vector shared<br>
+between all signatures, for example, which could cut down on allocations and<br>
+shrink the size of <code>SigData</code> since those <code>SmallVec</code>s have pretty large inline<br>
+capacity.</p>
+<p>Overall, this refactoring gives a 1-7% speedup for compilation on<br>
+<code>pulldown-cmark</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="w"></span>
+
+<span class="w">  </span><span class="err">Δ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">8754213.66</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">7526266.23</span><span class="w"> </span><span class="p">(</span><span class="n">confidence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">99</span><span class="o">%</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">dedupe</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mf">1.01</span><span class="n">x</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mf">1.07</span><span class="n">x</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">so</span><span class="o">!</span><span class="w"></span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">191003295</span><span class="w"> </span><span class="mf">234620642.20</span><span class="w"> </span><span class="mi">280597986</span><span class="p">]</span><span class="w"> </span><span class="n">dedupe</span><span class="p">.</span><span class="n">so</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="mi">197626699</span><span class="w"> </span><span class="mf">243374855.86</span><span class="w"> </span><span class="mi">321816763</span><span class="p">]</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">so</span><span class="w"></span>
+
+<span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">bz2</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span><span class="w"></span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">170406200</span><span class="w"> </span><span class="mf">194299792.68</span><span class="w"> </span><span class="mi">253001201</span><span class="p">]</span><span class="w"> </span><span class="n">dedupe</span><span class="p">.</span><span class="n">so</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="mi">172071888</span><span class="w"> </span><span class="mf">193230743.11</span><span class="w"> </span><span class="mi">223608329</span><span class="p">]</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">so</span><span class="w"></span>
+
+<span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span><span class="w"></span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">3870997347</span><span class="w"> </span><span class="mf">4437735062.59</span><span class="w"> </span><span class="mi">5216007266</span><span class="p">]</span><span class="w"> </span><span class="n">dedupe</span><span class="p">.</span><span class="n">so</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="mi">4019924063</span><span class="w"> </span><span class="mf">4424595349.24</span><span class="w"> </span><span class="mi">4965088931</span><span class="p">]</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">so</span><span class="w"></span>
+</code></pre></div>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="296403333"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296403333" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296403333">(Aug 31 2022 at 16:36)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4829">PR #4829</a> from <code>dedupe-abi-signatures</code> to <code>main</code>.</p>
+
+
+
+<a name="296421872"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296421872" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296421872">(Aug 31 2022 at 18:13)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4829#pullrequestreview-1092307061">PR review</a>.</p>
+
+
+
+<a name="296421873"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296421873" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296421873">(Aug 31 2022 at 18:13)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4829#pullrequestreview-1092307061">PR review</a>.</p>
+
+
+
+<a name="296421875"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296421875" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296421875">(Aug 31 2022 at 18:13)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4829#discussion_r959881058">PR review comment</a>:</p>
+<blockquote>
+<p>Is there any way that we can stuff the <code>SigSet</code> into the <code>VCode</code>? It seems like maybe it is held separately here because of borrow-checker issues but maybe we can work around that if so.</p>
+</blockquote>
+
+
+
+<a name="296427086"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296427086" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296427086">(Aug 31 2022 at 18:42)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4829">PR #4829</a> from <code>dedupe-abi-signatures</code> to <code>main</code>.</p>
+
+
+
+<a name="296427235"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296427235" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296427235">(Aug 31 2022 at 18:43)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4829#pullrequestreview-1092344036">PR review</a>.</p>
+
+
+
+<a name="296427236"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296427236" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296427236">(Aug 31 2022 at 18:43)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4829#discussion_r959907011">PR review comment</a>:</p>
+<blockquote>
+<p>Done! Required a little bit of plumbing accessors through so things that have a <code>Lower</code> could access the <code>Lower</code>'s <code>VCodeBuilder</code>'s <code>VCode</code>'s <code>SigSet</code> but it was ultimately a nice clean up.</p>
+</blockquote>
+
+
+
+<a name="296427271"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296427271" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296427271">(Aug 31 2022 at 18:43)</a>:</h4>
+<p>fitzgen has enabled auto merge for <a href="https://github.com/bytecodealliance/wasmtime/pull/4829">PR #4829</a>.</p>
+
+
+
+<a name="296433789"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296433789" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296433789">(Aug 31 2022 at 19:23)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4829">PR #4829</a> from <code>dedupe-abi-signatures</code> to <code>main</code>.</p>
+
+
+
+<a name="296445812"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234829%20Cranelift%3A%20Deduplicate%20ABI%20signatures.../near/296445812" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234829.20Cranelift.3A.20Deduplicate.20ABI.20signatures.2E.2E.2E.html#296445812">(Aug 31 2022 at 20:39)</a>:</h4>
+<p>fitzgen merged <a href="https://github.com/bytecodealliance/wasmtime/pull/4829">PR #4829</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

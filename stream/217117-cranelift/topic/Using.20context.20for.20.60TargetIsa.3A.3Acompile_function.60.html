@@ -1,0 +1,720 @@
+<html>
+<head><meta charset="utf-8"><title>Using context for `TargetIsa::compile_function` · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html">Using context for `TargetIsa::compile_function`</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="471771740"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471771740" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471771740">(Sep 20 2024 at 16:14)</a>:</h4>
+<p>Hello there,</p>
+<p>I was wondering why <code>TargetIsa::compile_function</code> does not take a context argument? There are already more frontend-facing APIs that use context with reusable allocations to optimize compilation, from looking into what happens inside each Isa lowering stage, there are many places where resources can be reused.</p>
+<p>My guess is that it's because <code>TargetIsa</code> is immutable but this is not a difficult problem to work around. The backend context can look something like this: </p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span><span class="w"> </span><span class="nc">IsaCtx</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// can be smallvec</span>
+<span class="w">    </span><span class="n">ctxs</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">std</span><span class="p">::</span><span class="n">any</span><span class="p">::</span><span class="n">Any</span><span class="o">&gt;&gt;</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">IsaCtx</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// this is easier to use since you don't need to worry about passing context to wrong isa</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">get_ctx</span><span class="o">&lt;</span><span class="n">T</span><span class="p">:</span><span class="w"> </span><span class="o">'</span><span class="nb">static</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">or_insert</span><span class="p">:</span><span class="w"> </span><span class="nc">impl</span><span class="w"> </span><span class="nb">FnOnce</span><span class="p">()</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">T</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="n">T</span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// rust is stpd and does not let me use find_map</span>
+<span class="w">        </span><span class="k">match</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">ctxs</span><span class="p">.</span><span class="n">iter_mut</span><span class="p">().</span><span class="n">position</span><span class="p">(</span><span class="o">|</span><span class="n">c</span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">downcast_mut</span><span class="p">::</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="p">().</span><span class="n">is_some</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">ctxs</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">downcast_mut</span><span class="p">().</span><span class="n">unwrap</span><span class="p">(),</span>
+<span class="w">            </span><span class="nb">None</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="bp">self</span><span class="p">.</span><span class="n">ctxs</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="nb">Box</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">or_insert</span><span class="p">()));</span>
+<span class="w">                </span><span class="bp">self</span><span class="p">.</span><span class="n">ctxs</span><span class="p">.</span><span class="n">last_mut</span><span class="p">().</span><span class="n">unwap</span><span class="p">().</span><span class="n">downcast_mut</span><span class="p">().</span><span class="n">unwrap</span><span class="p">()</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">TargetIsa</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">SomeBackend</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">compile_function_with_ctx</span><span class="p">(</span>
+<span class="w">        </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span>
+<span class="w">        </span><span class="n">func</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Function</span><span class="p">,</span>
+<span class="w">        </span><span class="n">domtree</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">DominatorTree</span><span class="p">,</span>
+<span class="w">        </span><span class="n">want_disasm</span><span class="p">:</span><span class="w"> </span><span class="kt">bool</span><span class="p">,</span>
+<span class="w">        </span><span class="n">ctrl_plane</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="n">ControlPlane</span><span class="p">,</span>
+<span class="w">        </span><span class="n">ctx</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="n">IsaCtx</span><span class="p">,</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">CodegenResult</span><span class="o">&lt;</span><span class="n">CompiledCodeBase</span><span class="o">&lt;</span><span class="n">Stencil</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">ctx</span><span class="p">.</span><span class="n">get_ctx</span><span class="p">(</span><span class="n">SomeBackendCtx</span><span class="p">::</span><span class="n">default</span><span class="p">).</span><span class="n">emit</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">func</span><span class="p">,</span><span class="w"> </span><span class="n">domtree</span><span class="p">,</span><span class="w"> </span><span class="n">want_disasm</span><span class="p">,</span><span class="w"> </span><span class="n">ctrl_plane</span><span class="p">)</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="cm">/* ... */</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>I wonder how much would this improve compile times when crunching many functions. (I could volunteer to try it out!)</p>
+
+
+
+<a name="471772789"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471772789" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471772789">(Sep 20 2024 at 16:18)</a>:</h4>
+<p>Storing a <code>Option&lt;Box&lt;dyn Any&gt;&gt;</code> in <code>Context</code> for the backend to reuse allocations would be an option.</p>
+<p>It would be a lot of work to get rid of all allocations in the backend however. Unlike the frontend where there are a bunch of allocations that live for the entire duration of the <code>Function</code>, the backend allocates and deallocates all the time. The most costly lists already use <code>SmallVec</code> to avoid allocation most of the time however.</p>
+
+
+
+<a name="471775622"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471775622" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471775622">(Sep 20 2024 at 16:30)</a>:</h4>
+<p><span class="user-mention" data-user-id="264278">@bjorn3</span> What I should have asked first: Are backend allocations an actual issue based on profiling?</p>
+
+
+
+<a name="471776095"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471776095" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471776095">(Sep 20 2024 at 16:32)</a>:</h4>
+<p>Probably not really. Regalloc is one of the biggest issues. Someone is writing a faster but dumber regalloc for GSOC.</p>
+
+
+
+<a name="471790088"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471790088" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471790088">(Sep 20 2024 at 17:31)</a>:</h4>
+<p>regalloc spends ~5-10% of the time in the allocator.</p>
+
+
+
+<a name="471790801"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471790801" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471790801">(Sep 20 2024 at 17:34)</a>:</h4>
+<p>and it is mostly in the b-trees. I did some experiments a while back forking the <code>std</code> b-trees into both <code>bumpalo</code>-backed allocation and arena-backed allocation with 32-bit ids instead of full 64-bit pointers. neither change provided any wins, unfortunately</p>
+
+
+
+<a name="471792045"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471792045" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471792045">(Sep 20 2024 at 17:38)</a>:</h4>
+<p>To the original question, I suspect reusing allocations for RA2 data structures might be an interesting experiment -- the <code>BTreeMap</code>s (preg allocation maps) I think will hang onto allocated memory if cleared, likewise for the large entity arrays (liverange data, etc)</p>
+
+
+
+<a name="471792208"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471792208" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471792208">(Sep 20 2024 at 17:38)</a>:</h4>
+<p>a big part of the cost in my experience is in cache misses as one touches new memory -- allocation hurts not just because the allocator itself takes time to find some memory but because it implies we're writing out lots of data to new cache lines</p>
+
+
+
+<a name="471792250"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471792250" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471792250">(Sep 20 2024 at 17:39)</a>:</h4>
+<p>so reusing memory helps in that way (likely already in some level of the cache hierarchy)</p>
+
+
+
+<a name="471792375"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471792375" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471792375">(Sep 20 2024 at 17:39)</a>:</h4>
+<p>RA2's API doesn't have the equivalent of Cranelift's <code>Context</code> but it could be added</p>
+
+
+
+<a name="471792661"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471792661" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471792661">(Sep 20 2024 at 17:40)</a>:</h4>
+<p>all that said, I forget how this was wired up with the bumpalo experiment <span class="user-mention" data-user-id="253990">@fitzgen (he/him)</span> -- were you reusing the same arena backing store or was there a fresh one each function compilation?</p>
+
+
+
+<a name="471792669"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471792669" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471792669">(Sep 20 2024 at 17:40)</a>:</h4>
+<blockquote>
+<p>the <code>BTreeMap</code>s (preg allocation maps) I think will hang onto allocated memory if cleared</p>
+</blockquote>
+<p>I don't think it does. There is no <code>with_capacity</code> or <code>shrink_to_fit</code> like <code>Vec</code> and <code>HashMap</code> do. I believe <code>BTreeMap</code> allocates every node individually and doesn't keep a cache with unused nodes around.</p>
+
+
+
+<a name="471792698"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471792698" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471792698">(Sep 20 2024 at 17:40)</a>:</h4>
+<p>ah, hmm, that's too bad</p>
+
+
+
+<a name="471793236"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793236" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793236">(Sep 20 2024 at 17:43)</a>:</h4>
+<p>Are the items in the BTreeMap expected to be inserted in the same order as the key sorts? If so maybe a Vec + binary_search for retrieval would work?</p>
+
+
+
+<a name="471793241"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793241" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793241">(Sep 20 2024 at 17:43)</a>:</h4>
+<p>yeah it doesn't because it is multiple allocations for each node, not one big table like <code>Vec</code>/<code>HashMap</code>, and I suspect that <code>std</code> takes a conservative approach and says "why do we expect this super generic collection code to do better size-classing/pooling/reuse than the actual allocator?"</p>
+
+
+
+<a name="471793446"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793446" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793446">(Sep 20 2024 at 17:44)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="254389">Chris Fallin</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471792661">said</a>:</p>
+<blockquote>
+<p>all that said, I forget how this was wired up with the bumpalo experiment <span class="user-mention silent" data-user-id="253990">fitzgen (he/him)</span> -- were you reusing the same arena backing store or was there a fresh one each function compilation?</p>
+</blockquote>
+<p>whatever cranelift does, which last time I looked was creating a new reg alloc env for each function, iirc</p>
+
+
+
+<a name="471793506"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793506" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793506">(Sep 20 2024 at 17:44)</a>:</h4>
+<p>although I also vaguely remember someone fixing that maybe?</p>
+
+
+
+<a name="471793603"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793603" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793603">(Sep 20 2024 at 17:44)</a>:</h4>
+<p>ah, there's the MachineEnv which is the register data; that was indeed fixed at some point</p>
+
+
+
+<a name="471793643"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793643" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793643">(Sep 20 2024 at 17:44)</a>:</h4>
+<p>I'm thinking of the actual allocation data structures though</p>
+
+
+
+<a name="471793704"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793704" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793704">(Sep 20 2024 at 17:45)</a>:</h4>
+<p>yeah I thought maybe someone did the actual data structures</p>
+
+
+
+<a name="471793902"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793902" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793902">(Sep 20 2024 at 17:45)</a>:</h4>
+<p>but I could be misremembering. anyways: the perf experiments were running sightglass's spidermonkey/bz2/pulldown-cmark, so however wasmtime uses cranelift uses regalloc2</p>
+
+
+
+<a name="471793931"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793931" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793931">(Sep 20 2024 at 17:45)</a>:</h4>
+<p>unfortunately not, the signature <a href="https://docs.rs/regalloc2/latest/regalloc2/fn.run.html">here</a> doesn't allow for any mutable persisted state between runs</p>
+
+
+
+<a name="471793997"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471793997" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471793997">(Sep 20 2024 at 17:46)</a>:</h4>
+<p>ah okay, well we should fix that</p>
+
+
+
+<a name="471794080"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794080" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794080">(Sep 20 2024 at 17:46)</a>:</h4>
+<p>indeed, that's what I'm suggesting here :-)</p>
+
+
+
+<a name="471794163"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794163" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794163">(Sep 20 2024 at 17:46)</a>:</h4>
+<p>might be interesting to revive your experiment branch specifically for the btrees -- but reusing the same bumpalo backing store between runs</p>
+
+
+
+<a name="471794206"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794206" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794206">(Sep 20 2024 at 17:46)</a>:</h4>
+<p>(I forget the precise API, is there a way to reuse the same blocks from a torn-down arena?)</p>
+
+
+
+<a name="471794223"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794223" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794223">(Sep 20 2024 at 17:46)</a>:</h4>
+<p>yeah, I think the PRs are still accessible in the github history</p>
+
+
+
+<a name="471794427"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794427" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794427">(Sep 20 2024 at 17:47)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="254389">Chris Fallin</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471794206">said</a>:</p>
+<blockquote>
+<p>(I forget the precise API, is there a way to reuse the same blocks from a torn-down arena?)</p>
+</blockquote>
+<p>the <code>reset</code> method will reuse the largest backing chunk from the bump arena, that will quickly give you a steady state of never needing to allocate more backing chunks</p>
+
+
+
+<a name="471794464"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794464" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794464">(Sep 20 2024 at 17:47)</a>:</h4>
+<p>backing chunks are allocated in a roughly doubling manner</p>
+
+
+
+<a name="471794557"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794557" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794557">(Sep 20 2024 at 17:48)</a>:</h4>
+<p>cool, seems totally workable then</p>
+
+
+
+<a name="471794685"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794685" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794685">(Sep 20 2024 at 17:48)</a>:</h4>
+<p>/me reaches into his reserves and pulls out a large block of free time to experiment with this</p>
+
+
+
+<a name="471794741"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794741" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794741">(Sep 20 2024 at 17:48)</a>:</h4>
+<p>(not really but it should be high on our perf ideas list IMHO!)</p>
+
+
+
+<a name="471794790"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794790" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794790">(Sep 20 2024 at 17:49)</a>:</h4>
+<p>I mean it really shouldn't be too hard to try, could be a good first issue</p>
+
+
+
+<a name="471794825"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794825" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794825">(Sep 20 2024 at 17:49)</a>:</h4>
+<p>hardest part is probably measuring the perf wins</p>
+
+
+
+<a name="471794887"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471794887" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471794887">(Sep 20 2024 at 17:49)</a>:</h4>
+<p><span class="user-mention" data-user-id="756208">@Jakub Dóka</span> how do you feel about the above? makes sense or need more details?</p>
+
+
+
+<a name="471795529"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471795529" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471795529">(Sep 20 2024 at 17:52)</a>:</h4>
+<p>Seems good, If there is a good way to benchmark I can try this out. Maybe a question: could the whole backend use a bump allocator?</p>
+
+
+
+<a name="471795619"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471795619" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471795619">(Sep 20 2024 at 17:53)</a>:</h4>
+<p>that's a bigger lift I think, would have to be threaded through and many collections changed</p>
+
+
+
+<a name="471795643"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471795643" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471795643">(Sep 20 2024 at 17:53)</a>:</h4>
+<p>good eventual goal</p>
+
+
+
+<a name="471795699"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471795699" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471795699">(Sep 20 2024 at 17:53)</a>:</h4>
+<p>but we're talking about a ~200kLoC project, so, one piece at a time!</p>
+
+
+
+<a name="471795742"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471795742" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471795742">(Sep 20 2024 at 17:53)</a>:</h4>
+<p>I guess lets try lift the regalloc first and see if that helps</p>
+
+
+
+<a name="471795841"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471795841" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471795841">(Sep 20 2024 at 17:54)</a>:</h4>
+<p>darn it, if only this was zig haha</p>
+
+
+
+<a name="471796615"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471796615" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471796615">(Sep 20 2024 at 17:58)</a>:</h4>
+<p><span class="user-mention" data-user-id="253990">@fitzgen (he/him)</span> would you mind linking me to the branch with bumpalo? I am using regalloc2 in my project and already planned to do this on my fork (- the bumpalo)</p>
+
+
+
+<a name="471797898"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471797898" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471797898">(Sep 20 2024 at 18:05)</a>:</h4>
+<p><a href="https://github.com/bytecodealliance/regalloc2/pull/92">https://github.com/bytecodealliance/regalloc2/pull/92</a></p>
+<p><a href="https://github.com/bytecodealliance/regalloc2/pull/88">https://github.com/bytecodealliance/regalloc2/pull/88</a></p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/regalloc2/pull/92" style="background-image: url(&quot;https://uploads.zulipusercontent.net/217a8b2d537eaedf88772a0721d5f14bbcfb5196/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f666464616430346166613564666636303931623263373662373236623434333737666338643633636235666432383132363065363638636332663436386631312f62797465636f6465616c6c69616e63652f726567616c6c6f63322f70756c6c2f3932&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/regalloc2/pull/92" title="Use b-trees based on bumpalo arenas by fitzgen · Pull Request #92 · bytecodealliance/regalloc2">Use b-trees based on bumpalo arenas by fitzgen · Pull Request #92 · bytecodealliance/regalloc2</a></div><div class="message_embed_description">Alternative to #88. cc @Amanieu
+Numbers don&#39;t look great though?
+$ cargo run --release -- benchmark -e ~/scratch/bumpalo-arena.so -e ~/scratch/main.so -m perf-counters --stop-after compilation ...</div></div></div><div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/regalloc2/pull/88" style="background-image: url(&quot;https://uploads.zulipusercontent.net/ea86446bd8a43e08f92b23827cac7176a71f06c1/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f393861316233363131356631343966316664653332323132343331383436663134313864386464316565613337366636343036313234636638383266393962332f62797465636f6465616c6c69616e63652f726567616c6c6f63322f70756c6c2f3838&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/regalloc2/pull/88" title="Use an arena-based BTree library by fitzgen · Pull Request #88 · bytecodealliance/regalloc2">Use an arena-based BTree library by fitzgen · Pull Request #88 · bytecodealliance/regalloc2</a></div><div class="message_embed_description">Depends on bytecodealliance/arena-btree#1</div></div></div>
+
+
+
+<a name="471799668"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471799668" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471799668">(Sep 20 2024 at 18:16)</a>:</h4>
+<p>One important question: what is the <code>unsafe</code> code policy? I like to use unsafe if it simplifies my life e.g. not sprinkling lifetimes everywhere where arena is used, instead live with few unsafe blocks behind safe API.</p>
+
+
+
+<a name="471799905"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471799905" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471799905">(Sep 20 2024 at 18:18)</a>:</h4>
+<p>By the way, regalloc3's API is specifically <a href="https://github.com/Amanieu/regalloc3/blob/main/src/lib.rs#L147-L151">designed</a> to reuse allocations.</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/Amanieu/regalloc3/blob/main/src/lib.rs#L147-L151" style="background-image: url(&quot;https://uploads.zulipusercontent.net/352e2eded7fd19cc3404c7f76acf9ee839004d62/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f376133653531623236613938363833663639663134646530383261613465393836383261303963613533356162383436623230363536363966333430343034322f416d616e6965752f726567616c6c6f6333&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/Amanieu/regalloc3/blob/main/src/lib.rs#L147-L151" title="regalloc3/src/lib.rs at main · Amanieu/regalloc3">regalloc3/src/lib.rs at main · Amanieu/regalloc3</a></div><div class="message_embed_description">New register allocator designed as a successor to regalloc2 - Amanieu/regalloc3</div></div></div>
+
+
+
+<a name="471800269"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471800269" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471800269">(Sep 20 2024 at 18:20)</a>:</h4>
+<p><span class="user-mention" data-user-id="756208">@Jakub Dóka</span> in general we try to avoid <code>unsafe</code> unless absolutely necessary: in our opinion (well, my opinion at least) it makes for a much easier auditing to know <em>for sure</em> that there is no unsafety</p>
+
+
+
+<a name="471800362"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471800362" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471800362">(Sep 20 2024 at 18:20)</a>:</h4>
+<p>we do have <code>unsafe</code> in I think one place in Cranelift to wrap the lower-level raw hashtable interface in <code>CtxHash</code>; RA2 is completely unsafe-free</p>
+
+
+
+<a name="471804660"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471804660" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471804660">(Sep 20 2024 at 18:39)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="254389">Chris Fallin</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471800269">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="756208">Jakub Dóka</span> in general we try to avoid <code>unsafe</code> unless absolutely necessary: in our opinion (well, my opinion at least) it makes for a much easier auditing to know <em>for sure</em> that there is no unsafety</p>
+</blockquote>
+<p>I admit that most people get filtered on <code>unsafe</code>, I will see what's possible without it. Note though that safe arenas in Rust require lifetime and I am not sure if we can afford to store that anywhere, definitely not behind <code>dyn std::any::Any</code>.</p>
+
+
+
+<a name="471805251"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471805251" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471805251">(Sep 20 2024 at 18:41)</a>:</h4>
+<p>in general I'd be OK with threading a lifetime through the backend -- it's more "honest" in some sense (if we're going to bump-allocate all compilation temporary data) than trying to hide the arena somehow</p>
+
+
+
+<a name="471805661"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471805661" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471805661">(Sep 20 2024 at 18:42)</a>:</h4>
+<p>(the only use of <code>std::any::Any</code> I see in <code>cranelift-codegen</code> is in the timing submodule, in a thing that I think doesn't need to interact with this at all)</p>
+
+
+
+<a name="471807458"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471807458" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471807458">(Sep 20 2024 at 18:49)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="254389">Chris Fallin</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471805661">said</a>:</p>
+<blockquote>
+<p>(the only use of <code>std::any::Any</code> I see in <code>cranelift-codegen</code> is in the timing submodule, in a thing that I think doesn't need to interact with this at all)</p>
+</blockquote>
+<p>In order to smuggle context into the <code>TargetIsa</code> trait, It needs to be behind <code>dyn</code> and rust does not allow downcasting things with lifetimes (in safe code at least), I might be able to find an arena that has owned part tho (I have implemented that before so its possible, but did not publish it).</p>
+
+
+
+<a name="471808336"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471808336" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471808336">(Sep 20 2024 at 18:53)</a>:</h4>
+<p>ah, interesting. OK, yeah, if we need a tiny bit of carefully-vetted <code>unsafe</code> somewhere, it's not the end of the world; though ideally we'd wrap it in an abstraction that minimizes misuse</p>
+
+
+
+<a name="471808388"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471808388" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471808388">(Sep 20 2024 at 18:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="756208">Jakub Dóka</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471804660">said</a>:</p>
+<blockquote>
+<p>I admit that most people get filtered on <code>unsafe</code>, I will see what's possible without it. Note though that safe arenas in Rust require lifetime and I am not sure if we can afford to store that anywhere, definitely not behind <code>dyn std::any::Any</code>.</p>
+</blockquote>
+<p>Taking that back <code>rustc_arena::DroplessArena</code> has no lifetime, I confused it with scoped version sorry, All good.</p>
+
+
+
+<a name="471810003"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471810003" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471810003">(Sep 20 2024 at 18:59)</a>:</h4>
+<p>Oh jeez, and allocator API is unstable I hate this so much.</p>
+
+
+
+<a name="471930333"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471930333" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471930333">(Sep 21 2024 at 11:33)</a>:</h4>
+<p>Here are the changes to <code>regalloc2</code> <a href="https://github.com/bytecodealliance/regalloc2/pull/196">https://github.com/bytecodealliance/regalloc2/pull/196</a></p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/regalloc2/pull/196" style="background-image: url(&quot;https://uploads.zulipusercontent.net/90e8e7eed36485be6e6ece5846f3964e6f85717d/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f356262333965333235656531633130336137326331633238383732636530323937663432633431366330356663313435343134633131653165303761653330392f62797465636f6465616c6c69616e63652f726567616c6c6f63322f70756c6c2f313936&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/regalloc2/pull/196" title="Adding new API that accepts resusable context. by jakubDoka · Pull Request #196 · bytecodealliance/regalloc2">Adding new API that accepts resusable context. by jakubDoka · Pull Request #196 · bytecodealliance/regalloc2</a></div><div class="message_embed_description">Sadly due to how the code was structured, I needed to change the `Env&#39; fields so basically everything that was used was changed as well. I did not benchmark anything yet (work in progress).
+Con...</div></div></div>
+
+
+
+<a name="471963879"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471963879" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471963879">(Sep 21 2024 at 18:23)</a>:</h4>
+<p>Here are some results from my horrible benchmark:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">regalloc</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">sorted</span><span class="w"> </span><span class="n">vecs</span><span class="w"> </span><span class="n">instead</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">btrees</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">reused</span><span class="w"> </span><span class="n">resources</span><span class="w"> </span><span class="p">:</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span><span class="mi">363</span><span class="p">,</span><span class="mi">597</span><span class="p">,</span><span class="mi">706</span><span class="w"> </span><span class="n">cycles</span>
+<span class="n">regalloc</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">sorted</span><span class="w"> </span><span class="n">vecs</span><span class="w"> </span><span class="n">instead</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">btrees</span><span class="w"> </span><span class="n">with</span><span class="w"> </span><span class="n">no</span><span class="w"> </span><span class="n">resource</span><span class="w"> </span><span class="n">reuse</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span><span class="mi">900</span><span class="p">,</span><span class="mi">538</span><span class="p">,</span><span class="mi">665</span><span class="w"> </span><span class="n">cycles</span>
+<span class="n">regalloc</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">crates</span><span class="p">.</span><span class="n">io</span><span class="w"> </span><span class="o">--------------------------------------</span><span class="p">:</span><span class="w"> </span><span class="mi">9</span><span class="p">,</span><span class="mi">969</span><span class="p">,</span><span class="mi">449</span><span class="p">,</span><span class="mi">265</span><span class="w"> </span><span class="n">cycles</span>
+</code></pre></div>
+<p>The benchmark is terrible because:</p>
+<ol>
+<li>I regalloc the same function in a tight loop</li>
+<li>The function might not be representative (I adjusted register count to cause spill)</li>
+<li>Function is rather small and with simple code</li>
+</ol>
+<p>In any case, this is best I ve gotten</p>
+
+
+
+<a name="471964560"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471964560" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471964560">(Sep 21 2024 at 18:33)</a>:</h4>
+<p>Do you just re-sort the vec after every insertion? That's definitely going to cause problems with larger functions.</p>
+
+
+
+<a name="471964618"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471964618" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471964618">(Sep 21 2024 at 18:34)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="301625">Amanieu</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471964560">said</a>:</p>
+<blockquote>
+<p>Do you just re-sort the vec after every insertion? That's definitely going to cause problems with larger functions.</p>
+</blockquote>
+<p>no I insert with binary search</p>
+
+
+
+<a name="471964743"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471964743" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471964743">(Sep 21 2024 at 18:36)</a>:</h4>
+<p>Hmm, that's still <code>O(n)</code> per insertion instead of <code>O(log(n))</code>, so it could still end up being an issue for larger functions.</p>
+
+
+
+<a name="471964762"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471964762" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471964762">(Sep 21 2024 at 18:37)</a>:</h4>
+<p>It's worth benchmarking compilation of real programs.</p>
+
+
+
+<a name="471964860"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471964860" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471964860">(Sep 21 2024 at 18:38)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="301625">Amanieu</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471964762">said</a>:</p>
+<blockquote>
+<p>It's worth benchmarking compilation of real programs.</p>
+</blockquote>
+<p>I d love to do that, but I don't know how, at least not easily</p>
+
+
+
+<a name="471964929"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471964929" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471964929">(Sep 21 2024 at 18:39)</a>:</h4>
+<p>The way I usually benchmark is by building wasmtime with my local copy of regalloc2 by adding this to Cargo.toml:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">[</span><span class="n">patch</span><span class="p">.</span><span class="n">crates</span><span class="o">-</span><span class="n">io</span><span class="p">]</span>
+<span class="n">regalloc2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"../regalloc2"</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+
+
+
+<a name="471965020"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471965020" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471965020">(Sep 21 2024 at 18:40)</a>:</h4>
+<p>Then grab some .wasm benchmarks from <a href="https://github.com/bytecodealliance/sightglass">sightglass</a> and compare the 2 builds of wasmtime (with &amp; without your changes) using hyperfine:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">hyperfine</span><span class="w"> </span><span class="s">"./wasmtime.orig compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm"</span><span class="w"> </span><span class="s">"./wasmtime.new compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm"</span>
+</code></pre></div>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/sightglass" style="background-image: url(&quot;https://uploads.zulipusercontent.net/ef7b418926aea6a6a04fd14b5125ceabb5a9bb1e/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f646435653464396430613534333739313438353966633863633837666663633561656662646336316431643139653733643564633337383362323935616630662f62797465636f6465616c6c69616e63652f7369676874676c617373&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/sightglass" title="GitHub - bytecodealliance/sightglass: A benchmark suite and tool to compare different implementations of the same primitives.">GitHub - bytecodealliance/sightglass: A benchmark suite and tool to compare different implementations of the same primitives.</a></div><div class="message_embed_description">A benchmark suite and tool to compare different implementations of the same primitives. - bytecodealliance/sightglass</div></div></div>
+
+
+
+<a name="471965051"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471965051" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471965051">(Sep 21 2024 at 18:41)</a>:</h4>
+<p>Though I guess perf stat would also work for measuring cycles.</p>
+
+
+
+<a name="471965085"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471965085" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471965085">(Sep 21 2024 at 18:41)</a>:</h4>
+<p>Awesome, thank you very much</p>
+
+
+
+<a name="471966753"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471966753" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471966753">(Sep 21 2024 at 19:06)</a>:</h4>
+<p><span class="user-mention" data-user-id="301625">@Amanieu</span> this is just testing difference between vecs (new) and binary trees (old)</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">hyperfine</span><span class="w"> </span><span class="s">"./wasmtime.old compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm"</span><span class="w"> </span><span class="s">"./wasmtime.new compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm"</span>
+<span class="n">Benchmark</span><span class="w"> </span><span class="mi">1</span><span class="p">:</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">old</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="w">  </span><span class="n">Time</span><span class="w"> </span><span class="p">(</span><span class="n">mean</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="err">σ</span><span class="p">):</span><span class="w">     </span><span class="mf">144.2</span><span class="w"> </span><span class="n">ms</span><span class="w"> </span><span class="err">±</span><span class="w">   </span><span class="mf">3.5</span><span class="w"> </span><span class="n">ms</span><span class="w">    </span><span class="p">[</span><span class="n">User</span><span class="p">:</span><span class="w"> </span><span class="mf">135.4</span><span class="w"> </span><span class="n">ms</span><span class="p">,</span><span class="w"> </span><span class="n">System</span><span class="p">:</span><span class="w"> </span><span class="mf">7.5</span><span class="w"> </span><span class="n">ms</span><span class="p">]</span>
+<span class="w">  </span><span class="n">Range</span><span class="w"> </span><span class="p">(</span><span class="n">min</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="n">max</span><span class="p">):</span><span class="w">   </span><span class="mf">140.4</span><span class="w"> </span><span class="n">ms</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="mf">152.8</span><span class="w"> </span><span class="n">ms</span><span class="w">    </span><span class="mi">20</span><span class="w"> </span><span class="n">runs</span>
+
+<span class="n">Benchmark</span><span class="w"> </span><span class="mi">2</span><span class="p">:</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">new</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="w">  </span><span class="n">Time</span><span class="w"> </span><span class="p">(</span><span class="n">mean</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="err">σ</span><span class="p">):</span><span class="w">     </span><span class="mf">142.0</span><span class="w"> </span><span class="n">ms</span><span class="w"> </span><span class="err">±</span><span class="w">   </span><span class="mf">4.3</span><span class="w"> </span><span class="n">ms</span><span class="w">    </span><span class="p">[</span><span class="n">User</span><span class="p">:</span><span class="w"> </span><span class="mf">134.7</span><span class="w"> </span><span class="n">ms</span><span class="p">,</span><span class="w"> </span><span class="n">System</span><span class="p">:</span><span class="w"> </span><span class="mf">5.8</span><span class="w"> </span><span class="n">ms</span><span class="p">]</span>
+<span class="w">  </span><span class="n">Range</span><span class="w"> </span><span class="p">(</span><span class="n">min</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="n">max</span><span class="p">):</span><span class="w">   </span><span class="mf">137.1</span><span class="w"> </span><span class="n">ms</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="mf">155.0</span><span class="w"> </span><span class="n">ms</span><span class="w">    </span><span class="mi">21</span><span class="w"> </span><span class="n">runs</span>
+
+<span class="n">Summary</span>
+<span class="w">  </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">new</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="w"> </span><span class="n">ran</span>
+<span class="w">    </span><span class="mf">1.02</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">0.04</span><span class="w"> </span><span class="n">times</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">old</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+</code></pre></div>
+<p>How should I understand the result? This seems within margin of error</p>
+
+
+
+<a name="471966886"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471966886" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471966886">(Sep 21 2024 at 19:08)</a>:</h4>
+<p>tho it seems I cant get the old to beat new</p>
+
+
+
+<a name="471967078"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471967078" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471967078">(Sep 21 2024 at 19:11)</a>:</h4>
+<p>You could add <code>--runs 100</code> as argument to reduce noise a bit by running it 100 times instead of 20 times.</p>
+
+
+
+<a name="471967735"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471967735" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471967735">(Sep 21 2024 at 19:21)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="264278">bjorn3</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/471967078">said</a>:</p>
+<blockquote>
+<p>You could add <code>--runs 100</code> as argument to reduce noise a bit by running it 100 times instead of 20 times.</p>
+</blockquote>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">hyperfine</span><span class="w"> </span><span class="o">--</span><span class="n">runs</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="s">"./wasmtime.new compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm"</span><span class="w"> </span><span class="s">"./wasmtime.old compile -C parallel-compilation=n ../sightglass/benchmarks/pulldown-cmark/benchmark.wasm"</span>
+<span class="n">Benchmark</span><span class="w"> </span><span class="mi">1</span><span class="p">:</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">new</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="w">  </span><span class="n">Time</span><span class="w"> </span><span class="p">(</span><span class="n">mean</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="err">σ</span><span class="p">):</span><span class="w">     </span><span class="mf">148.9</span><span class="w"> </span><span class="n">ms</span><span class="w"> </span><span class="err">±</span><span class="w">   </span><span class="mf">6.6</span><span class="w"> </span><span class="n">ms</span><span class="w">    </span><span class="p">[</span><span class="n">User</span><span class="p">:</span><span class="w"> </span><span class="mf">139.9</span><span class="w"> </span><span class="n">ms</span><span class="p">,</span><span class="w"> </span><span class="n">System</span><span class="p">:</span><span class="w"> </span><span class="mf">7.2</span><span class="w"> </span><span class="n">ms</span><span class="p">]</span>
+<span class="w">  </span><span class="n">Range</span><span class="w"> </span><span class="p">(</span><span class="n">min</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="n">max</span><span class="p">):</span><span class="w">   </span><span class="mf">139.1</span><span class="w"> </span><span class="n">ms</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="mf">178.7</span><span class="w"> </span><span class="n">ms</span><span class="w">    </span><span class="mi">100</span><span class="w"> </span><span class="n">runs</span>
+
+<span class="n">Benchmark</span><span class="w"> </span><span class="mi">2</span><span class="p">:</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">old</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="w">  </span><span class="n">Time</span><span class="w"> </span><span class="p">(</span><span class="n">mean</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="err">σ</span><span class="p">):</span><span class="w">     </span><span class="mf">156.8</span><span class="w"> </span><span class="n">ms</span><span class="w"> </span><span class="err">±</span><span class="w">   </span><span class="mf">4.6</span><span class="w"> </span><span class="n">ms</span><span class="w">    </span><span class="p">[</span><span class="n">User</span><span class="p">:</span><span class="w"> </span><span class="mf">147.1</span><span class="w"> </span><span class="n">ms</span><span class="p">,</span><span class="w"> </span><span class="n">System</span><span class="p">:</span><span class="w"> </span><span class="mf">7.5</span><span class="w"> </span><span class="n">ms</span><span class="p">]</span>
+<span class="w">  </span><span class="n">Range</span><span class="w"> </span><span class="p">(</span><span class="n">min</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="n">max</span><span class="p">):</span><span class="w">   </span><span class="mf">149.6</span><span class="w"> </span><span class="n">ms</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="mf">173.3</span><span class="w"> </span><span class="n">ms</span><span class="w">    </span><span class="mi">100</span><span class="w"> </span><span class="n">runs</span>
+
+<span class="n">Summary</span>
+<span class="w">  </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">new</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="w"> </span><span class="n">ran</span>
+<span class="w">    </span><span class="mf">1.05</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">0.06</span><span class="w"> </span><span class="n">times</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">old</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+</code></pre></div>
+<p>note: I have a shitty intel CPU that tends to throttle</p>
+
+
+
+<a name="471968304"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471968304" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471968304">(Sep 21 2024 at 19:29)</a>:</h4>
+<p>It appears that the order in which I run the benchmark matters <span aria-label="smiling face with tear" class="emoji emoji-1f972" role="img" title="smiling face with tear">:smiling_face_with_tear:</span></p>
+
+
+
+<a name="471968907"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471968907" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471968907">(Sep 21 2024 at 19:38)</a>:</h4>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">new</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="w"> </span><span class="n">ran</span>
+<span class="w">    </span><span class="mf">1.03</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">0.05</span><span class="w"> </span><span class="n">times</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">wasmtime</span><span class="p">.</span><span class="n">new</span><span class="w"> </span><span class="n">compile</span><span class="w"> </span><span class="o">-</span><span class="n">C</span><span class="w"> </span><span class="n">parallel</span><span class="o">-</span><span class="n">compilation</span><span class="o">=</span><span class="n">n</span><span class="w"> </span><span class="o">../</span><span class="n">sightglass</span><span class="o">/</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">pulldown</span><span class="o">-</span><span class="n">cmark</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+</code></pre></div>
+<p><span aria-label="smiling face with tear" class="emoji emoji-1f972" role="img" title="smiling face with tear">:smiling_face_with_tear:</span></p>
+
+
+
+<a name="471972971"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/471972971" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#471972971">(Sep 21 2024 at 20:36)</a>:</h4>
+<p>comparing cycles seems more relayable:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">old</span><span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="n">new</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">old</span><span class="w"> </span><span class="o">=</span>
+<span class="p">(</span><span class="mi">15608637381</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">14952009848</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">15608637381</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.0420682163</span>
+</code></pre></div>
+
+
+
+<a name="472022978"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472022978" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472022978">(Sep 22 2024 at 07:32)</a>:</h4>
+<p>Okay, I have tried bumpalo + btree map, the performance degraded</p>
+
+
+
+<a name="472031919"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472031919" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472031919">(Sep 22 2024 at 09:33)</a>:</h4>
+<p>The allocations are actually not eliminated that well Regalloc still contains ~22% of all temporary allocations and most of them are from <code>SmallVec</code>s overflowing:<br>
+<a href="/user_uploads/15107/fOS5HdUCFADc0Iq4uom-D75H/image.png">image.png</a><br>
+At this point, using arena-backed Vecs instead of SmallVecs might help.</p>
+<div class="message_inline_image"><a href="/user_uploads/15107/fOS5HdUCFADc0Iq4uom-D75H/image.png" title="image.png"><img data-original-dimensions="1890x400" src="/user_uploads/thumbnail/15107/fOS5HdUCFADc0Iq4uom-D75H/image.png/840x560.webp"></a></div>
+
+
+
+<a name="472049343"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472049343" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472049343">(Sep 22 2024 at 14:04)</a>:</h4>
+<p>Okay, I reduced the temporary allocations within RA2 from 35% to 0.7% (according to heaptrack).<br>
+<a href="/user_uploads/15107/tcJvcK2egHuRcc_WuLXJjFFT/image.png">image.png</a><br>
+That's great but the total cycle count did not improve that much </p>
+<div class="message_inline_image"><a href="/user_uploads/15107/tcJvcK2egHuRcc_WuLXJjFFT/image.png" title="image.png"><img data-original-dimensions="3794x1250" src="/user_uploads/thumbnail/15107/tcJvcK2egHuRcc_WuLXJjFFT/image.png/840x560.webp"></a></div><div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">old</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">new</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">old</span><span class="w"> </span><span class="o">=</span>
+<span class="p">(</span><span class="mi">15</span><span class="p">,</span><span class="mi">552</span><span class="p">,</span><span class="mi">110</span><span class="p">,</span><span class="mi">365</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">14</span><span class="p">,</span><span class="mi">632</span><span class="p">,</span><span class="mi">439</span><span class="p">,</span><span class="mi">684</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">15</span><span class="p">,</span><span class="mi">552</span><span class="p">,</span><span class="mi">110</span><span class="p">,</span><span class="mi">365</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.0591347836</span><span class="w"> </span><span class="p">(</span><span class="o">~</span><span class="mi">6</span><span class="o">%</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="n">cpu_core</span><span class="o">/</span><span class="n">cycles</span><span class="o">/</span><span class="n">u</span><span class="w"> </span><span class="n">form</span><span class="w"> </span><span class="n">perf</span><span class="w"> </span><span class="n">stat</span><span class="p">)</span>
+</code></pre></div>
+<p>The peak memory usage also increased by ~15MB. I have tested this by storing the RA2 context in thread-local on <code>sightglass/benchmarks/spidermonkey/benchmark.wasm</code></p>
+
+
+
+<a name="472072663"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472072663" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472072663">(Sep 22 2024 at 18:31)</a>:</h4>
+<p>I am a bit confused about why the program takes fewer cycles but RA2 takes a bigger chunk of runtime. Could it be that allocating less in one place can make other things faster?</p>
+
+
+
+<a name="472209977"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472209977" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472209977">(Sep 23 2024 at 12:03)</a>:</h4>
+<p>Okay, I managed to avoid lifetimes and unsafe code by using <code>bumpalo::Bump</code> in <code>Rc</code>, I had to implement <code>Allocator</code> trait, which is unsafe but all it does is delegate methods. I then clear the arena through <code>Rc::get_mut</code> (after all arena-backed <code>Vec</code>'s are dropped).</p>
+
+
+
+<a name="472269806"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472269806" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472269806">(Sep 23 2024 at 15:52)</a>:</h4>
+<p>seems like you're investigations are unearthing some good stuff, but I do want to note that we can't rely on nightly-only Rust features here</p>
+
+
+
+<a name="472270018"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472270018" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472270018">(Sep 23 2024 at 15:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="253990">fitzgen (he/him)</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/472269806">said</a>:</p>
+<blockquote>
+<p>seems like you're investigations are unearthing some good stuff, but I do want to note that we can't rely on nightly-only Rust features here</p>
+</blockquote>
+<p>I used allocator-api2, I know about this</p>
+
+
+
+<a name="472270238"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472270238" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472270238">(Sep 23 2024 at 15:54)</a>:</h4>
+<p>It compiles on stable</p>
+
+
+
+<a name="472291103"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472291103" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472291103">(Sep 23 2024 at 17:35)</a>:</h4>
+<p>great!</p>
+
+
+
+<a name="472535978"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472535978" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472535978">(Sep 24 2024 at 16:55)</a>:</h4>
+<p>Welp, I managed to save 1b out of 15.5b cycles, with some non-memory optimizations, like replacing hashmaps with vectors (where the hashmap key can index it), and two places do linear merge instead of sorting. This brings the cycles down by another ~150m. I am unsure what more I can do to make this faster. (on Spidermonkey bench) <span class="user-mention" data-user-id="254389">@Chris Fallin</span> Are there any tests that can verify that the generated code is valid? I noticed some bugs I introduced during development were not caught by Fuzzer but when compiling Spidermonkey I would get a crash, so I am not confident If miss-compilation could occur.</p>
+
+
+
+<a name="472536186"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472536186" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472536186">(Sep 24 2024 at 16:56)</a>:</h4>
+<p>Ideally, passing the test-suite in Wasmtime/Cranelift, passing the RA2 fuzzer (<code>ion_checker</code> target -- it can take overnight or longer on 8 cores to find some bugs, let it run for a while), and maybe passing <code>differential</code> fuzz target in Wasmtime for a little bit too</p>
+
+
+
+<a name="472536282"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472536282" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472536282">(Sep 24 2024 at 16:57)</a>:</h4>
+<p>for regalloc work mainly we trust the RA-specific checker (it'll have much higher throughput by banging just on RA) but again it has to run for a while</p>
+
+
+
+<a name="472536414"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472536414" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472536414">(Sep 24 2024 at 16:58)</a>:</h4>
+<p>I neglected to start with though: 1B out of 15.5B cycles saved is great, thanks so much for looking into this! We'll definitely take it assuming it is passing all tests</p>
+
+
+
+<a name="472536441"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472536441" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472536441">(Sep 24 2024 at 16:58)</a>:</h4>
+<p>(or, "most likely" I should say, I still need to review the details of the integration)</p>
+
+
+
+<a name="472539189"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472539189" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472539189">(Sep 24 2024 at 17:13)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="254389">Chris Fallin</span> <a href="#narrow/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60/near/472536282">said</a>:</p>
+<blockquote>
+<p>for regalloc work mainly we trust the RA-specific checker (it'll have much higher throughput by banging just on RA) but again it has to run for a while</p>
+</blockquote>
+<p>I assume there are some nobs on the fuzzer to use more threads, my notebook can maintain 8 cores at 2ghz is that enough for a night?<br>
+I should probably use highest level of optimizations (lto, panic-abort, codegen-units=1) which is not done currently.</p>
+
+
+
+<a name="472539352"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472539352" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472539352">(Sep 24 2024 at 17:14)</a>:</h4>
+<p><code>-j 8</code> to <code>cargo fuzz</code> should work; also I typically run with <code>-s none</code>, i.e. no sanitizer instrumentation, because that's not needed to find logic bugs and it's a significant speedup</p>
+
+
+
+<a name="472625099"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/472625099" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#472625099">(Sep 25 2024 at 06:51)</a>:</h4>
+<p>I have ran the fuzzer (ion_checker) overnight, It ended with this:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">#</span><span class="mi">133803205</span><span class="p">:</span><span class="w"> </span><span class="nc">cov</span><span class="p">:</span><span class="w"> </span><span class="mi">12736</span><span class="w"> </span><span class="n">ft</span><span class="p">:</span><span class="w"> </span><span class="mi">18897</span><span class="w"> </span><span class="n">corp</span><span class="p">:</span><span class="w"> </span><span class="mi">3233</span><span class="w"> </span><span class="n">exec</span><span class="o">/</span><span class="n">s</span><span class="w"> </span><span class="mi">194</span><span class="w"> </span><span class="n">oom</span><span class="o">/</span><span class="n">timeout</span><span class="o">/</span><span class="n">crash</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="w"> </span><span class="n">time</span><span class="p">:</span><span class="w"> </span><span class="mi">46251</span><span class="n">s</span><span class="w"> </span><span class="n">job</span><span class="p">:</span><span class="w"> </span><span class="mi">2599</span><span class="w"> </span><span class="n">dft_time</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">#</span><span class="mi">133872329</span><span class="p">:</span><span class="w"> </span><span class="nc">cov</span><span class="p">:</span><span class="w"> </span><span class="mi">12736</span><span class="w"> </span><span class="n">ft</span><span class="p">:</span><span class="w"> </span><span class="mi">18897</span><span class="w"> </span><span class="n">corp</span><span class="p">:</span><span class="w"> </span><span class="mi">3233</span><span class="w"> </span><span class="n">exec</span><span class="o">/</span><span class="n">s</span><span class="w"> </span><span class="mi">229</span><span class="w"> </span><span class="n">oom</span><span class="o">/</span><span class="n">timeout</span><span class="o">/</span><span class="n">crash</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="w"> </span><span class="n">time</span><span class="p">:</span><span class="w"> </span><span class="mi">46269</span><span class="n">s</span><span class="w"> </span><span class="n">job</span><span class="p">:</span><span class="w"> </span><span class="mi">2600</span><span class="w"> </span><span class="n">dft_time</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">#</span><span class="mi">133918523</span><span class="p">:</span><span class="w"> </span><span class="nc">cov</span><span class="p">:</span><span class="w"> </span><span class="mi">12736</span><span class="w"> </span><span class="n">ft</span><span class="p">:</span><span class="w"> </span><span class="mi">18897</span><span class="w"> </span><span class="n">corp</span><span class="p">:</span><span class="w"> </span><span class="mi">3233</span><span class="w"> </span><span class="n">exec</span><span class="o">/</span><span class="n">s</span><span class="w"> </span><span class="mi">153</span><span class="w"> </span><span class="n">oom</span><span class="o">/</span><span class="n">timeout</span><span class="o">/</span><span class="n">crash</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="w"> </span><span class="n">time</span><span class="p">:</span><span class="w"> </span><span class="mi">46289</span><span class="n">s</span><span class="w"> </span><span class="n">job</span><span class="p">:</span><span class="w"> </span><span class="mi">2601</span><span class="w"> </span><span class="n">dft_time</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">#</span><span class="mi">133971880</span><span class="p">:</span><span class="w"> </span><span class="nc">cov</span><span class="p">:</span><span class="w"> </span><span class="mi">12736</span><span class="w"> </span><span class="n">ft</span><span class="p">:</span><span class="w"> </span><span class="mi">18897</span><span class="w"> </span><span class="n">corp</span><span class="p">:</span><span class="w"> </span><span class="mi">3233</span><span class="w"> </span><span class="n">exec</span><span class="o">/</span><span class="n">s</span><span class="w"> </span><span class="mi">177</span><span class="w"> </span><span class="n">oom</span><span class="o">/</span><span class="n">timeout</span><span class="o">/</span><span class="n">crash</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="w"> </span><span class="n">time</span><span class="p">:</span><span class="w"> </span><span class="mi">46308</span><span class="n">s</span><span class="w"> </span><span class="n">job</span><span class="p">:</span><span class="w"> </span><span class="mi">2602</span><span class="w"> </span><span class="n">dft_time</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">#</span><span class="mi">134018335</span><span class="p">:</span><span class="w"> </span><span class="nc">cov</span><span class="p">:</span><span class="w"> </span><span class="mi">12736</span><span class="w"> </span><span class="n">ft</span><span class="p">:</span><span class="w"> </span><span class="mi">18897</span><span class="w"> </span><span class="n">corp</span><span class="p">:</span><span class="w"> </span><span class="mi">3233</span><span class="w"> </span><span class="n">exec</span><span class="o">/</span><span class="n">s</span><span class="w"> </span><span class="mi">154</span><span class="w"> </span><span class="n">oom</span><span class="o">/</span><span class="n">timeout</span><span class="o">/</span><span class="n">crash</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="w"> </span><span class="n">time</span><span class="p">:</span><span class="w"> </span><span class="mi">46327</span><span class="n">s</span><span class="w"> </span><span class="n">job</span><span class="p">:</span><span class="w"> </span><span class="mi">2603</span><span class="w"> </span><span class="n">dft_time</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">#</span><span class="mi">134087566</span><span class="p">:</span><span class="w"> </span><span class="nc">cov</span><span class="p">:</span><span class="w"> </span><span class="mi">12736</span><span class="w"> </span><span class="n">ft</span><span class="p">:</span><span class="w"> </span><span class="mi">18897</span><span class="w"> </span><span class="n">corp</span><span class="p">:</span><span class="w"> </span><span class="mi">3233</span><span class="w"> </span><span class="n">exec</span><span class="o">/</span><span class="n">s</span><span class="w"> </span><span class="mi">230</span><span class="w"> </span><span class="n">oom</span><span class="o">/</span><span class="n">timeout</span><span class="o">/</span><span class="n">crash</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="o">/</span><span class="mi">0</span><span class="w"> </span><span class="n">time</span><span class="p">:</span><span class="w"> </span><span class="mi">46345</span><span class="n">s</span><span class="w"> </span><span class="n">job</span><span class="p">:</span><span class="w"> </span><span class="mi">2604</span><span class="w"> </span><span class="n">dft_time</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+</code></pre></div>
+
+
+
+<a name="474873766"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/474873766" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Dóka <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#474873766">(Oct 04 2024 at 17:47)</a>:</h4>
+<p><span class="user-mention" data-user-id="254389">@Chris Fallin</span>  I would like to add the changes I reverted during the review of the first pr which would turn into the following PRs:</p>
+<ul>
+<li>moving some code around which was too big of a change that allows for reusing more stuff (there are some types defined inside a function so I can't add them to the context)</li>
+<li>replacing some hashmaps with bitsets</li>
+<li>changing BTees to Vecs (with fallback to BTrees to prevent potential DDOs as discussed)</li>
+<li>replacing calls to sort with linear merge<br>
+These collectively eliminate ~750mil cycles out of 1b/15.5b presented originally (sightglass/spidermonkey).</li>
+</ul>
+
+
+
+<a name="474878591"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Using%20context%20for%20%60TargetIsa%3A%3Acompile_function%60/near/474878591" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Using.20context.20for.20.60TargetIsa.3A.3Acompile_function.60.html#474878591">(Oct 04 2024 at 18:23)</a>:</h4>
+<p>sure, I can't say for sure until seeing the PRs and we'll iterate on it but in principle I'm ok with these</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

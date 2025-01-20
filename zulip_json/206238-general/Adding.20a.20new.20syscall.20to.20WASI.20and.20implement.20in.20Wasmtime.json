@@ -1,0 +1,38 @@
+[
+    {
+        "content": "<p>Hi, everyone!</p>\n<p>I've been playing around with trying to define a new syscall in <code>wasi_snapshot_preview1</code> that I could import in modules.<br>\nI've added the function interface in the <code>witx</code> file from <code>WASI/phases/snapshot</code>:</p>\n<div class=\"codehilite\"><pre><span></span>  ;;; Print a greeting message.\n  (@interface func (export &quot;print_greeting&quot;)\n    (result $error $errno)\n  )\n</pre></div>\n\n\n<p>Which updated <code>wasi_common::snapshots::WasiSnapshotPreview1</code>, so had to add the implementation for <code>WasiCtx</code>:</p>\n<div class=\"codehilite\"><pre><span></span>    fn print_greeting(&amp;self) -&gt; Result&lt;()&gt; {\n        debug!(&quot;DEBUG PRINT_GREETING&quot;);\n        log::warn!(&quot;WARN PRINT_GREETING&quot;);\n        println!(&quot;Hello World from the new print_greeting syscall in WASI&quot;);\n        Ok(())\n    }\n</pre></div>\n\n\n<p>At this point I can write a simple module that tries to import the newly added syscall, and _it doesn't fail_, but the actual function doesn't get executed:</p>\n<div class=\"codehilite\"><pre><span></span>(module\n    ;; (import &quot;wasi_snapshot_preview1&quot; &quot;print_greeting&quot; (func $print_greeting))\n    (import &quot;wasi_snapshot_preview1&quot; &quot;print_greeting&quot; (func $print_greeting (result i32)))\n    (func $main (export &quot;_start&quot;)\n\n        (call $print_greeting)\n        return\n    )\n)\n</pre></div>\n\n\n<div class=\"codehilite\"><pre><span></span>$ RUST_LOG=info ./target/debug/wasmtime run examples/new-syscall.wat -g\n INFO  faerie::elf &gt; strtab: 0x271 symtab 0x358 relocs 0x4a8 sh_offset 0x658\n</pre></div>\n\n\n<p>The function itself does get wired up in the functions Wasmtime links - for example trying to import a non-existing function:</p>\n<div class=\"codehilite\"><pre><span></span>    import `non-existing-function` was not found in module `wasi_snapshot_preview1`\n</pre></div>\n\n\n<p>So my questions are whether the above is reasonable (keep in mind all this is educational) and what are the other places where the actual execution should be wired up.</p>\n<p>Thanks!</p>",
+        "id": 192348026,
+        "sender_full_name": "Radu Matei",
+        "timestamp": 1585634453
+    },
+    {
+        "content": "<p>Hey <span class=\"user-mention\" data-user-id=\"269505\">@Radu M</span>! You're actually on the right track. The thing you're missing is memory export directive. This WAT should work:</p>\n<div class=\"codehilite\"><pre><span></span>(module\n    ;; (import &quot;wasi_snapshot_preview1&quot; &quot;print_greeting&quot; (func $print_greeting))\n    (import &quot;wasi_snapshot_preview1&quot; &quot;print_greeting&quot; (func $print_greeting (result i32)))\n\n    (memory 1)\n    (export &quot;memory&quot; (memory 0))\n\n    (func $main (export &quot;_start&quot;)\n\n        (call $print_greeting)\n        return\n    )\n)\n</pre></div>",
+        "id": 192353019,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1585639732
+    },
+    {
+        "content": "<p>Oh, and if you run with the following invocation in your shell (assuming you've got the latest master built)</p>\n<div class=\"codehilite\"><pre><span></span>env RUST_LOG=wasi_common=trace wasmtime new-syscall.wat\n</pre></div>\n\n\n<p>You should get auto-generated traces for all invoked syscalls. So you should see something like this:</p>\n<div class=\"codehilite\"><pre><span></span> DEBUG wasi_common::ctx &gt; WasiCtx inserting entry PendingEntry::Thunk(0x7ffee4071978)\n DEBUG wasi_common::sys::unix::entry &gt; Host fd 0 is a char device\n DEBUG wasi_common::ctx              &gt; WasiCtx inserted at Fd(0)\n DEBUG wasi_common::ctx              &gt; WasiCtx inserting entry PendingEntry::Thunk(0x7ffee4071978)\n DEBUG wasi_common::sys::unix::entry &gt; Host fd 1 is a char device\n DEBUG wasi_common::ctx              &gt; WasiCtx inserted at Fd(1)\n DEBUG wasi_common::ctx              &gt; WasiCtx inserting entry PendingEntry::Thunk(0x7ffee4071978)\n DEBUG wasi_common::sys::unix::entry &gt; Host fd 2 is a char device\n DEBUG wasi_common::ctx              &gt; WasiCtx inserted at Fd(2)\n DEBUG wasi_common::old::snapshot_0::ctx &gt; WasiCtx inserting (0, Some(PendingEntry::Thunk(0x7ffee4072fa0)))\n DEBUG wasi_common::old::snapshot_0::sys::unix::entry_impl &gt; Host fd 0 is a char device\n DEBUG wasi_common::old::snapshot_0::ctx                   &gt; WasiCtx inserting (1, Some(PendingEntry::Thunk(0x7ffee4072fb0)))\n DEBUG wasi_common::old::snapshot_0::sys::unix::entry_impl &gt; Host fd 1 is a char device\n DEBUG wasi_common::old::snapshot_0::ctx                   &gt; WasiCtx inserting (2, Some(PendingEntry::Thunk(0x7ffee4072fc0)))\n DEBUG wasi_common::old::snapshot_0::sys::unix::entry_impl &gt; Host fd 2 is a char device\n TRACE wasi_common::wasi::wasi_snapshot_preview1           &gt; print_greeting()\n TRACE wasi_common::snapshots::wasi_snapshot_preview1      &gt; Hmm\n TRACE wasi_common::wasi::wasi_snapshot_preview1           &gt;      | errno=No error occurred. System call completed successfully. (Errno::Success(0))\n</pre></div>",
+        "id": 192353177,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1585639858
+    },
+    {
+        "content": "<p>Hope this helps! If things are still amiss, lemme know and I'll try to help!</p>",
+        "id": 192353202,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1585639875
+    },
+    {
+        "content": "<p>Ah!<br>\nThat works, thank you so much, <span class=\"user-mention\" data-user-id=\"263195\">@Jakub Konka</span> !</p>",
+        "id": 192353215,
+        "sender_full_name": "Radu Matei",
+        "timestamp": 1585639884
+    },
+    {
+        "content": "<p>No probs!</p>",
+        "id": 192353223,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1585639891
+    }
+]

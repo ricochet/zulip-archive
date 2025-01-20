@@ -1,0 +1,928 @@
+<html>
+<head><meta charset="utf-8"><title>`csdb` overhead on M1 chips (AArch64) · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html">`csdb` overhead on M1 chips (AArch64)</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="398472333"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398472333" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Martin Fink <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398472333">(Oct 25 2023 at 12:14)</a>:</h4>
+<p>(Not sure if this is the right channel to post this)</p>
+<p>I've done a few experiments on an M1 Mac Mini and found some pretty high-performance overheads caused by the <code>csdb</code> instructions generated when lowering <code>select_spectre_guard</code>.<br>
+This overhead only exists on the performance cores, not on the efficiency ones. I believe the reason for this is the efficiency cores don't speculate nearly as much (or even not at all?) as the performance ones do, but then I am also by no means an expert. :)</p>
+<p>I found it pretty surprising that the difference is that large, and since I didn't find anything else about this on the internet, I thought I'd share my findings. If there is an issue with how I ran these benchmarks, please let me know!</p>
+<p>I've benchmarked an unmodified build (commit <code>270e92225</code>) against one with the following diff applied:</p>
+<div class="codehilite" data-code-language="Diff"><pre><span></span><code><span class="gh">diff --git a/cranelift/codegen/src/isa/aarch64/inst/emit.rs b/cranelift/codegen/src/isa/aarch64/inst/emit.rs</span>
+<span class="gh">index 43bdd4a3e..c2519885e 100644</span>
+<span class="gd">--- a/cranelift/codegen/src/isa/aarch64/inst/emit.rs</span>
+<span class="gi">+++ b/cranelift/codegen/src/isa/aarch64/inst/emit.rs</span>
+<span class="gu">@@ -1820,7 +1820,7 @@ impl MachInstEmit for Inst {</span>
+<span class="w"> </span>                sink.put4(enc_dmb_ish()); // dmb ish
+<span class="w"> </span>            }
+<span class="w"> </span>            &amp;Inst::Csdb {} =&gt; {
+<span class="gd">-                sink.put4(0xd503229f);</span>
+<span class="gi">+                //sink.put4(0xd503229f);</span>
+<span class="w"> </span>            }
+<span class="w"> </span>            &amp;Inst::FpuMove64 { rd, rn } =&gt; {
+<span class="w"> </span>                let rd = allocs.next_writable(rd);
+</code></pre></div>
+<p>The tests were run on a Mac Mini with a M1 chip running Asahi Linux. I can also check if there is a difference when running the same thing on macOS, but I believe there shouldn't be.<br>
+Before running the tests, I set the governor to performance to force all cores to their maximum frequency.</p>
+<p>Performance cores:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">taskset</span><span class="w"> </span><span class="o">--</span><span class="n">cpu</span><span class="o">-</span><span class="n">list</span><span class="w"> </span><span class="mi">4</span><span class="o">-</span><span class="mi">7</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="s">""</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="n">warning</span>: <span class="nc">some</span><span class="w"> </span><span class="n">crates</span><span class="w"> </span><span class="n">are</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">which</span><span class="w"> </span><span class="n">defaults</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="p">,</span><span class="w"> </span><span class="n">but</span><span class="w"> </span><span class="kr">virtual</span><span class="w"> </span><span class="n">workspaces</span><span class="w"> </span><span class="n">default</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="n">keep</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="w">    </span><span class="n">Finished</span><span class="w"> </span><span class="n">dev</span><span class="w"> </span><span class="p">[</span><span class="n">unoptimized</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">debuginfo</span><span class="p">]</span><span class="w"> </span><span class="n">target</span><span class="p">(</span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mf">0.04</span><span class="n">s</span>
+<span class="w">     </span><span class="n">Running</span><span class="w"> </span><span class="err">`</span><span class="n">target</span><span class="o">/</span><span class="n">debug</span><span class="o">/</span><span class="n">sightglass</span><span class="o">-</span><span class="n">cli</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="err">`</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+
+<span class="n">execution</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="err">Δ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">8027785.90</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">160961.98</span><span class="w"> </span><span class="p">(</span><span class="n">confidence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">99</span><span class="o">%</span><span class="p">)</span>
+
+<span class="w">  </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mf">3.16</span><span class="n">x</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mf">3.25</span><span class="n">x</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="o">!</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">11320025</span><span class="w"> </span><span class="mf">11663170.40</span><span class="w"> </span><span class="mi">12242229</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">3526618</span><span class="w"> </span><span class="mf">3635384.50</span><span class="w"> </span><span class="mi">3832395</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+
+<span class="n">instantiation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">2084</span><span class="w"> </span><span class="mf">2519.50</span><span class="w"> </span><span class="mi">3329</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">2054</span><span class="w"> </span><span class="mf">2389.60</span><span class="w"> </span><span class="mi">3090</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+
+<span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">50306278</span><span class="w"> </span><span class="mf">52021344.65</span><span class="w"> </span><span class="mi">55069141</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">50669042</span><span class="w"> </span><span class="mf">52032507.05</span><span class="w"> </span><span class="mi">54383128</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+</code></pre></div>
+<p>On the efficiency cores, there is no difference:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">taskset</span><span class="w"> </span><span class="o">--</span><span class="n">cpu</span><span class="o">-</span><span class="n">list</span><span class="w"> </span><span class="mi">0</span><span class="o">-</span><span class="mi">3</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="s">""</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="n">warning</span>: <span class="nc">some</span><span class="w"> </span><span class="n">crates</span><span class="w"> </span><span class="n">are</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">which</span><span class="w"> </span><span class="n">defaults</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="p">,</span><span class="w"> </span><span class="n">but</span><span class="w"> </span><span class="kr">virtual</span><span class="w"> </span><span class="n">workspaces</span><span class="w"> </span><span class="n">default</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="n">keep</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="w">    </span><span class="n">Finished</span><span class="w"> </span><span class="n">dev</span><span class="w"> </span><span class="p">[</span><span class="n">unoptimized</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">debuginfo</span><span class="p">]</span><span class="w"> </span><span class="n">target</span><span class="p">(</span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mf">0.11</span><span class="n">s</span>
+<span class="w">     </span><span class="n">Running</span><span class="w"> </span><span class="err">`</span><span class="n">target</span><span class="o">/</span><span class="n">debug</span><span class="o">/</span><span class="n">sightglass</span><span class="o">-</span><span class="n">cli</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="err">`</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+
+<span class="n">instantiation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">5216</span><span class="w"> </span><span class="mf">6214.50</span><span class="w"> </span><span class="mi">9408</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">5274</span><span class="w"> </span><span class="mf">6807.20</span><span class="w"> </span><span class="mi">10777</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+
+<span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">107328450</span><span class="w"> </span><span class="mf">109423075.40</span><span class="w"> </span><span class="mi">114775754</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">108226908</span><span class="w"> </span><span class="mf">110536060.70</span><span class="w"> </span><span class="mi">113376486</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+
+<span class="n">execution</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">12505682</span><span class="w"> </span><span class="mf">12657196.70</span><span class="w"> </span><span class="mi">12765194</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">12477426</span><span class="w"> </span><span class="mf">12666983.30</span><span class="w"> </span><span class="mi">12849489</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+</code></pre></div>
+<p>With dynamic bounds checks, the overhead is even bigger:</p>
+<p>Performance cores:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">taskset</span><span class="w"> </span><span class="o">--</span><span class="n">cpu</span><span class="o">-</span><span class="n">list</span><span class="w"> </span><span class="mi">4</span><span class="o">-</span><span class="mi">7</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="s">"-O dynamic-memory-guard-size=0 -O static-memory-guard-size=0 -O static-memory-maximum-size=0"</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="n">warning</span>: <span class="nc">some</span><span class="w"> </span><span class="n">crates</span><span class="w"> </span><span class="n">are</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">which</span><span class="w"> </span><span class="n">defaults</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="p">,</span><span class="w"> </span><span class="n">but</span><span class="w"> </span><span class="kr">virtual</span><span class="w"> </span><span class="n">workspaces</span><span class="w"> </span><span class="n">default</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="n">keep</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="w">    </span><span class="n">Finished</span><span class="w"> </span><span class="n">dev</span><span class="w"> </span><span class="p">[</span><span class="n">unoptimized</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">debuginfo</span><span class="p">]</span><span class="w"> </span><span class="n">target</span><span class="p">(</span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mf">0.04</span><span class="n">s</span>
+<span class="w">     </span><span class="n">Running</span><span class="w"> </span><span class="err">`</span><span class="n">target</span><span class="o">/</span><span class="n">debug</span><span class="o">/</span><span class="n">sightglass</span><span class="o">-</span><span class="n">cli</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">'--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=-</span><span class="n">O</span><span class="w"> </span><span class="n">dynamic</span><span class="o">-</span><span class="n">memory</span><span class="o">-</span><span class="n">guard</span><span class="o">-</span><span class="n">size</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="o">-</span><span class="n">O</span><span class="w"> </span><span class="k">static</span><span class="o">-</span><span class="n">memory</span><span class="o">-</span><span class="n">guard</span><span class="o">-</span><span class="n">size</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="o">-</span><span class="n">O</span><span class="w"> </span><span class="k">static</span><span class="o">-</span><span class="n">memory</span><span class="o">-</span><span class="n">maximum</span><span class="o">-</span><span class="n">size</span><span class="o">=</span><span class="mi">0</span><span class="o">'</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="err">`</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+
+<span class="n">execution</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="err">Δ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">101879699.00</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">1141736.09</span><span class="w"> </span><span class="p">(</span><span class="n">confidence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">99</span><span class="o">%</span><span class="p">)</span>
+
+<span class="w">  </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mf">16.46</span><span class="n">x</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mf">16.81</span><span class="n">x</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="o">!</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">107106675</span><span class="w"> </span><span class="mf">108397620.75</span><span class="w"> </span><span class="mi">112636143</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">6452171</span><span class="w"> </span><span class="mf">6517921.75</span><span class="w"> </span><span class="mi">6757069</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+
+<span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="err">Δ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">2268916.25</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">1358278.96</span><span class="w"> </span><span class="p">(</span><span class="n">confidence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">99</span><span class="o">%</span><span class="p">)</span>
+
+<span class="w">  </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mf">1.02</span><span class="n">x</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mf">1.06</span><span class="n">x</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="o">!</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">57228321</span><span class="w"> </span><span class="mf">59363510.15</span><span class="w"> </span><span class="mi">62661925</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">58325815</span><span class="w"> </span><span class="mf">61632426.40</span><span class="w"> </span><span class="mi">64403315</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+
+<span class="n">instantiation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">2214</span><span class="w"> </span><span class="mf">2592.80</span><span class="w"> </span><span class="mi">3968</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">2162</span><span class="w"> </span><span class="mf">2441.25</span><span class="w"> </span><span class="mi">3405</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+</code></pre></div>
+<p>Efficiency cores:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">taskset</span><span class="w"> </span><span class="o">--</span><span class="n">cpu</span><span class="o">-</span><span class="n">list</span><span class="w"> </span><span class="mi">0</span><span class="o">-</span><span class="mi">3</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="s">"-O dynamic-memory-guard-size=0 -O static-memory-guard-size=0 -O static-memory-maximum-size=0"</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="n">warning</span>: <span class="nc">some</span><span class="w"> </span><span class="n">crates</span><span class="w"> </span><span class="n">are</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">which</span><span class="w"> </span><span class="n">defaults</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="p">,</span><span class="w"> </span><span class="n">but</span><span class="w"> </span><span class="kr">virtual</span><span class="w"> </span><span class="n">workspaces</span><span class="w"> </span><span class="n">default</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="n">keep</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="w">    </span><span class="n">Finished</span><span class="w"> </span><span class="n">dev</span><span class="w"> </span><span class="p">[</span><span class="n">unoptimized</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">debuginfo</span><span class="p">]</span><span class="w"> </span><span class="n">target</span><span class="p">(</span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mf">0.11</span><span class="n">s</span>
+<span class="w">     </span><span class="n">Running</span><span class="w"> </span><span class="err">`</span><span class="n">target</span><span class="o">/</span><span class="n">debug</span><span class="o">/</span><span class="n">sightglass</span><span class="o">-</span><span class="n">cli</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="o">'--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=-</span><span class="n">O</span><span class="w"> </span><span class="n">dynamic</span><span class="o">-</span><span class="n">memory</span><span class="o">-</span><span class="n">guard</span><span class="o">-</span><span class="n">size</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="o">-</span><span class="n">O</span><span class="w"> </span><span class="k">static</span><span class="o">-</span><span class="n">memory</span><span class="o">-</span><span class="n">guard</span><span class="o">-</span><span class="n">size</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="o">-</span><span class="n">O</span><span class="w"> </span><span class="k">static</span><span class="o">-</span><span class="n">memory</span><span class="o">-</span><span class="n">maximum</span><span class="o">-</span><span class="n">size</span><span class="o">=</span><span class="mi">0</span><span class="o">'</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="err">`</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+
+<span class="n">execution</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="err">Δ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">489379.55</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">43314.03</span><span class="w"> </span><span class="p">(</span><span class="n">confidence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">99</span><span class="o">%</span><span class="p">)</span>
+
+<span class="w">  </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mf">1.02</span><span class="n">x</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mf">1.02</span><span class="n">x</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span><span class="o">!</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">23615521</span><span class="w"> </span><span class="mf">23708462.10</span><span class="w"> </span><span class="mi">23789488</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">23161583</span><span class="w"> </span><span class="mf">23219082.55</span><span class="w"> </span><span class="mi">23330794</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+
+<span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">127294091</span><span class="w"> </span><span class="mf">131666671.05</span><span class="w"> </span><span class="mi">137908998</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">129037489</span><span class="w"> </span><span class="mf">133240513.70</span><span class="w"> </span><span class="mi">137623006</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+
+<span class="n">instantiation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">5316</span><span class="w"> </span><span class="mf">6323.80</span><span class="w"> </span><span class="mi">10262</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">5516</span><span class="w"> </span><span class="mf">6326.45</span><span class="w"> </span><span class="mi">9558</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">so</span>
+</code></pre></div>
+
+
+
+<a name="398507870"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398507870" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398507870">(Oct 25 2023 at 15:12)</a>:</h4>
+<p>Fascinating! Thanks for taking the time to collect these numbers and test here.</p>
+<p>I dug a bit and found some background information on csdb <a href="https://github.com/bytecodealliance/wasmtime/issues/1032#issuecomment-1122751761">here</a> and <a href="https://github.com/bytecodealliance/wasmtime/pull/4555">here</a>. I'm not spectre or aarch64 expert myself though so all I can be is a go-between with those.</p>
+<p>In 4555 though it looked like at the time performance was concluded to not be affected much, but that was likely not performed on an M1 chip which may be exhibiting different performance characteristics.</p>
+<p>One thing I've personally found a bit odd is that what you're probably running into here (in default mode) is the spectre guards for table bounds checks (and presumably spidermonkey has a lot of <code>call_indirect</code>). Our table bounds checks have both an explicit bounds check leading to a trap plus a select_spectre_guard. While this probably achieves spectre-hardening it also feels a bit overkill IMO and is possibly something we could improve.</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/wasmtime/issues/1032#issuecomment-1122751761" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/ecf8eb8292c025fc16d1ce0f65c77652f896b64d\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343261663038313139313237306633386330613338613637633832656562643939336437663534353931373161333038333434316437653961366131343233642f62797465636f6465616c6c69616e63652f7761736d74696d652f6973737565732f31303332)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/wasmtime/issues/1032#issuecomment-1122751761" title="Mitigating Spectre attacks · Issue #1032 · bytecodealliance/wasmtime">Mitigating Spectre attacks · Issue #1032 · bytecodealliance/wasmtime</a></div><div class="message_embed_description">Hello, You are probably well aware, but some mainstream compilers are emitting retpolines to help mitigate Spectre variant 2 attacks. Do you have any plans to add a similar capability to the creton...</div></div></div><div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/wasmtime/pull/4555" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/8f4497d600a9bb34b86669fd79471e6b6b6464fa\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f323264616563343032653838626236343336316337643465343536343264313936373039353532323033383464373130353739666633303031373032346433612f62797465636f6465616c6c69616e63652f7761736d74696d652f70756c6c2f34353535)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/wasmtime/pull/4555" title="Cranelift AArch64: Harden the Spectre mitigations by akirilov-arm · Pull Request #4555 · bytecodealliance/wasmtime">Cranelift AArch64: Harden the Spectre mitigations by akirilov-arm · Pull Request #4555 · bytecodealliance/wasmtime</a></div><div class="message_embed_description">As discussed in issue #1032, use the CSDB instruction.</div></div></div>
+
+
+
+<a name="398509206"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398509206" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398509206">(Oct 25 2023 at 15:19)</a>:</h4>
+<p>Also I'm curious, where did you get <code>taskset</code> from on macos? I've got an M2 and am curious to see if the situation is any better with that or if it's the same</p>
+
+
+
+<a name="398510257"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398510257" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398510257">(Oct 25 2023 at 15:23)</a>:</h4>
+<p>Running sightglass locally yields:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">execution</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="err">Δ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">282449.80</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">76316.41</span><span class="w"> </span><span class="p">(</span><span class="n">confidence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">99</span><span class="o">%</span><span class="p">)</span>
+
+<span class="w">  </span><span class="n">no</span><span class="o">-</span><span class="n">csdb</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mf">1.02</span><span class="n">x</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mf">1.03</span><span class="n">x</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="n">csdb</span><span class="p">.</span><span class="n">dylib</span><span class="o">!</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">10772130</span><span class="w"> </span><span class="mf">10871102.65</span><span class="w"> </span><span class="mi">11116720</span><span class="p">]</span><span class="w"> </span><span class="n">csdb</span><span class="p">.</span><span class="n">dylib</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">10483782</span><span class="w"> </span><span class="mf">10588652.85</span><span class="w"> </span><span class="mi">10753478</span><span class="p">]</span><span class="w"> </span><span class="n">no</span><span class="o">-</span><span class="n">csdb</span><span class="p">.</span><span class="n">dylib</span>
+</code></pre></div>
+<p>although this isn't using <code>taskset</code> for pinning. I'm not sure if it would by default put everything on the performance cores.</p>
+
+
+
+<a name="398520419"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398520419" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398520419">(Oct 25 2023 at 16:12)</a>:</h4>
+<p>Wow, that's a wild perf delta, <span class="user-mention" data-user-id="662020">@Martin Fink</span> ! I was indeed worried about this when the original PR came up; <span class="user-mention" data-user-id="300050">@Anton Kirilov</span> benchmarked on an Ampere Altra and found no impact</p>
+
+
+
+<a name="398520477"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398520477" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398520477">(Oct 25 2023 at 16:13)</a>:</h4>
+<p>re: <code>taskset</code>, I wonder, are you running Linux (Asahi or whatever) on your M1 by chance? could that have an impact (different system config register settings, etc)?</p>
+
+
+
+<a name="398527389"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398527389" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Anton Kirilov <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398527389">(Oct 25 2023 at 16:56)</a>:</h4>
+<p>In retrospect I should have worded my statement in issue #1032 a bit better, though in pull request #4555 I got it right, I think. Also, just to be clear, I am unable to comment on any microarchitectural details of any processor that has not been designed by Arm (beyond any publicly accessible documentation, if any exists), including how susceptible it is to Spectre-style attacks.</p>
+
+
+
+<a name="398550580"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398550580" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Martin Fink <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398550580">(Oct 25 2023 at 19:43)</a>:</h4>
+<p>Hi! yes, this was running on Asahi. I just tried the same benchmark again on my personal Macbook (M1 Pro; this time with macOS) and got essentially the same results.<br>
+AFAIK, you can't pin a process to the performance cores, but you can pin it to the efficiency cores using <code>taskset -c background command args...</code>. The macOS scheduler should prefer the performance cores for this kind of workload anyways I believe.</p>
+<p>Without <code>taskpolicy</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="s">""</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="n">warning</span>: <span class="nc">some</span><span class="w"> </span><span class="n">crates</span><span class="w"> </span><span class="n">are</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">which</span><span class="w"> </span><span class="n">defaults</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="p">,</span><span class="w"> </span><span class="n">but</span><span class="w"> </span><span class="kr">virtual</span><span class="w"> </span><span class="n">workspaces</span><span class="w"> </span><span class="n">default</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="n">keep</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="w">    </span><span class="n">Finished</span><span class="w"> </span><span class="n">dev</span><span class="w"> </span><span class="p">[</span><span class="n">unoptimized</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">debuginfo</span><span class="p">]</span><span class="w"> </span><span class="n">target</span><span class="p">(</span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mf">0.10</span><span class="n">s</span>
+<span class="w">     </span><span class="n">Running</span><span class="w"> </span><span class="err">`</span><span class="n">target</span><span class="o">/</span><span class="n">debug</span><span class="o">/</span><span class="n">sightglass</span><span class="o">-</span><span class="n">cli</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="err">`</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+
+<span class="n">execution</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="err">Δ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">7875436.90</span><span class="w"> </span><span class="err">±</span><span class="w"> </span><span class="mf">76393.16</span><span class="w"> </span><span class="p">(</span><span class="n">confidence</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">99</span><span class="o">%</span><span class="p">)</span>
+
+<span class="w">  </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="mf">3.15</span><span class="n">x</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="mf">3.20</span><span class="n">x</span><span class="w"> </span><span class="n">faster</span><span class="w"> </span><span class="n">than</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="o">!</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">11307195</span><span class="w"> </span><span class="mf">11495795.05</span><span class="w"> </span><span class="mi">11729345</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">3532096</span><span class="w"> </span><span class="mf">3620358.15</span><span class="w"> </span><span class="mi">3726905</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+
+<span class="n">instantiation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">2262</span><span class="w"> </span><span class="mf">2763.85</span><span class="w"> </span><span class="mi">4202</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">2274</span><span class="w"> </span><span class="mf">2556.15</span><span class="w"> </span><span class="mi">3046</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+
+<span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">147601278</span><span class="w"> </span><span class="mf">149324679.95</span><span class="w"> </span><span class="mi">151225801</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">146173673</span><span class="w"> </span><span class="mf">149144740.10</span><span class="w"> </span><span class="mi">155132568</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+</code></pre></div>
+<p>With <code>taskpolicy</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">taskpolicy</span><span class="w"> </span><span class="o">-</span><span class="n">c</span><span class="w"> </span><span class="n">background</span><span class="w"> </span><span class="n">cargo</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="o">--</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="s">""</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+<span class="n">warning</span>: <span class="nc">some</span><span class="w"> </span><span class="n">crates</span><span class="w"> </span><span class="n">are</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">which</span><span class="w"> </span><span class="n">defaults</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="p">,</span><span class="w"> </span><span class="n">but</span><span class="w"> </span><span class="kr">virtual</span><span class="w"> </span><span class="n">workspaces</span><span class="w"> </span><span class="n">default</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="err">`</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="n">keep</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="n">note</span>: <span class="nc">to</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">edition</span><span class="w"> </span><span class="mi">2021</span><span class="w"> </span><span class="n">resolver</span><span class="p">,</span><span class="w"> </span><span class="n">specify</span><span class="w"> </span><span class="err">`</span><span class="n">workspace</span><span class="p">.</span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"2"</span><span class="err">`</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">workspace</span><span class="w"> </span><span class="n">root</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">manifest</span>
+<span class="w">    </span><span class="n">Finished</span><span class="w"> </span><span class="n">dev</span><span class="w"> </span><span class="p">[</span><span class="n">unoptimized</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">debuginfo</span><span class="p">]</span><span class="w"> </span><span class="n">target</span><span class="p">(</span><span class="n">s</span><span class="p">)</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mf">2.16</span><span class="n">s</span>
+<span class="w">     </span><span class="n">Running</span><span class="w"> </span><span class="err">`</span><span class="n">target</span><span class="o">/</span><span class="n">debug</span><span class="o">/</span><span class="n">sightglass</span><span class="o">-</span><span class="n">cli</span><span class="w"> </span><span class="n">benchmark</span><span class="w"> </span><span class="o">--</span><span class="n">iterations</span><span class="o">-</span><span class="n">per</span><span class="o">-</span><span class="n">process</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="w"> </span><span class="o">../</span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span><span class="w"> </span><span class="o">--</span><span class="n">engine</span><span class="o">-</span><span class="n">flags</span><span class="o">=</span><span class="w"> </span><span class="n">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span><span class="err">`</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+<span class="p">.</span>
+
+<span class="n">instantiation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">6124</span><span class="w"> </span><span class="mf">27213.70</span><span class="w"> </span><span class="mi">111028</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">5381</span><span class="w"> </span><span class="mf">40362.40</span><span class="w"> </span><span class="mi">295461</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+
+<span class="n">execution</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">23995605</span><span class="w"> </span><span class="mf">30439809.15</span><span class="w"> </span><span class="mi">38672919</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">24360364</span><span class="w"> </span><span class="mf">28723230.40</span><span class="w"> </span><span class="mi">36000666</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+
+<span class="n">compilation</span><span class="w"> </span>:: <span class="nc">cycles</span><span class="w"> </span>:: <span class="nc">benchmarks</span><span class="o">/</span><span class="n">spidermonkey</span><span class="o">/</span><span class="n">benchmark</span><span class="p">.</span><span class="n">wasm</span>
+
+<span class="w">  </span><span class="n">No</span><span class="w"> </span><span class="n">difference</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">performance</span><span class="p">.</span>
+
+<span class="w">  </span><span class="p">[</span><span class="mi">401455183</span><span class="w"> </span><span class="mf">549387423.20</span><span class="w"> </span><span class="mi">1355357035</span><span class="p">]</span><span class="w"> </span><span class="n">tmp</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+<span class="w">  </span><span class="p">[</span><span class="mi">394497975</span><span class="w"> </span><span class="mf">538719528.60</span><span class="w"> </span><span class="mi">858583052</span><span class="p">]</span><span class="w"> </span><span class="n">wasmtime</span><span class="o">/</span><span class="n">target</span><span class="o">/</span><span class="n">release</span><span class="o">/</span><span class="n">libwasmtime_bench_api</span><span class="p">.</span><span class="n">dylib</span>
+</code></pre></div>
+
+
+
+<a name="398550816"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398550816" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398550816">(Oct 25 2023 at 19:45)</a>:</h4>
+<p>Whoa! Without <code>taskpolicy</code> you're showing a 3x slowdown on M1, but on an M2 I got a 2% slowdown, so now I'm curious if someone can reproduce that and if this is perhaps something that was updated for the M2</p>
+
+
+
+<a name="398550932"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398550932" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Martin Fink <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398550932">(Oct 25 2023 at 19:46)</a>:</h4>
+<p>Yes, and if I turn on dynamic bounds checks the slowdown gets worse (as there is way more spectre guards)</p>
+
+
+
+<a name="398551169"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398551169" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398551169">(Oct 25 2023 at 19:48)</a>:</h4>
+<p>yeah that part definitely makes sense</p>
+
+
+
+<a name="398551922"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398551922" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398551922">(Oct 25 2023 at 19:54)</a>:</h4>
+<p>FWIW this wasm:</p>
+<div class="codehilite" data-code-language="wasm"><pre><span></span><code>(module
+  (table 1 funcref)
+  (func (param i32)
+    (call_indirect (local.get 0))
+  )
+)
+</code></pre></div>
+<p>has this codegen for me locally (annotated)</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="n">setup</span>
+<span class="w">       </span><span class="mi">0</span>: <span class="nc">d503237f</span><span class="w">      </span><span class="n">pacibsp</span>
+<span class="w">       </span><span class="mi">4</span>: <span class="nc">a9bf7bfd</span><span class="w">      </span><span class="n">stp</span><span class="w">     </span><span class="n">x29</span><span class="p">,</span><span class="w"> </span><span class="n">x30</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">sp</span><span class="p">,</span><span class="w"> </span>#<span class="o">-</span><span class="mh">0x10</span><span class="p">]</span><span class="o">!</span>
+<span class="w">       </span><span class="mi">8</span>: <span class="mi">910003</span><span class="n">fd</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x29</span><span class="p">,</span><span class="w"> </span><span class="n">sp</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">stack</span><span class="w"> </span><span class="n">overflow</span><span class="w"> </span><span class="n">check</span>
+<span class="w">       </span><span class="n">c</span>: <span class="nc">f8408010</span><span class="w">      </span><span class="n">ldur</span><span class="w">    </span><span class="n">x16</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x8</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">10</span>: <span class="nc">f8400210</span><span class="w">      </span><span class="n">ldur</span><span class="w">    </span><span class="n">x16</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x16</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">14</span>: <span class="nc">eb3063ff</span><span class="w">      </span><span class="n">cmp</span><span class="w">     </span><span class="n">sp</span><span class="p">,</span><span class="w"> </span><span class="n">x16</span>
+<span class="w">      </span><span class="mi">18</span>: <span class="mi">54000543</span><span class="w">      </span><span class="n">b</span><span class="p">.</span><span class="n">lo</span><span class="w">    </span><span class="mh">0xc0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">wasm</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>::<span class="n">function</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">+</span><span class="mh">0xc0</span><span class="o">&gt;</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">register</span><span class="w"> </span><span class="n">spills</span>
+<span class="w">      </span><span class="mi">1</span><span class="n">c</span>: <span class="nc">f81f0ff3</span><span class="w">      </span><span class="kt">str</span><span class="w">     </span><span class="n">x19</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">sp</span><span class="p">,</span><span class="w"> </span>#<span class="o">-</span><span class="mh">0x10</span><span class="p">]</span><span class="o">!</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">branch</span><span class="o">-</span><span class="n">to</span><span class="o">-</span><span class="n">trap</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">out</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">bounds</span>
+<span class="w">      </span><span class="mi">20</span>: <span class="nc">aa0003e6</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x6</span><span class="p">,</span><span class="w"> </span><span class="n">x0</span>
+<span class="w">      </span><span class="mi">24</span>: <span class="nc">b9405005</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">w5</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x50</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">28</span>: <span class="mi">6</span><span class="n">b05005f</span><span class="w">      </span><span class="n">cmp</span><span class="w">     </span><span class="n">w2</span><span class="p">,</span><span class="w"> </span><span class="n">w5</span>
+<span class="w">      </span><span class="mi">2</span><span class="n">c</span>: <span class="mi">54000482</span><span class="w">      </span><span class="n">b</span><span class="p">.</span><span class="n">hs</span><span class="w">    </span><span class="mh">0xbc</span><span class="w"> </span><span class="o">&lt;</span><span class="n">wasm</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>::<span class="n">function</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">+</span><span class="mh">0xbc</span><span class="o">&gt;</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">calculate</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">element</span><span class="w"> </span><span class="n">address</span>
+<span class="w">      </span><span class="mi">30</span>: <span class="nc">aa0603e0</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="n">x6</span>
+<span class="w">      </span><span class="mi">34</span>: <span class="nc">f9402407</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">x7</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x48</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">38</span>: <span class="mi">2</span><span class="n">a0203e8</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">w8</span><span class="p">,</span><span class="w"> </span><span class="n">w2</span>
+<span class="w">      </span><span class="mi">3</span><span class="n">c</span>: <span class="mi">8</span><span class="n">b080ce8</span><span class="w">      </span><span class="n">add</span><span class="w">     </span><span class="n">x8</span><span class="p">,</span><span class="w"> </span><span class="n">x7</span><span class="p">,</span><span class="w"> </span><span class="n">x8</span><span class="p">,</span><span class="w"> </span><span class="n">lsl</span><span class="w"> </span>#<span class="mi">3</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">spectre</span><span class="w"> </span><span class="n">guard</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">address</span><span class="w"> </span><span class="n">or</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">base</span>
+<span class="w">      </span><span class="mi">40</span>: <span class="mi">6</span><span class="n">b05005f</span><span class="w">      </span><span class="n">cmp</span><span class="w">     </span><span class="n">w2</span><span class="p">,</span><span class="w"> </span><span class="n">w5</span>
+<span class="w">      </span><span class="mi">44</span>: <span class="mi">9</span><span class="n">a8820e8</span><span class="w">      </span><span class="n">csel</span><span class="w">    </span><span class="n">x8</span><span class="p">,</span><span class="w"> </span><span class="n">x7</span><span class="p">,</span><span class="w"> </span><span class="n">x8</span><span class="p">,</span><span class="w"> </span><span class="n">hs</span>
+<span class="w">      </span><span class="mi">48</span>: <span class="nc">d503229f</span><span class="w">      </span><span class="n">csdb</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">element</span><span class="p">,</span><span class="w"> </span><span class="n">branch</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">init</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">it</span><span class="o">'</span><span class="na">s</span><span class="w"> </span><span class="n">not</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">already</span><span class="w"> </span><span class="n">initialized</span>
+<span class="w">      </span><span class="mi">4</span><span class="n">c</span>: <span class="nc">f9400109</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">x9</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x8</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">50</span>: <span class="mi">927</span><span class="n">ff920</span><span class="w">      </span><span class="n">and</span><span class="w">     </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="n">x9</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0xfffffffffffffffe</span>
+<span class="w">      </span><span class="mi">54</span>: <span class="nc">b4000209</span><span class="w">      </span><span class="n">cbz</span><span class="w">     </span><span class="n">x9</span><span class="p">,</span><span class="w"> </span><span class="mh">0x94</span><span class="w"> </span><span class="o">&lt;</span><span class="n">wasm</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>::<span class="n">function</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">+</span><span class="mh">0x94</span><span class="o">&gt;</span>
+<span class="w">      </span><span class="mi">58</span>: <span class="nc">aa0603f3</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x19</span><span class="p">,</span><span class="w"> </span><span class="n">x6</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">check</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">element</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">null</span>
+<span class="w">      </span><span class="mi">5</span><span class="n">c</span>: <span class="nc">b40002c0</span><span class="w">      </span><span class="n">cbz</span><span class="w">     </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="mh">0xb4</span><span class="w"> </span><span class="o">&lt;</span><span class="n">wasm</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>::<span class="n">function</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">+</span><span class="mh">0xb4</span><span class="o">&gt;</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">load</span><span class="w"> </span><span class="n">metadata</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">table</span>
+<span class="w">      </span><span class="mi">60</span>: <span class="nc">b940180d</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">w13</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x18</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">64</span>: <span class="nc">f940226e</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">x14</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x19</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x40</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">68</span>: <span class="nc">aa1303e6</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x6</span><span class="p">,</span><span class="w"> </span><span class="n">x19</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="k">type</span><span class="o">-</span><span class="n">check</span><span class="w"> </span><span class="n">and</span><span class="w"> </span><span class="n">trap</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">function</span><span class="w"> </span><span class="n">doesn</span><span class="o">'</span><span class="na">t</span><span class="w"> </span><span class="n">have</span><span class="w"> </span><span class="n">the</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">desired</span><span class="w"> </span><span class="k">type</span>
+      <span class="mi">6</span><span class="n">c</span>: <span class="nc">b94005ce</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">w14</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x14</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x4</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">70</span>: <span class="mi">6</span><span class="n">b0e01bf</span><span class="w">      </span><span class="n">cmp</span><span class="w">     </span><span class="n">w13</span><span class="p">,</span><span class="w"> </span><span class="n">w14</span>
+<span class="w">      </span><span class="mi">74</span>: <span class="mi">54000221</span><span class="w">      </span><span class="n">b</span><span class="p">.</span><span class="n">ne</span><span class="w">    </span><span class="mh">0xb8</span><span class="w"> </span><span class="o">&lt;</span><span class="n">wasm</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>::<span class="n">function</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">+</span><span class="mh">0xb8</span><span class="o">&gt;</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">perform</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">actual</span><span class="w"> </span><span class="n">call</span>
+<span class="w">      </span><span class="mi">78</span>: <span class="nc">f9400802</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">x2</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x10</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">7</span><span class="n">c</span>: <span class="nc">f9401000</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x20</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">80</span>: <span class="nc">aa0603e1</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x1</span><span class="p">,</span><span class="w"> </span><span class="n">x6</span>
+<span class="w">      </span><span class="mi">84</span>: <span class="nc">d63f0040</span><span class="w">      </span><span class="n">blr</span><span class="w">     </span><span class="n">x2</span>
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="k">return</span>
+<span class="w">      </span><span class="mi">88</span>: <span class="nc">f84107f3</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">x19</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">sp</span><span class="p">],</span><span class="w"> </span>#<span class="mh">0x10</span>
+<span class="w">      </span><span class="mi">8</span><span class="n">c</span>: <span class="nc">a8c17bfd</span><span class="w">      </span><span class="n">ldp</span><span class="w">     </span><span class="n">x29</span><span class="p">,</span><span class="w"> </span><span class="n">x30</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">sp</span><span class="p">],</span><span class="w"> </span>#<span class="mh">0x10</span>
+<span class="w">      </span><span class="mi">90</span>: <span class="nc">d65f0fff</span><span class="w">      </span><span class="n">retab</span>
+
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">lazy</span><span class="w"> </span><span class="n">initialization</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="n">entries</span>
+<span class="w">      </span><span class="mi">94</span>: <span class="nc">aa0603e0</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="n">x6</span>
+<span class="w">      </span><span class="mi">98</span>: <span class="nc">f9401c0a</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x0</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x38</span><span class="p">]</span>
+<span class="w">      </span><span class="mi">9</span><span class="n">c</span>: <span class="nc">f940254a</span><span class="w">      </span><span class="n">ldr</span><span class="w">     </span><span class="n">x10</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x10</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x48</span><span class="p">]</span>
+<span class="w">      </span><span class="n">a0</span>: <span class="mi">52800001</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span>#<span class="mh">0x0</span><span class="w">                </span><span class="c1">// =0</span>
+<span class="w">      </span><span class="n">a4</span>: <span class="nc">aa0603f3</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x19</span><span class="p">,</span><span class="w"> </span><span class="n">x6</span>
+<span class="w">      </span><span class="n">a8</span>: <span class="nc">aa1303e0</span><span class="w">      </span><span class="n">mov</span><span class="w">     </span><span class="n">x0</span><span class="p">,</span><span class="w"> </span><span class="n">x19</span>
+<span class="w">      </span><span class="n">ac</span>: <span class="nc">d63f0140</span><span class="w">      </span><span class="n">blr</span><span class="w">     </span><span class="n">x10</span>
+<span class="w">      </span><span class="n">b0</span>: <span class="mi">17</span><span class="n">ffffeb</span><span class="w">      </span><span class="n">b</span><span class="w">       </span><span class="mh">0x5c</span><span class="w"> </span><span class="o">&lt;</span><span class="n">wasm</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>::<span class="n">function</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">+</span><span class="mh">0x5c</span><span class="o">&gt;</span>
+
+<span class="w">                        </span><span class="p">;;</span><span class="w"> </span><span class="n">various</span><span class="w"> </span><span class="n">traps</span>
+<span class="w">      </span><span class="n">b4</span>: <span class="mi">0000</span><span class="n">c11f</span><span class="w">      </span><span class="n">udf</span><span class="w">     </span>#<span class="mh">0xc11f</span>
+<span class="w">      </span><span class="n">b8</span>: <span class="mi">0000</span><span class="n">c11f</span><span class="w">      </span><span class="n">udf</span><span class="w">     </span>#<span class="mh">0xc11f</span>
+<span class="w">      </span><span class="n">bc</span>: <span class="mi">0000</span><span class="n">c11f</span><span class="w">      </span><span class="n">udf</span><span class="w">     </span>#<span class="mh">0xc11f</span>
+<span class="w">      </span><span class="n">c0</span>: <span class="mi">0000</span><span class="n">c11f</span><span class="w">      </span><span class="n">udf</span><span class="w">     </span>#<span class="mh">0xc11f</span>
+</code></pre></div>
+
+
+
+<a name="398551976"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398551976" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398551976">(Oct 25 2023 at 19:55)</a>:</h4>
+<p>so you can see our <code>call_indirect</code> is not exactly the most optimal as-is and generates a lot of code</p>
+
+
+
+<a name="398552032"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398552032" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398552032">(Oct 25 2023 at 19:55)</a>:</h4>
+<p>but it's a bit odd to me that there's two length comparisons where we should probably only have one with spectre things enabled</p>
+
+
+
+<a name="398552653"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398552653" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Martin Fink <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398552653">(Oct 25 2023 at 20:00)</a>:</h4>
+<p>Yeah that's how I found this oddity -- I was trying to look at the <code>indirect_call</code> code and looking for a possibility to optimize it. But then even when removing the signature check completely, there was no performance difference (because <code>csdb</code> ate all performance gains one might gain from completely removing signature checks).</p>
+
+
+
+<a name="398552838"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398552838" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398552838">(Oct 25 2023 at 20:01)</a>:</h4>
+<p>if you haven't already found it, <code>-Ccranelift-enable_table_access_spectre_mitigation=n</code> will disable the <code>csdb</code> bits</p>
+
+
+
+<a name="398552875"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398552875" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398552875">(Oct 25 2023 at 20:01)</a>:</h4>
+<p>basically disabling the <code>enable_table_access_spectre_mitigation</code> setting in Cranelift</p>
+
+
+
+<a name="398552894"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398552894" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Martin Fink <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398552894">(Oct 25 2023 at 20:01)</a>:</h4>
+<p>Yes, with that I don't have the slowdown</p>
+
+
+
+<a name="398553012"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398553012" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398553012">(Oct 25 2023 at 20:02)</a>:</h4>
+<p>you may also be interested in <a href="https://github.com/bytecodealliance/wasmtime/issues/5532">this issue</a> which is probably a good starting point for optimizing this</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/wasmtime/issues/5532" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/6e8611fb2a92f860222aa212cbdc98529111823f\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f666536616338326432613830656163333362343161336632313265333135363933383466343262373165326135623735303766393565643533643738613932302f62797465636f6465616c6c69616e63652f7761736d74696d652f6973737565732f35353332)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/wasmtime/issues/5532" title="Cranelift: Remove `table_addr` and tables from CLIF, move them into `cranelift-wasm`'s Wasm -&gt; CLIF lowering · Issue #5532 · bytecodealliance/wasmtime">Cranelift: Remove `table_addr` and tables from CLIF, move them into `cranelift-wasm`'s Wasm -&gt; CLIF lowering · Issue #5532 · bytecodealliance/wasmtime</a></div><div class="message_embed_description">Similar to what we did with heaps in #5283</div></div></div>
+
+
+
+<a name="398553057"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398553057" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398553057">(Oct 25 2023 at 20:02)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="253994">Alex Crichton</span> <a href="#narrow/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29/near/398552032">said</a>:</p>
+<blockquote>
+<p>but it's a bit odd to me that there's two length comparisons where we should probably only have one with spectre things enabled</p>
+</blockquote>
+<p>we did the optimization to dedupe bounds checks and spectre guards for memories, but never did that for tables</p>
+
+
+
+<a name="398553121"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398553121" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398553121">(Oct 25 2023 at 20:02)</a>:</h4>
+<p>since some of the optimizations are best done at the producer level rather than in CLIF, for example we know when a table has a min/max size that's the same we could avoid a dynamic load of the table's length since it's statically known</p>
+
+
+
+<a name="398553156"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398553156" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398553156">(Oct 25 2023 at 20:03)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="253990">fitzgen (he/him)</span> <a href="#narrow/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29/near/398553057">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="253994">Alex Crichton</span> <a href="#narrow/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29/near/398552032">said</a>:</p>
+<blockquote>
+<p>but it's a bit odd to me that there's two length comparisons where we should probably only have one with spectre things enabled</p>
+</blockquote>
+<p>we did the optimization to dedupe bounds checks and spectre guards for memories, but never did that for tables</p>
+</blockquote>
+<p>oh right!</p>
+
+
+
+<a name="398553201"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398553201" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398553201">(Oct 25 2023 at 20:03)</a>:</h4>
+<p>ah yeah that issue would be a pre-req for doing the same optimization for table accesses</p>
+
+
+
+<a name="398553508"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398553508" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Martin Fink <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398553508">(Oct 25 2023 at 20:05)</a>:</h4>
+<p>If you don't mind, I might have some free time in the coming days/weeks to look at this, since it sounds like an interesting issue. (And I'm a bit familiar with the pieces that compute indirect calls and table addresses now :) )</p>
+
+
+
+<a name="398553746"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398553746" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398553746">(Oct 25 2023 at 20:07)</a>:</h4>
+<p>that'd be great! Many of us can help out with the issue so don't hesistate to ask questions here or on github or similar</p>
+
+
+
+<a name="398553992"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398553992" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398553992">(Oct 25 2023 at 20:09)</a>:</h4>
+<p>I think this conversation may be getting a bit sidetracked by the above -- the main slowdown is the <code>csdb</code>, so we should work out a way to avoid that if we can, right?</p>
+
+
+
+<a name="398554014"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554014" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554014">(Oct 25 2023 at 20:09)</a>:</h4>
+<p>I just confirmed on my M1 on macOS that I see a ~2x speedup on spidermonkey.wasm when removing <code>csdb</code></p>
+
+
+
+<a name="398554023"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554023" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554023">(Oct 25 2023 at 20:09)</a>:</h4>
+<p>so my guess is that it's doing a full pipeline flush / barrier</p>
+
+
+
+<a name="398554141"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554141" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554141">(Oct 25 2023 at 20:10)</a>:</h4>
+<p>I know the aarch64 spec says that in theory we need to future-proof against value speculation with <code>csdb</code> but if it carries this much penalty on M1, maybe we should reconsider...</p>
+
+
+
+<a name="398554406"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554406" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554406">(Oct 25 2023 at 20:12)</a>:</h4>
+<p>oh sorry yeah I didn't mean to sidetrack too much, but wanted to pull on the thread of "let's optimize call_indirect" a bit</p>
+
+
+
+<a name="398554431"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554431" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554431">(Oct 25 2023 at 20:13)</a>:</h4>
+<p>given the data on M2 it may mean that we could consider a possible M1-specific rule along these lines</p>
+
+
+
+<a name="398554459"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554459" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554459">(Oct 25 2023 at 20:13)</a>:</h4>
+<p>it seems that a concrete change could be: put the use of the instruction under another flag, call it <code>spectre_aarch64_value_speculation_barrier</code> or something similar, and have it off by default</p>
+
+
+
+<a name="398554465"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554465" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554465">(Oct 25 2023 at 20:13)</a>:</h4>
+<p>although with <a href="https://ileakage.com/">this just coming out today</a> we should probably be somewhat certain heh</p>
+
+
+
+<a name="398554512"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554512" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554512">(Oct 25 2023 at 20:13)</a>:</h4>
+<p>if this only affects M1 though should it be off-by-default?</p>
+
+
+
+<a name="398554621"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554621" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554621">(Oct 25 2023 at 20:14)</a>:</h4>
+<p>or on-by-default, the thing I was about to say is we should then have an allowlist (or denylist, depending) of uarches</p>
+
+
+
+<a name="398554665"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554665" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554665">(Oct 25 2023 at 20:14)</a>:</h4>
+<p>if we know it's slow just on M1, let's turn it off on M1, with the reasoning that we suspect M1 doesn't do value speculation</p>
+
+
+
+<a name="398554706"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554706" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554706">(Oct 25 2023 at 20:15)</a>:</h4>
+<p>(linked paper seems to be about timer resolution, that's orthogonal to speculation kinds I guess?)</p>
+
+
+
+<a name="398554831"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554831" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554831">(Oct 25 2023 at 20:16)</a>:</h4>
+<p>oh no it's all about speculation, they showed that without low-resolution timers they successfully launched spectre stuff on all macOS M1/M2 devices</p>
+
+
+
+<a name="398554885"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554885" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554885">(Oct 25 2023 at 20:16)</a>:</h4>
+<p>they achieved an arbitrary read of any 64-bit address within the process via speculation</p>
+
+
+
+<a name="398554917"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398554917" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398554917">(Oct 25 2023 at 20:17)</a>:</h4>
+<p>right, the key contribution seems to be about timer resolution afaict though</p>
+
+
+
+<a name="398555053"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398555053" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398555053">(Oct 25 2023 at 20:18)</a>:</h4>
+<p>(it's already known that m1/m2/... speculate since they're OoO, they seem to measure the depth but it was already known they have big OoO windows e.g. M1 is I think 512 insts in the ROB)</p>
+
+
+
+<a name="398555241"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398555241" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398555241">(Oct 25 2023 at 20:19)</a>:</h4>
+<p>dougallj's uarch tables seem to confirm that CSDB is a full fence: 27-cycle latency (<a href="https://dougallj.github.io/applecpu/firestorm-int.html">https://dougallj.github.io/applecpu/firestorm-int.html</a>)</p>
+
+
+
+<a name="398556125"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398556125" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398556125">(Oct 25 2023 at 20:26)</a>:</h4>
+<p>I'm not able to find anything that documents better what the limits of value speculation are in M1. The specific guarantee we'd need to be 100% sure about this is that M1 doesn't speculate flag values on the result of the compare that feed into the <code>csel</code>. What I do know is (i) value speculation has historically been considered extremely difficult and complex, and not likely to be deployed; (ii) in cases where it would be, it would likely be used to predict the result of a long-latency op, like a cache-miss load, early (at least that was the original academic paper's proposal); but the address we're bounds-checking is usually not that</p>
+
+
+
+<a name="398556331"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398556331" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398556331">(Oct 25 2023 at 20:28)</a>:</h4>
+<p>again normally I'd say we should follow ISA spec to the letter, but a 2x slowdown on SpiderMonkey for a theoretical issue that likely doesn't exist on this uarch is... hard to accept :-)</p>
+
+
+
+<a name="398556651"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398556651" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398556651">(Oct 25 2023 at 20:31)</a>:</h4>
+<p>to make sure I understand, the worry is that <code>csel</code> speculates the result not based on the actual inputs but on something conjured out of thin air?</p>
+
+
+
+<a name="398556672"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398556672" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398556672">(Oct 25 2023 at 20:31)</a>:</h4>
+<p>e.g. it may not speculate based on the two possible inputs, but actually something totally different?</p>
+
+
+
+<a name="398556695"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398556695" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398556695">(Oct 25 2023 at 20:31)</a>:</h4>
+<p>(I'm naive and know very little about mitigating spectre apart from the high-level bits)</p>
+
+
+
+<a name="398556979"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398556979" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398556979">(Oct 25 2023 at 20:34)</a>:</h4>
+<p>right, say that there is a value predictor that fires when an instruction's inputs are not ready; it says "execute this csel as if the flags are &lt;no overflow&gt;", and the load speculatively executes and we affect the cache. The value speculation idea is that we could do that, remember what we speculated, and when the real input resolves, keep the work we did if we got it right</p>
+
+
+
+<a name="398557011"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557011" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557011">(Oct 25 2023 at 20:34)</a>:</h4>
+<p>the original paper on value speculation was in iirc 1996, it's a neat idea, but afaik no one has actually built it</p>
+
+
+
+<a name="398557065"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557065" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557065">(Oct 25 2023 at 20:35)</a>:</h4>
+<p>csdb is described as "future proofing", which reading between the lines a bit (opinion follows!) tells me the ISA folks want it in software now so they have the freedom to do these tricks later</p>
+
+
+
+<a name="398557106"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557106" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557106">(Oct 25 2023 at 20:35)</a>:</h4>
+<p>wow that's wild</p>
+
+
+
+<a name="398557198"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557198" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557198">(Oct 25 2023 at 20:36)</a>:</h4>
+<p>it definitely makes sense to me then at the very least that if it's purely future-proofing then we can probably safely say no new M1s will ever be designed so we can disable it there</p>
+
+
+
+<a name="398557243"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557243" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557243">(Oct 25 2023 at 20:36)</a>:</h4>
+<p>at least on x86, everyone has seemed to just tacitly accept that it's not done, at least for cmov's (or maybe there was a statement about this from Intel that I missed?), so we can use a cmp+cmov as a mask on the misspeculated path</p>
+
+
+
+<a name="398557253"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557253" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557253">(Oct 25 2023 at 20:36)</a>:</h4>
+<p>rephrased: disabling on M1 makes sense if we know M1 doesn't do value speculation, disabling elsewhere is still somewhat iffy but perhaps not necessary if it's not much of a perf impact</p>
+
+
+
+<a name="398557274"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557274" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557274">(Oct 25 2023 at 20:36)</a>:</h4>
+<p>interesting yeah</p>
+
+
+
+<a name="398557293"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557293" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557293">(Oct 25 2023 at 20:37)</a>:</h4>
+<p>do js engines use csdb do you know?</p>
+
+
+
+<a name="398557302"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557302" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557302">(Oct 25 2023 at 20:37)</a>:</h4>
+<p>and, right, the extra evidence I'd offer is that the barrier needed to protect against it is expensive, so they didn't optimize it, so it probably isn't needed</p>
+
+
+
+<a name="398557312"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557312" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557312">(Oct 25 2023 at 20:37)</a>:</h4>
+<p>b/c if they don't I doubt that us doing so would really move the needle</p>
+
+
+
+<a name="398557345"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557345" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557345">(Oct 25 2023 at 20:37)</a>:</h4>
+<p>interesting Q, I was gonna check that next! apparently SM recently removed <em>all</em> spectre hardening because they just put trust domains in separate processes now (FF finished Project Fission)</p>
+
+
+
+<a name="398557351"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557351" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557351">(Oct 25 2023 at 20:37)</a>:</h4>
+<p>but historically...</p>
+
+
+
+<a name="398557355"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557355" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557355">(Oct 25 2023 at 20:37)</a>:</h4>
+<p>oh damn</p>
+
+
+
+<a name="398557435"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557435" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557435">(Oct 25 2023 at 20:38)</a>:</h4>
+<p>I wonder if we should disable spectre stuff by defaut then and document accordingly?</p>
+
+
+
+<a name="398557466"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557466" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557466">(Oct 25 2023 at 20:38)</a>:</h4>
+<p>anyone who runs multi-tenant in a single process probably still cares!</p>
+
+
+
+<a name="398557475"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557475" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557475">(Oct 25 2023 at 20:38)</a>:</h4>
+<p>it is a valid question for the CLI though</p>
+
+
+
+<a name="398557536"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557536" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557536">(Oct 25 2023 at 20:39)</a>:</h4>
+<p>(and I guess there are interesting questions around component model + multi-module too -- if you run mutually mistrusting modules in a component you probably still want the hardening)</p>
+
+
+
+<a name="398557729"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557729" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557729">(Oct 25 2023 at 20:41)</a>:</h4>
+<p>good point yeah</p>
+
+
+
+<a name="398557751"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398557751" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398557751">(Oct 25 2023 at 20:41)</a>:</h4>
+<p>I suppose this means that we basically can't use browsers as "prior art" if they're removing spectre things</p>
+
+
+
+<a name="398558409"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398558409" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398558409">(Oct 25 2023 at 20:47)</a>:</h4>
+<p>so I'm looking through SM's Wasm implementation prior to their removal of spectre-protection-by-default (bug 1837602, Jun 23 of this year, commit <code>b7d1824da842b37c4e0089ded35f9fb7b089fa60</code> in the <a href="http://github.com/mozilla/gecko-dev">github.com/mozilla/gecko-dev</a> mercurial mirror)</p>
+<div class="message_embed"><a class="message_embed_image" href="http://github.com/mozilla/gecko-dev" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/dc074c7bbd492d3c40653fdcdb5e2c60f45fc046\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f656563636339363566303163623931336233353334386266303765323938636337653965633664323039616461303661646661366638633432326135303937642f6d6f7a696c6c612f6765636b6f2d646576)"></a><div class="data-container"><div class="message_embed_title"><a href="http://github.com/mozilla/gecko-dev" title="GitHub - mozilla/gecko-dev: Read-only Git mirror of the Mercurial gecko repositories at https://hg.mozilla.org. How to contribute: https://firefox-source-docs.mozilla.org/contributing/contribution_quickref.html">GitHub - mozilla/gecko-dev: Read-only Git mirror of the Mercurial gecko repositories at https://hg.mozilla.org. How to contribute: https://firefox-source-docs.mozilla.org/contributing/contribution_quickref.html</a></div><div class="message_embed_description">Read-only Git mirror of the Mercurial gecko repositories at https://hg.mozilla.org. How to contribute: https://firefox-source-docs.mozilla.org/contributing/contribution_quickref.html - GitHub - moz...</div></div></div>
+
+
+
+<a name="398558438"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398558438" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398558438">(Oct 25 2023 at 20:47)</a>:</h4>
+<p>and... surprisingly enough, I'm not able to find anything, at least in <code>WasmBaselineCompile.cpp</code></p>
+
+
+
+<a name="398558524"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398558524" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398558524">(Oct 25 2023 at 20:48)</a>:</h4>
+<p>(<code>masm.speculationBarrier()</code> is the magical incantation that gives <code>csdb</code> on aarch64; it's still there in some hostcalls)</p>
+
+
+
+<a name="398558761"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398558761" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Afonso Bordado <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398558761">(Oct 25 2023 at 20:50)</a>:</h4>
+<p>Would something like what <span class="user-mention" data-user-id="300050">@Anton Kirilov</span>  <a href="https://github.com/bytecodealliance/wasmtime/issues/1032#issuecomment-1249736886">mentioned in #1032</a> also solve this? Setting a software context id when transitioning to the guest, and removing the <code>csdb</code>?</p>
+<p>(I'm not sure if they solve the same spectre issue, or if it's a different one. I'm not too familiar with any of this)</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/wasmtime/issues/1032#issuecomment-1249736886" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/ecf8eb8292c025fc16d1ce0f65c77652f896b64d\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343261663038313139313237306633386330613338613637633832656562643939336437663534353931373161333038333434316437653961366131343233642f62797465636f6465616c6c69616e63652f7761736d74696d652f6973737565732f31303332)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/wasmtime/issues/1032#issuecomment-1249736886" title="Mitigating Spectre attacks · Issue #1032 · bytecodealliance/wasmtime">Mitigating Spectre attacks · Issue #1032 · bytecodealliance/wasmtime</a></div><div class="message_embed_description">Hello, You are probably well aware, but some mainstream compilers are emitting retpolines to help mitigate Spectre variant 2 attacks. Do you have any plans to add a similar capability to the creton...</div></div></div>
+
+
+
+<a name="398559217"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398559217" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398559217">(Oct 25 2023 at 20:54)</a>:</h4>
+<p>that's a useful feature (separate predictor contexts) but unfortunately looks like it relies on an ISA extension that's fairly recent...</p>
+
+
+
+<a name="398559289"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398559289" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398559289">(Oct 25 2023 at 20:55)</a>:</h4>
+<p>given that I'm not finding this in FF's codebase, I'd support removing <code>csdb</code> on M1 on that basis</p>
+
+
+
+<a name="398559309"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398559309" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398559309">(Oct 25 2023 at 20:55)</a>:</h4>
+<p>if it's cheap/free as it is on M2, why not, we can future-proof</p>
+
+
+
+<a name="398559338"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398559338" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398559338">(Oct 25 2023 at 20:55)</a>:</h4>
+<p>(about to start another run of meetings so there's my time-boxed investigation result :-) )</p>
+
+
+
+<a name="398655806"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398655806" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Till Schneidereit <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398655806">(Oct 26 2023 at 10:05)</a>:</h4>
+<blockquote>
+<p>if it's cheap/free as it is on M2, why not, we can future-proof</p>
+</blockquote>
+<p>I guess a question is how high the risk is of other Aarch64 implementations behaving like M1 does here, instead of M2. If there's some amount of risk that more CPUs are negatively affected like M1 is, then I think we should disable this by default, and only enable it on CPUs that we know to be ok.</p>
+
+
+
+<a name="398665383"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398665383" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Anton Kirilov <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398665383">(Oct 26 2023 at 11:07)</a>:</h4>
+<p><span class="user-mention" data-user-id="410955">@Afonso Bordado</span> The software context number is a mitigation for a different Spectre variant (Spectre-V2 instead of Spectre-V1), which in the Wasm case would involve cross-module instance attacks, I think. In this case any potential attack happens within a single module, so the context ID would stay the same. And yes, it requires hardware support, but crucially kernel support as well.</p>
+
+
+
+<a name="398667168"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398667168" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Anton Kirilov <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398667168">(Oct 26 2023 at 11:20)</a>:</h4>
+<p>Also, to play devil's advocate - if the <code>CSDB</code> instruction is expensive on a certain microarchitecture, perhaps it is actually necessary? Unless your threat model allows you to avoid it, of course, as in the browser case where different security contexts are isolated in their own processes.</p>
+
+
+
+<a name="398720459"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398720459" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398720459">(Oct 26 2023 at 15:59)</a>:</h4>
+<p>Hmm, yeah; fwiw <code>csdb</code> was not used by Firefox for Wasm indirect calls even prior to their multiprocess split, as far as I can tell. Perhaps that was a missing mitigation, I dunno</p>
+
+
+
+<a name="398720602"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%60csdb%60%20overhead%20on%20M1%20chips%20%28AArch64%29/near/398720602" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.60csdb.60.20overhead.20on.20M1.20chips.20.28AArch64.29.html#398720602">(Oct 26 2023 at 16:00)</a>:</h4>
+<p>if anyone has time to dig around in the Safari (JavaScriptCore) source to see what's done, that would be an interesting data point too...</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

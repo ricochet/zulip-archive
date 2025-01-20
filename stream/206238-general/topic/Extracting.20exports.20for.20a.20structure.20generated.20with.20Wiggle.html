@@ -1,0 +1,119 @@
+<html>
+<head><meta charset="utf-8"><title>Extracting exports for a structure generated with Wiggle · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html">Extracting exports for a structure generated with Wiggle</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="197898680"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/197898680" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Radu Matei <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#197898680">(May 18 2020 at 07:26)</a>:</h4>
+<p>I'm exploring how to write a custom API layer in WITX, then link the module at runtime when instantiating with Wasmtime.<br>
+The first part is trivial using Wiggle:</p>
+<div class="codehilite"><pre><span></span><code>wiggle::from_witx!({
+    witx: [&quot;custom_witx.witx&quot;],
+    ctx: MyCtx,
+});
+...
+}
+</code></pre></div>
+
+
+<p>However, I haven't been able to find how to extract the exports and link them when instantiating a module:</p>
+<div class="codehilite"><pre><span></span><code>    let imports = module
+        .imports()
+        .map(|i| {
+            let export = match i.module() {
+                &quot;wasi_snapshot_preview1&quot; =&gt; wasi_snapshot_preview1.get_export(i.name()),
+                &quot;wasi_unstable&quot; =&gt; wasi_unstable.get_export(i.name()),
+
+                &quot;custom_witx&quot; =&gt; panic!(&quot;get exports&quot;),
+
+            };
+</code></pre></div>
+
+
+<p>I started down the path of exploring how this is done in WASI (the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/crates/wasi-common/wig/src/wasi.rs#L23"><code>define_struct</code> function in <code>wig</code></a>), but before I go too deep, I want to make sure there isn't an easier way of doing this (i.e reusing it / parts of it, rather than re-implementing it for every custom module).</p>
+<p>Thanks!</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bytecodealliance/wasmtime/blob/master/crates/wasi-common/wig/src/wasi.rs#L23" style="background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bytecodealliance/wasmtime/blob/master/crates/wasi-common/wig/src/wasi.rs#L23" title="bytecodealliance/wasmtime">bytecodealliance/wasmtime</a></div><div class="message_embed_description">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>
+
+
+
+<a name="197915709"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/197915709" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jakub Konka <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#197915709">(May 18 2020 at 10:31)</a>:</h4>
+<p>Hey <span class="user-mention" data-user-id="269505">@Radu M</span>, if I understood your needs right, you essentially want the VM to export your own module at runtime, right? In that case, you'll need to call at least some bits of <code>wig::wasi_define_struct_for_wiggle</code>. Just to quickly bring you up to speed, <code>wig::wasi_define_struct_for_wiggle</code> is called from <code>wasmtime_wasi</code> crate to load all syscalls from <code>wasi_common</code>, generate appropriate C shims, and export them to any linking WASI module at runtime. So to be able to link your own module at runtime, you'll need at the very least run <code>wig::wasi_define_struct_for_wiggle</code> in <code>wasmtime_wasi</code> crate to register your syscalls with the VM. It might actually be a good exercise in extracting some common bits from <code>wig</code> that could be re-used for different modules that we'd like to link with that are not necessarily <code>wasi-common</code> specific. Anyhow, I'm happy to help you out here if you get blocked by anything.</p>
+
+
+
+<a name="198371470"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/198371470" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Radu Matei <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#198371470">(May 21 2020 at 20:17)</a>:</h4>
+<p>I think this _could_ be also achieved with some changes to the <code>Linker</code> structure, if it accepted a set of existing imports.<br>
+(it would not be as seamless as the WASI imports, because you would still have to manually map the function names, but it could be a slightly easier start, if I am not missing something).</p>
+
+
+
+<a name="198491404"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/198491404" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Radu Matei <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#198491404">(May 22 2020 at 20:29)</a>:</h4>
+<p>I ended up taking this approach, and now I link all all WASI exports using a <code>Linker</code>. This seems to work fine in the limited tests I've done so far, and it's a bit more straightforward, in that you can now use the same method to link both WASI and your custom modules / Rust functions.</p>
+
+
+
+<a name="198492096"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/198492096" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Radu Matei <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#198492096">(May 22 2020 at 20:37)</a>:</h4>
+<p>I did have to add a new public method to the linker though, similar to <code>Linker::func</code>, but accepting an <code>Extern</code> directly:</p>
+<div class="codehilite"><pre><span></span><code>diff --git a/crates/wasmtime/src/linker.rs b/crates/wasmtime/src/linker.rs
+index 888ad1cff..dcfdf79ea 100644
+--- a/crates/wasmtime/src/linker.rs
++++ b/crates/wasmtime/src/linker.rs
+@@ -215,6 +215,11 @@ impl Linker {
+         self._define(module, name, Func::wrap(&amp;self.store, func).into())
+     }
+
++    /// Links an external item
++    pub fn add_extern(&amp;mut self, module: &amp;str, name: &amp;str, item: Extern) -&gt; Result&lt;&amp;mut Self&gt; {
++        self.define(module, name, item)
++    }
+</code></pre></div>
+
+
+<p>I'd be happy to chat to better understand if the Linker is indeed supposed to be able to do this, or I am abusing its role in this way.</p>
+
+
+
+<a name="198492543"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/198492543" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Gohman <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#198492543">(May 22 2020 at 20:41)</a>:</h4>
+<p>Does <code>Linker::define</code> do what you need?</p>
+
+
+
+<a name="198492625"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/198492625" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Gohman <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#198492625">(May 22 2020 at 20:42)</a>:</h4>
+<p>oh, heh. You're using that <span aria-label="upside down" class="emoji emoji-1f643" role="img" title="upside down">:upside_down:</span></p>
+
+
+
+<a name="198493322"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/198493322" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Radu Matei <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#198493322">(May 22 2020 at 20:49)</a>:</h4>
+<p>Ah, there is <code>_define</code>, which is private, and <code>define</code> which is public - you're right, I can use it directly.</p>
+<p>That being said, do you see any issues with instantiating the modules using the linker?</p>
+
+
+
+<a name="198494492"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/198494492" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Gohman <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#198494492">(May 22 2020 at 21:01)</a>:</h4>
+<p>I don't have full context here, but in general, the <code>Linker</code> is quite flexible</p>
+
+
+
+<a name="198498755"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/206238-general/topic/Extracting%20exports%20for%20a%20structure%20generated%20with%20Wiggle/near/198498755" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Radu Matei <a href="https://bytecodealliance.github.io/zulip-archive/stream/206238-general/topic/Extracting.20exports.20for.20a.20structure.20generated.20with.20Wiggle.html#198498755">(May 22 2020 at 21:49)</a>:</h4>
+<p>The idea is to instantiate a module and provide the imports for both WASI and custom modules / in the same way.<br>
+Ultimately, I'd like to express an API layer as WITX and link that, but I'm not there yet.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

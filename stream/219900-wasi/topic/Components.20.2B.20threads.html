@@ -1,0 +1,147 @@
+<html>
+<head><meta charset="utf-8"><title>Components + threads · wasi · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/index.html">wasi</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/Components.20.2B.20threads.html">Components + threads</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="483313776"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/Components%20%2B%20threads/near/483313776" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pavel Šavara <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/Components.20.2B.20threads.html#483313776">(Nov 19 2024 at 17:11)</a>:</h4>
+<p>I have bunch of questions that I separately discussed with <span class="user-mention" data-user-id="254110">@Andrew Brown</span> , <span class="user-mention" data-user-id="253998">@Luke Wagner</span> and <span class="user-mention" data-user-id="234973">@Till Schneidereit</span>. Adding <span class="user-mention" data-user-id="477864">@Conrad Watt</span> </p>
+<p>I realize before WASIp3 it's probably too early to know what the interaction with threads would look like. I don't expect authoritative answers at this point, just discussion.</p>
+<p>When we introduce real multi-cpu parallelism, I think we will become distributed system. Even if the individual component is single threaded. Because now events could happen in random order in different components. The mutation of the component state in the linear memory could happen in random order relative to events in other components.</p>
+<p>Distributed system </p>
+<ul>
+<li>what is the cross component memory/consistency/coherency model ?</li>
+<li>should we introduce WASI/WIT for Distributed Transaction Coordinator ? (to solve coherency)</li>
+<li>should crossing the component boundary introduce read or write memory fence on the component state/memory ?</li>
+<li>should we start thinking about state coherency it in terms "transaction isolation level" ?</li>
+<li>should individual methods specify in WIT how they join a "transaction" ?</li>
+<li>should wasmtime implement distributed deadlock prevention ?</li>
+<li>maybe we could provide advice on how to lock WIT resources across multiple calls to the same component</li>
+</ul>
+<p>Could we have mix of MT and ST components in the same dependency graph ?</p>
+<ul>
+<li>is component marked as STA or MTA like in COM+ ?</li>
+<li>are calls to STA components serialized ?</li>
+</ul>
+<p>Scheduler</p>
+<ul>
+<li>is there fairness to the host and guest scheduler ? Which kind of fairness ?</li>
+<li>component priorities ? Or thread priorities ?</li>
+<li>host thread pool: inversion of priorities, starvation by blocking ?</li>
+<li>quota on green threads ? quota on physical threads ?</li>
+</ul>
+<p>Async interaction</p>
+<ul>
+<li>are the resolve callbacks called on the same (guest/libc) thread which awaited the promise ?</li>
+</ul>
+<p>Is WASI resource handle thread local ?</p>
+<ul>
+<li>does the subsequent use of the resource need to be on the same thread ?</li>
+<li>if not what would be solution to JS object as a resource in JCO/WebWorkers</li>
+</ul>
+<p>Is there re-used identity of the caller thread on component entry ?</p>
+<ul>
+<li>in dotnet we need to register each new thread into dotnet GC in order to collect object roots on it's stack and also to stop-the-world during GC. The registration is not very cheap.</li>
+<li>could a component use TLS to keep "client session" ?</li>
+</ul>
+<p>Perhaps some of this needs to become part of components specification later.</p>
+<p>Thanks!</p>
+
+
+
+<a name="483318526"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/Components%20%2B%20threads/near/483318526" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Conrad Watt <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/Components.20.2B.20threads.html#483318526">(Nov 19 2024 at 17:35)</a>:</h4>
+<p>some very quick hot takes to seed the conversation</p>
+<blockquote>
+<ul>
+<li>what is the cross component memory/consistency/coherency model ?</li>
+</ul>
+</blockquote>
+<p>Since the component model doesn't know how each component is implemented, I think it's hard to make fine-grained guarantees at the level of the component model spec. Different underlying runtimes will give different consistency guarantees. Coarse-grained CM-level guarantees like "no concurrent reentry" might be possible though.</p>
+<blockquote>
+<ul>
+<li>should crossing the component boundary introduce read or write memory fence on the component state/memory ?</li>
+</ul>
+</blockquote>
+<p>Again, I think this has to be a decision made in the semantics of the underlying runtime of each component - the guarantees provided by fences are very sensitive to other properties of the runtime (e.g. their compilation schemes for atomics). The CM level has no visibility on whether the component is "really" concurrent, faking it with green threads, rolling a virtual dice to pretend it's exhibiting relaxed caching behaviours etc...</p>
+<blockquote>
+<ul>
+<li>should we start thinking about state coherency it in terms "transaction isolation level" ?</li>
+<li>should individual methods specify in WIT how they join a "transaction" ?</li>
+</ul>
+</blockquote>
+<p>This is one possible abstraction the CM could provide - I'd have to defer to <span class="user-mention" data-user-id="253998">@Luke Wagner</span> on whether it's preferred over alternatives</p>
+<blockquote>
+<ul>
+<li>should wasmtime implement distributed deadlock prevention ?</li>
+<li>maybe we could provide advice on how to lock WIT resources across multiple calls to the same component</li>
+</ul>
+</blockquote>
+<p>I'd expect the "guest" runtime (written in Wasm) to have this responsibility rather than the "host" Wasm runtime, but maybe I'm misunderstanding what it means to "lock" WIT resources</p>
+<blockquote>
+<ul>
+<li>is component marked as STA or MTA like in COM+ ?</li>
+<li>are calls to STA components serialized ?</li>
+</ul>
+</blockquote>
+<p>This sounds like discussions I've had with <span class="user-mention" data-user-id="253998">@Luke Wagner</span> and <span class="user-mention" data-user-id="254110">@Andrew Brown</span> about the role of <code>shared</code> (related - some mechanism for reentrancy prevention) in the CM</p>
+<blockquote>
+<ul>
+<li>is there fairness to the host and guest scheduler ? Which kind of fairness ?</li>
+<li>component priorities ? Or thread priorities ?</li>
+<li>host thread pool: inversion of priorities, starvation by blocking ?</li>
+<li>quota on green threads ? quota on physical threads ?</li>
+</ul>
+</blockquote>
+<p>No specific opinions. One guiding idea - we've generally thought of the internal use of threads by a component as not being explicitly visible to the CM-level semantics. Resource exhaustion of threads by one greedy component could be thought of as similar to existing concerns about resource exhaustion of memory etc.</p>
+<p>I don't currently have informed opinions about remaining Qs, but interested in discussion.</p>
+
+
+
+<a name="483319697"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/Components%20%2B%20threads/near/483319697" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Conrad Watt <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/Components.20.2B.20threads.html#483319697">(Nov 19 2024 at 17:40)</a>:</h4>
+<p>I should also add WRT my first answer that the (mostly) shared-nothing nature of the component model protects against a lot of cross-component weirdness from relaxed memory concurrency</p>
+
+
+
+<a name="483324478"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/Components%20%2B%20threads/near/483324478" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Luke Wagner <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/Components.20.2B.20threads.html#483324478">(Nov 19 2024 at 18:06)</a>:</h4>
+<ul>
+<li>Regarding cross-component transactions, b/c I expect there's a number of differently-opinionated ways to go about this, I would think it's not in-scope for the C-M and rather there could be one or more WASI or other interfaces that define transaction managers that are imported by all the different components participating in the transaction.  I suppose this is like how COM+ defines a bunch of interfaces for doing higher-level transactional stuff rather than extending the base model of COM.  If defining such a transaction-manager interface led to bad results, that could perhaps motivate adding some more-primitive C-M extensions that allowed us to write better interfaces.  It's hard to think about in the abstract, though, since we're several steps removed from this future.</li>
+<li>Regarding components declaring STA-vs-MTA: this distinction would end up being expressed in the <code>canonopt</code>s of the <code>canon lift</code> and <code>canon lower</code> definitions that each component uses to lift/lower its exports/imports, specifically by the presence/absence of the <code>async</code> (defined by wasip3) and <code>shared</code> (defined later) options (where <code>shared</code> implies <code>async</code>).  The key will be continuing to ensure, as we've done in wasip3, that all lift/lower combinations compose with reasonable behavior.  Also, to wit, with cross-component recursion disallowed by default (with some TBD <code>recursive</code> attribute on the function type to opt-in to it), components are more like <a href="https://devblogs.microsoft.com/oldnewthing/20210224-00/?p=104901">Application STA in COM</a>, except that the reentrancy rules apply to both STA and MTA.</li>
+</ul>
+<p>Lots of other good questions that I expect we'll need to discuss in more detail as we get into integrating shared-everything-threads into the component model.</p>
+<div class="message_embed"><a class="message_embed_image" href="https://devblogs.microsoft.com/oldnewthing/20210224-00/?p=104901" style="background-image: url(&quot;https://uploads.zulipusercontent.net/1e4225a3033c43ec18e26e41cdefe25959799899/68747470733a2f2f646576626c6f67732e6d6963726f736f66742e636f6d2f6f6c646e65777468696e672f77702d636f6e74656e742f75706c6f6164732f73697465732f33382f323031392f30322f53686f77436f7665722e6a7067&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://devblogs.microsoft.com/oldnewthing/20210224-00/?p=104901" title="What is so special about the Application STA? - The Old New Thing">What is so special about the Application STA? - The Old New Thing</a></div><div class="message_embed_description">Basically, it blocks re-entrancy.</div></div></div>
+
+
+
+<a name="483327133"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/219900-wasi/topic/Components%20%2B%20threads/near/483327133" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pavel Šavara <a href="https://bytecodealliance.github.io/zulip-archive/stream/219900-wasi/topic/Components.20.2B.20threads.html#483327133">(Nov 19 2024 at 18:22)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="477864">Conrad Watt</span> <a href="#narrow/channel/219900-wasi/topic/Components.20.2B.20threads/near/483318526">said</a>:</p>
+<blockquote>
+<p>I'm misunderstanding what it means to "lock" WIT resources<br>
+</p>
+</blockquote>
+<p>Yeah, it's not WIT resource related. I got that confused.</p>
+<p>I was thinking about locking primitives in traditional OS kernel sense. Which may or may not be related to WIT resource. In guest memory "lock" like mutex would be represented by some state of the memory. But there is no OS kernel object, linked to host thread. No aborted threads, no abandoned mutexes, right ? When anything traps, all threads trap. And all caller components trap ? </p>
+<p>I was also thinking about deadlocks, as seen by the host. When 2 different "client" instances call into same long lived "server" instance and start locking stuff inside in A-&gt;B and B-&gt;A order.</p>
+<p><span class="user-mention silent" data-user-id="477864">Conrad Watt</span> <a href="#narrow/channel/219900-wasi/topic/Components.20.2B.20threads/near/483319697">said</a>:</p>
+<blockquote>
+<p>I should also add WRT my first answer that the (mostly) shared-nothing nature of the component model protects against a lot of cross-component weirdness from relaxed memory concurrency</p>
+</blockquote>
+<p>There is internal state of <strong>long lived component instance</strong>. <br>
+The shared linear memory of the guest is enough to break that "shared nothing" assumption, from consistency perspective, no ?</p>
+<p>I'm talking about multiple component instances (each running different physical thread/core) talking to each other and the non-coherent internal states it creates between them. </p>
+<p>Well known transaction coordinator WIT API is probably good solution. <br>
+Another good solution could be coherent monotonic clock/timestamp on which other transaction protocols could be created.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

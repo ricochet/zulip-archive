@@ -1,0 +1,288 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #4061 Cranelift: fix #3953: rework single/m... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html">wasmtime / PR #4061 Cranelift: fix #3953: rework single/m...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="279639022"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279639022" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279639022">(Apr 21 2022 at 05:47)</a>:</h4>
+<p>cfallin opened <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a> from <code>lowering-unique-use</code> to <code>main</code>:</p>
+<blockquote>
+<p>This PR addresses the longstanding issue with loads trying to merge<br>
+into compares on x86-64, and more generally, with the lowering<br>
+framework falsely recognizing "single uses" of one op by<br>
+another (which would normally allow merging of side-effecting ops like<br>
+loads) when there is <em>indirect</em> duplication.</p>
+<p>To fix this, we replace the direct <code>value_uses</code> count with a<br>
+transitive notion of uniqueness (not unlike Rust's <code>&amp;</code>/<code>&amp;mut</code> and how<br>
+a <code>&amp;mut</code> downgrades to <code>&amp;</code> when accessed through another <code>&amp;</code>!). A<br>
+value is used multiple times transitively if it has multiple direct<br>
+uses, or is used by another op that is used multiple times<br>
+transitively.</p>
+<p>The canonical example of badness is:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="n">v1</span><span class="w"> </span>:<span class="o">=</span><span class="w"> </span><span class="n">load</span><span class="w"></span>
+<span class="w">    </span><span class="n">v2</span><span class="w"> </span>:<span class="o">=</span><span class="w"> </span><span class="n">ifcmp</span><span class="w"> </span><span class="n">v1</span><span class="p">,</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="w">    </span><span class="n">v3</span><span class="w"> </span>:<span class="o">=</span><span class="w"> </span><span class="n">selectif</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+<span class="w">    </span><span class="n">v4</span><span class="w"> </span>:<span class="o">=</span><span class="w"> </span><span class="n">selectif</span><span class="w"> </span><span class="n">v2</span><span class="p">,</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"></span>
+</code></pre></div>
+<p>both <code>v3</code> and <code>v4</code> effectively merge the <code>ifcmp</code> (<code>v2</code>), so even<br>
+though the use of <code>v1</code> is "unique", it is codegenned twice. This is<br>
+why we <del>can't have nice things</del> can't merge loads into<br>
+compares (#3953).</p>
+<p>There is quite a subtle and interesting design space around this<br>
+problem and how we might solve it. See the long doc-comment on<br>
+<code>ValueUseState</code> in this PR for more justification for the particular<br>
+design here. In particular, this design deliberately simplifies a bit<br>
+relative to an "optimal" solution: some uses can <em>become</em> unique<br>
+depending on merging, but we don't design our data structures for such<br>
+updates because that would require significant extra costly<br>
+tracking (some sort of transitive refcounting). For example, in the<br>
+above, if <code>selectif</code> somehow did not merge <code>ifcmp</code>, then we would only<br>
+codegen the <code>ifcmp</code> once into its result register (and use that<br>
+register twice); then the load <em>is</em> uniquely used, and could be<br>
+merged. But that requires transitioning from "multiple use" back to<br>
+"unique use" with careful tracking as we do pattern-matching, which<br>
+I've chosen to make out-of-scope here for now. In practice, I don't<br>
+think it will matter too much (and we can always improve later).</p>
+<p>With this PR, we can now re-enable load-op merging for compares.<br>
+The first commit makes the core lowering logic change, while the<br>
+second commit makes the x64 backend changes; the last two commits<br>
+update filetests.</p>
+<p>@fitzgen, I'll note in particular that this differs from the color-based<br>
+approach I had described earlier today to you; I realized that doesn't<br>
+quite work, and I think the above is probably the best we can do without<br>
+significantly more heavyweight bookkeeping. Let me know if you've got<br>
+any better ideas though!</p>
+</blockquote>
+
+
+
+<a name="279639023"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279639023" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279639023">(Apr 21 2022 at 05:47)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a>.</p>
+
+
+
+<a name="279639024"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279639024" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279639024">(Apr 21 2022 at 05:47)</a>:</h4>
+<p><strong>cfallin</strong> requested <a href="https://github.com/abrown">abrown</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a>.</p>
+
+
+
+<a name="279699413"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279699413" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279699413">(Apr 21 2022 at 15:54)</a>:</h4>
+<p>abrown submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#pullrequestreview-948829964">PR review</a>.</p>
+
+
+
+<a name="279699414"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279699414" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279699414">(Apr 21 2022 at 15:54)</a>:</h4>
+<p>abrown submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#pullrequestreview-948829964">PR review</a>.</p>
+
+
+
+<a name="279699415"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279699415" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279699415">(Apr 21 2022 at 15:54)</a>:</h4>
+<p>abrown created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r855328551">PR review comment</a>:</p>
+<blockquote>
+<p>I think the comments here can be removed.</p>
+</blockquote>
+
+
+
+<a name="279699416"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279699416" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279699416">(Apr 21 2022 at 15:54)</a>:</h4>
+<p>abrown created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r855331943">PR review comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>/// into flags users (`selectif`, `trueif`, branches) and can
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="279699417"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279699417" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279699417">(Apr 21 2022 at 15:54)</a>:</h4>
+<p>abrown created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r855333280">PR review comment</a>:</p>
+<blockquote>
+<div class="codehilite" data-code-language="suggestion"><pre><span></span><code>/// codegen-ed in multiple places, where it is incorporated as a
+</code></pre></div>
+<p>I don't even know if this is more grammatically correct.</p>
+</blockquote>
+
+
+
+<a name="279727454"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279727454" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279727454">(Apr 21 2022 at 19:24)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a> from <code>lowering-unique-use</code> to <code>main</code>.</p>
+
+
+
+<a name="279727500"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279727500" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279727500">(Apr 21 2022 at 19:25)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#pullrequestreview-949121211">PR review</a>.</p>
+
+
+
+<a name="279727501"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279727501" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279727501">(Apr 21 2022 at 19:25)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r855525776">PR review comment</a>:</p>
+<blockquote>
+<p>I went with <code>codegen'd</code>. Someday dictionaries will catch up with compiler engineer jargon and tell us the right answer; until then that seems right to me :-)</p>
+</blockquote>
+
+
+
+<a name="279727517"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279727517" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279727517">(Apr 21 2022 at 19:25)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#pullrequestreview-949121305">PR review</a>.</p>
+
+
+
+<a name="279727519"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279727519" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279727519">(Apr 21 2022 at 19:25)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r855525842">PR review comment</a>:</p>
+<blockquote>
+<p>Fixed!</p>
+</blockquote>
+
+
+
+<a name="279727528"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279727528" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279727528">(Apr 21 2022 at 19:25)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r855525936">PR review comment</a>:</p>
+<blockquote>
+<p>Fixed!</p>
+</blockquote>
+
+
+
+<a name="279727529"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279727529" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279727529">(Apr 21 2022 at 19:25)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#pullrequestreview-949121403">PR review</a>.</p>
+
+
+
+<a name="279727599"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279727599" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279727599">(Apr 21 2022 at 19:25)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a> from <code>lowering-unique-use</code> to <code>main</code>.</p>
+
+
+
+<a name="279766050"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279766050" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279766050">(Apr 22 2022 at 01:23)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a> from <code>lowering-unique-use</code> to <code>main</code>.</p>
+
+
+
+<a name="279767142"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279767142" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279767142">(Apr 22 2022 at 01:40)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a> from <code>lowering-unique-use</code> to <code>main</code>.</p>
+
+
+
+<a name="279858351"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279858351" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279858351">(Apr 22 2022 at 17:58)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a> from <code>lowering-unique-use</code> to <code>main</code>.</p>
+
+
+
+<a name="279886544"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279886544" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279886544">(Apr 22 2022 at 22:35)</a>:</h4>
+<p>abrown submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#pullrequestreview-950608434">PR review</a>.</p>
+
+
+
+<a name="279886545"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279886545" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279886545">(Apr 22 2022 at 22:35)</a>:</h4>
+<p>abrown submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#pullrequestreview-950608434">PR review</a>.</p>
+
+
+
+<a name="279886546"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279886546" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279886546">(Apr 22 2022 at 22:35)</a>:</h4>
+<p>abrown created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r856608258">PR review comment</a>:</p>
+<blockquote>
+<div class="codehilite" data-code-language="suggestion"><pre><span></span><code>        let mark_all_uses_as_multiple = |value_ir_uses: &amp;mut SecondaryMap&lt;Value, ValueUseState&gt;,
+</code></pre></div>
+<p>I think this might make it more clear.</p>
+</blockquote>
+
+
+
+<a name="279886547"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279886547" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279886547">(Apr 22 2022 at 22:35)</a>:</h4>
+<p>abrown created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r856591462">PR review comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>        // a DFS. We iterate over all instructions and mark their args
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="279886548"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279886548" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279886548">(Apr 22 2022 at 22:35)</a>:</h4>
+<p>abrown created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r856613908">PR review comment</a>:</p>
+<blockquote>
+<p>So the invariant is that if <code>value</code> is used multiple times, the inputs <code>[i]</code> to the instruction that created <code>value</code> are also used multiple times. Perhaps we should add a <code>debug_assert!</code> here that at least the next level up <code>[i]</code> are indeed already marked as multiple, if <code>value</code> has them. Everything looks correct but it might be smart to add something like this to keep things correct.</p>
+</blockquote>
+
+
+
+<a name="279886549"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279886549" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279886549">(Apr 22 2022 at 22:35)</a>:</h4>
+<p>abrown created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r856616419">PR review comment</a>:</p>
+<blockquote>
+<p>As I considered what this might look like, I started to wonder as well if we even need the stack structure? Why not use the actual stack instead?</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">mark_all</span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="p">(</span><span class="n">value_ir_uses</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="n">SecondaryMap</span><span class="o">&lt;..</span><span class="p">.</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">value</span>: <span class="nc">Value</span><span class="p">,</span><span class="w"> </span><span class="n">f</span>: <span class="o">..</span><span class="p">.)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="n">ValueDef</span>::<span class="nb">Result</span><span class="p">(</span><span class="n">src_inst</span><span class="p">,</span><span class="w"> </span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="p">.</span><span class="n">dfg</span><span class="p">.</span><span class="n">value_def</span><span class="p">(</span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">input</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">f</span><span class="p">.</span><span class="n">dfg</span><span class="p">.</span><span class="n">inst_args</span><span class="p">(</span><span class="n">src_inst</span><span class="p">).</span><span class="n">iter</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="n">value_ir_uses</span><span class="p">[</span><span class="n">input</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">ValueUseState</span>::<span class="n">Multiple</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="fm">debug_assert!</span><span class="p">(</span><span class="o">..</span><span class="p">.);</span><span class="w"> </span><span class="c1">// seems like we could factor out the ValueDef::Result / inst_args.iter into a helper and use it here</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">mark_all</span><span class="o">..</span><span class="p">.(</span><span class="n">value_ir_uses</span><span class="p">,</span><span class="w"> </span><span class="n">value</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>Not sure it works with mutability rules and all that; just thought I would mention it.</p>
+</blockquote>
+
+
+
+<a name="279894461"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279894461" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279894461">(Apr 23 2022 at 00:30)</a>:</h4>
+<p>cfallin updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a> from <code>lowering-unique-use</code> to <code>main</code>.</p>
+
+
+
+<a name="279894576"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279894576" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279894576">(Apr 23 2022 at 00:32)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#pullrequestreview-950731648">PR review</a>.</p>
+
+
+
+<a name="279894577"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279894577" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279894577">(Apr 23 2022 at 00:32)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/4061#discussion_r856686682">PR review comment</a>:</p>
+<blockquote>
+<p>Added the <code>debug_assert</code>, thanks!</p>
+<p>Re: explicit stack vs. recursion, I wrote it this way to avoid running out of stack when long chains exist in the input... preemptively addressing a future fuzzbug I guess :-) This is a practice I picked up in SpiderMonkey (no recursion bounded by user-controlled input sizes) and seems like a good practice in general that I <em>think</em> we follow in most places.</p>
+</blockquote>
+
+
+
+<a name="279896238"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234061%20Cranelift%3A%20fix%20%233953%3A%20rework%20single/m.../near/279896238" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234061.20Cranelift.3A.20fix.20.233953.3A.20rework.20single.2Fm.2E.2E.2E.html#279896238">(Apr 23 2022 at 01:00)</a>:</h4>
+<p>cfallin merged <a href="https://github.com/bytecodealliance/wasmtime/pull/4061">PR #4061</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

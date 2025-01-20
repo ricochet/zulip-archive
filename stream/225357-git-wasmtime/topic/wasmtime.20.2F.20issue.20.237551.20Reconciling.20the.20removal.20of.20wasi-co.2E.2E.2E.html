@@ -1,0 +1,88 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #7551 Reconciling the removal of wasi-co... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237551.20Reconciling.20the.20removal.20of.20wasi-co.2E.2E.2E.html">wasmtime / issue #7551 Reconciling the removal of wasi-co...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="402519069"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237551%20Reconciling%20the%20removal%20of%20wasi-co.../near/402519069" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237551.20Reconciling.20the.20removal.20of.20wasi-co.2E.2E.2E.html#402519069">(Nov 16 2023 at 17:17)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/issues/7551">issue #7551</a>:</p>
+<blockquote>
+<p>As part of the effort to implement the upcoming 0.2.0 version of WASI the previous implementation of WASI in Wasmtime, the <code>wasi-common</code> crate, was rewritten and is now located in the <code>wasmtime-wasi</code> crate in the <code>preview2</code> submodule. This means that Wasmtime (and the <code>wasmtime</code> CLI) now has two entirely separate implementations of the preview1 snapshot of WASI. This is not something I think we should retain indefinitely, so I think it's worthwhile to plan for the removal of the old <code>wasi-common</code> crate. </p>
+<p>The only technical blocker I'm aware of for this is that the preview2-based implementation of <code>wasi_snapshot_preview1</code> does not support WASI threads. Effectively if a thread is spawned then all WASI functions will stop working because the WASI context is no longer uniquely owned. More-or-less this boils down to <a href="https://github.com/bytecodealliance/wasmtime/blob/bba4ee78a98236e73540506ffebab91373791a82/src/commands/run.rs#L830">this panic</a> which would be dynamically triggered. There is no way right now to share the WASI context amongst threads and have functions continue to work (e.g. <code>poll</code> working concurrently on multiple threads).</p>
+<p>There's definitely a lot of issues on the surface that look like incompatibilities, such as liberal usage of <code>&amp;mut Table</code> and <code>&amp;mut self</code>, but I think much of this can be updated with relative ease to work with <code>&amp;Table</code> that has some internal synchronization which gives temporary access to <code>&amp;mut self</code> on various objects. The main thing I don't know how to solve at this time, however, is how blocking works.</p>
+<p>Currently all blocking computations in Wasmtime's implementation of WASI are represented as a <code>Future</code>. This is chiefly done through the <code>Subscribe</code> trait:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[async_trait::async_trait]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Subscribe</span>: <span class="nb">Send</span> <span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="o">'</span><span class="nb">static</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span> <span class="nf">ready</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The usage of <code>&amp;mut self</code> here is problematic because the same I/O object could be subscribe to from multiple threads which means <code>&amp;mut</code> exclusive access is not possible. More-or-less what theoretically needs to happen is to push the <code>&amp;self</code> into this method to enable waiting for readiness on objects on multiple threads simultaenously. Each thread would create its own future in <code>poll</code> and then it'd get arbitrated internally. This is, however, a very large refactoring and departure from the current design, one that I don't think can easily be done and I think may have unknown consequences (e.g. more-than-expected overhead in the single-threaded use case).</p>
+<p>This conclusion brings me to opening this issue for more discussion.</p>
+<p>cc @abrown </p>
+</blockquote>
+
+
+
+<a name="402584536"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237551%20Reconciling%20the%20removal%20of%20wasi-co.../near/402584536" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237551.20Reconciling.20the.20removal.20of.20wasi-co.2E.2E.2E.html#402584536">(Nov 17 2023 at 00:34)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/wasmtime/issues/7551#issuecomment-1815548418">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7551">issue #7551</a>:</p>
+<blockquote>
+<p>My opinion is that, since wasi-threads is not compatible with the component model and is currently being set aside in order to investigate core wasm primitives, we should not port wasi-threads to the new wasmtime-wasi implementation, and unship support for wasi-threads when we retire wasi-common.</p>
+</blockquote>
+
+
+
+<a name="403277585"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237551%20Reconciling%20the%20removal%20of%20wasi-co.../near/403277585" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237551.20Reconciling.20the.20removal.20of.20wasi-co.2E.2E.2E.html#403277585">(Nov 21 2023 at 01:20)</a>:</h4>
+<p>abrown <a href="https://github.com/bytecodealliance/wasmtime/issues/7551#issuecomment-1820062317">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7551">issue #7551</a>:</p>
+<blockquote>
+<p>I think we should keep wasi-threads around at least until the next thing is available: it would be great to be able to compare and contrast, e.g., for measuring spawn performance or for troubleshooting bugs. I am hoping to work on whatever is next soon but am waiting for some things to be sorted out on the spec side of things; so it's not clear to me when that switch over will be.</p>
+<p>Some thoughts:</p>
+<ul>
+<li>do we _have_ to remove <code>wasi-threads</code>? I'm not sure I completely understand why removing <code>wasi-common</code> requires removing <code>wasi-threads</code>. Is it just the dependency? Can't wasi-threads still work for non-component modules?</li>
+<li>aren't we going to have to deal with <code>&amp;mut self</code> to <code>&amp;self</code> issues at some point with the next thing? The next thing will still need to access these futures from multiple threads, no? Maybe I just need to dig into this more to understand better, but I'm wondering out loud if this problem won't go away so we should just deal with it now.</li>
+</ul>
+</blockquote>
+
+
+
+<a name="403282287"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237551%20Reconciling%20the%20removal%20of%20wasi-co.../near/403282287" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237551.20Reconciling.20the.20removal.20of.20wasi-co.2E.2E.2E.html#403282287">(Nov 21 2023 at 02:01)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/wasmtime/issues/7551#issuecomment-1820094793">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7551">issue #7551</a>:</p>
+<blockquote>
+<blockquote>
+<p>do we have to remove wasi-threads? I'm not sure I completely understand why removing wasi-common requires removing wasi-threads. Is it just the dependency? Can't wasi-threads still work for non-component modules?</p>
+</blockquote>
+<p><code>wasmtime-wasi::preview2</code> contains a complete replacement for <code>wasi-common</code> in every regard except for supporting wasi-threads, so we'd like to retire <code>wasi-common</code> and remove it from the tree. </p>
+<blockquote>
+<p>aren't we going to have to deal with &amp;mut self to &amp;self issues at some point with the next thing? The next thing will still need to access these futures from multiple threads, no? Maybe I just need to dig into this more to understand better, but I'm wondering out loud if this problem won't go away so we should just deal with it now.</p>
+</blockquote>
+<p>I don't want to make architectural decisions about <code>wasmtime-wasi::preview2</code> based on an expectation of how some engineering work in the future might work out, but instead based on how it does work out, because that architectural change could be very costly in terms of both engineering time, complexity of this new implementation, and performance of the single-threaded use case.</p>
+</blockquote>
+
+
+
+<a name="403282409"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237551%20Reconciling%20the%20removal%20of%20wasi-co.../near/403282409" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237551.20Reconciling.20the.20removal.20of.20wasi-co.2E.2E.2E.html#403282409">(Nov 21 2023 at 02:02)</a>:</h4>
+<p>pchickey edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/7551#issuecomment-1820094793">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7551">issue #7551</a>:</p>
+<blockquote>
+<blockquote>
+<p>do we have to remove wasi-threads? I'm not sure I completely understand why removing wasi-common requires removing wasi-threads. Is it just the dependency? Can't wasi-threads still work for non-component modules?</p>
+</blockquote>
+<p><code>wasmtime-wasi::preview2</code> contains a complete replacement for <code>wasi-common</code> in every regard except for supporting wasi-threads, so we'd like to retire <code>wasi-common</code> and remove it from the tree. </p>
+<blockquote>
+<p>aren't we going to have to deal with &amp;mut self to &amp;self issues at some point with the next thing? The next thing will still need to access these futures from multiple threads, no? Maybe I just need to dig into this more to understand better, but I'm wondering out loud if this problem won't go away so we should just deal with it now.</p>
+</blockquote>
+<p>I don't want to make architectural decisions about <code>wasmtime-wasi::preview2</code> based on an expectation of how some engineering work in the future might work out, but instead based on how it does work out, because that architectural change could be very costly in terms of both engineering time, complexity of this new implementation, and performance of the single-threaded use case. I do not believe we have enough information now to make this choice.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

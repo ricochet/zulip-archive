@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>I noticed that some of the <code>wasm_***_delete(thing);</code> methods will crash if thing is a nullptr. Should we allow deleting null (as a no-op), just as it works on C++/C with <code>free</code> or <code>delete</code>. E.g. happens with <code>wasm_instance_delete(nulltpr);</code></p>",
+        "id": 201867967,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1593014734
+    },
+    {
+        "content": "<p>Personally, I'd leave that in as it is a nice reminder that you've done something wrong (?). On the other hand, it'd be so much better if the compiler caught that in the first place!</p>",
+        "id": 201869729,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1593015576
+    },
+    {
+        "content": "<p>Keeping in mind this is C++ land and the compiler would not catch such things out of the box.</p>\n<p>For a C++ programmer there's nothing wrong with calling delete on nullptr or free on a nullptr, as it's accepted by the standard and all implementations, <code>wasm_***_delete(...)</code> methods are doing things an unexpected way, leading to a sig11. <br>\nI don't think it's necessarely wrong to call delete on a nullptr. E.g .it happened to me as I was hacking about using a linker and instantiated my module like so: <a href=\"https://github.com/bytecodealliance/wasmtime/blob/3715e19c67ab7e59fadf750a1de2ba48f1e6f4ce/examples/wasi/main.c#L84\">https://github.com/bytecodealliance/wasmtime/blob/3715e19c67ab7e59fadf750a1de2ba48f1e6f4ce/examples/wasi/main.c#L84</a>, this in turn gives no wasm_module_instance_t* back so a destructor of a wrapper class called <code>wasm_instance_delete(..)</code>. I found that surprising :D</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/3715e19c67ab7e59fadf750a1de2ba48f1e6f4ce/examples/wasi/main.c#L84\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/3715e19c67ab7e59fadf750a1de2ba48f1e6f4ce/examples/wasi/main.c#L84\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 201870107,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1593015758
+    },
+    {
+        "content": "<p>Yep, I can imagine! My motivation here is that it's nice for Wasm to catch things that may otherwise lead to undefined behaviour etc. Having said that, I'm not a C++ expert by any means so I'll trust your judgement here and other experts here. :-)</p>",
+        "id": 201870793,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1593016116
+    },
+    {
+        "content": "<p>BTW, to clarify my ask above, this is about the HOST environment and the wasmtime VM C API, not WASM-related. E.g.  using wasmtime from a C++ project.</p>",
+        "id": 201870917,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1593016183
+    },
+    {
+        "content": "<p>Ah, now I get it, duh, sorry!</p>",
+        "id": 201871593,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1593016521
+    },
+    {
+        "content": "<p>It's interesting that this happens since I thought <code>wasm_instance_delete(..)</code> for instance was a pure C function. <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 201871806,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1593016638
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"298375\">@Alexandru Ene</span> I think you've got a good point, I know it's been pretty convenient in the past that free/etc accept <code>NULL</code></p>",
+        "id": 201876489,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1593018944
+    },
+    {
+        "content": "<p>often makes error-handling much easier</p>",
+        "id": 201876493,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1593018948
+    },
+    {
+        "content": "<p>would you be up for making a PR for this? I think it may even be a one-line change</p>",
+        "id": 201876564,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1593018965
+    },
+    {
+        "content": "<p>Yes, I can do that.</p>",
+        "id": 201876965,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1593019158
+    },
+    {
+        "content": "<p>I am going to re-open this topic with a bunch of questions/findings. </p>\n<p>It looks like <code>wasm.hh</code> has <code>own&lt;T&gt;</code> as <code>unique_ptr&lt;T&gt;</code>, while this may work at first sight, it seems to me like it's assuming that deletions will happen with the default <code>delete T</code>. Now this will get us into later trouble if wasmtime and the host program link to different versions of the stdlib for example. (the classic problem with allocating with a certain allocator and freeing with another one).</p>\n<p>This also skips calling  the  functions available in the C api with <code>WASM_***_delete(thing);</code> where available.</p>\n<p>More than this, I think I've found a type without a wasm_delete.  There is no way to de-allocate a <code>wasm_functype_t*</code>, returned by <code>wasm_functype_new</code>.</p>",
+        "id": 204468492,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1595275012
+    },
+    {
+        "content": "<p>re <code>wasm.hh</code>: note that wasmtime only implements the C API, not the C++ API.</p>\n<p>we define <code>wasm_functype_delete</code>, but I see that it is in fact missing from <code>wasm.h</code>. <span class=\"user-mention\" data-user-id=\"298375\">@Alexandru Ene</span>,  do you want to file a bug upstream on <a href=\"https://github.com/WebAssembly/wasm-c-api/\">https://github.com/WebAssembly/wasm-c-api/</a>?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/wasm-c-api/\" style=\"background-image: url(https://avatars3.githubusercontent.com/u/11578470?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/wasm-c-api/\" title=\"WebAssembly/wasm-c-api\">WebAssembly/wasm-c-api</a></div><div class=\"message_embed_description\">Wasm C API prototype. Contribute to WebAssembly/wasm-c-api development by creating an account on GitHub.</div></div></div>",
+        "id": 204477446,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1595279879
+    },
+    {
+        "content": "<p>Ah right, I can open a PR to add the missing function.</p>",
+        "id": 204478135,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1595280243
+    },
+    {
+        "content": "<p><code>wasm_functype_delete</code> should come from <code>WASM_DECLARE_OWN(functype)</code></p>",
+        "id": 204478139,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1595280248
+    },
+    {
+        "content": "<p>which comes from <code>WASM_DECLARE_TYPE(functype)</code></p>",
+        "id": 204478176,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1595280275
+    },
+    {
+        "content": "<p>Oh, right, I managed to confuse myself in searching for that with github search <span aria-label=\"grinning\" class=\"emoji emoji-1f600\" role=\"img\" title=\"grinning\">:grinning:</span></p>",
+        "id": 204478243,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1595280320
+    },
+    {
+        "content": "<p>oh the <a href=\"https://bytecodealliance.github.io/wasmtime/c-api/wasm_8h.html#aa7e278e093051bfcf10bf6d9f2cce0b2\">docs</a> also have the expanded set of functions</p>",
+        "id": 204478952,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1595280745
+    }
+]

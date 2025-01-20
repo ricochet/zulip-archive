@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>I'm considering cranelift as a JIT from a rust host program, and I want the jitted code to handle rust data structures. The data structures are not <code>repr(C)</code>, though, so writing the access code in cranelift itself (for enums and structs) is not available. I can write simple accessors that would almost certainly be inlined in rust code (the code of which is roughly <code>*(x+n)</code> for some constant <code>n</code>), but my guess is that if I register these as external functions to cranelift and call them then they will not be inlined into the jitted code. What are my options here?</p>",
+        "id": 237438866,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1620188696
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"344989\">@Mario Carneiro</span> that's an excellent question! You're correct that these accessor call-sites would not inline anything; to Cranelift, the calls to your external functions are completely opaque. (This is similar to how things would work with most other compiler frameworks, fwiw, and isn't unique to Cranelift, though you likely are already aware of this :-) ). The simplest and most straightforward option would be to generate your accessor code at runtime -- today this would have to be inlined manually as we don't have an inlining pass, but in the future when we do, you could in theory generate the CLIF just once and take advantage of inlining.</p>\n<p>Unfortunately, the most \"magical\" approach -- just writing native code in your runtime, and somehow getting this to be inlined where you generate VM calls -- is nearly intractable without some cooperation from your toolchain, because simply lifting already-compiled machine code and dropping it in will break for a number of reasons -- we would want to lift it back to an IR of some sort to allow optimizations and the regalloc pass to properly join it with surrounding code.</p>\n<p>There is an interesting and rich design space of toolchain support for writing something that <em>looks</em> like native runtime code and getting this to become IR for the JIT, though. E.g., the V8 JS engine has \"Torque\", a DSL that lets one write VM functions easily, and there was a proposal \"HolyJit\" to do a similar thing in SpiderMonkey. Lots of interesting reading here if one is curious -- happy to find some links if so!</p>",
+        "id": 237446918,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1620196176
+    },
+    {
+        "content": "<p>That's a good point about not having the relevant information from the surrounding code, since cranelift runs at runtime. This requires rustc support, but conceivably there could be an attribute that would, say, output the MIR for a function as a constant in the binary (or even just presented as a <code>const</code> in rust), so that it can be accessed by tools like cranelift.</p>",
+        "id": 237447351,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1620196480
+    },
+    {
+        "content": "<p>I think the most promising near-term approach would just be to use some unsafe code to do the discriminant checking and <code>memoffset</code> for field access, although I think that depends on a couple unstable aspects of rust data layout</p>",
+        "id": 237447575,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1620196678
+    },
+    {
+        "content": "<blockquote>\n<p>output the MIR for a function as a constant in the bnary</p>\n</blockquote>\n<p>Indeed! That's kind of what <a href=\"https://github.com/nbp/holyjit\">HolyJit</a> is doing (though in its own framework, not for Cranelift) -- it's a rustc compiler plugin that translates the function body into JIT IR. It might be an interesting starting point for something like this.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/nbp/holyjit\" style=\"background-image: url(https://opengraph.githubassets.com/2259913912d42fc0083dc89237df238b96ec5c5ed1c80b8235142f298e08a193/nbp/holyjit)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/nbp/holyjit\" title=\"nbp/holyjit\">nbp/holyjit</a></div><div class=\"message_embed_description\">Generic purpose Just-In-time compiler for Rust. Contribute to nbp/holyjit development by creating an account on GitHub.</div></div></div>",
+        "id": 237447774,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1620196835
+    },
+    {
+        "content": "<p>I agree it's a little bit tricky to depend on the data layout, especially if one can't control it (and put a <code>repr(C)</code> on it); others may have more ideas how to introspect offsets or otherwise make this more stable (<span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> maybe?)</p>",
+        "id": 237447823,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1620196904
+    },
+    {
+        "content": "<p>I am not personally too fussed about having to write functions as cranelift API calls instead of something that looks more \"natural\"; but rust likes to keep a lot of representation details close to the chest so I think it's actually <em>impossible</em> to write some functions on rust data structures if the only primitives are things that a from-scratch VM architecture would know about like adding numbers and dereferencing a pointer</p>",
+        "id": 237447824,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1620196906
+    },
+    {
+        "content": "<p>oh, that holyjit project does seem pretty relevant, and I guess it extends the compiler to get access to these details</p>",
+        "id": 237447939,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1620196995
+    },
+    {
+        "content": "<p>hmm, there is <code>std::mem::discriminant</code> but yeah, maybe a limited rustc plugin just to give you details (discriminant offset, width, and values; and field offsets) of Rust layout would be enough to codegen the accessors?</p>",
+        "id": 237448017,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1620197048
+    },
+    {
+        "content": "<p><code>std::mem::discriminant</code> is still a function though, you would have to turn it into cranelift IR for it to be usable</p>",
+        "id": 237448059,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1620197100
+    },
+    {
+        "content": "<p>right, it doesn't look like there's a way to get the integer out of it</p>",
+        "id": 237448080,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1620197118
+    },
+    {
+        "content": "<p>so, rustc plugin seems like the most straightforward way here</p>",
+        "id": 237448103,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1620197131
+    },
+    {
+        "content": "<p>I wonder if <code>Layout</code> can be used as a sort of introspection API here?</p>",
+        "id": 237448189,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1620197193
+    },
+    {
+        "content": "<p>these are questions best asked of our resident rustc-internals gurus :-) I'm bowing out now (end of day) but hopefully someone else knows more -- best of luck!</p>",
+        "id": 237448283,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1620197261
+    },
+    {
+        "content": "<p>thanks for the pointers</p>",
+        "id": 237448303,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1620197279
+    }
+]

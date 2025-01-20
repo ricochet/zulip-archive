@@ -1,0 +1,386 @@
+[
+    {
+        "content": "<p>I am trying to determine if any CPU cache maintenance is performed after code generation finishes and before execution starts, and currently it <a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/jit/src/code_memory.rs#L148\">looks</a> like only the memory region is changed from readable and writable to readable and executable. Am I missing something?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/jit/src/code_memory.rs#L148\" style=\"background-image: url(https://opengraph.githubassets.com/2be0c53399a5d987161c88755192869fb9ba7d39a1213b1c8867bd37f5df2a89/bytecodealliance/wasmtime)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/jit/src/code_memory.rs#L148\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 244731252,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625245617
+    },
+    {
+        "content": "<p>I think that is indeed all we do. On x86 at least the coherence model handles self-modifying code in the most programmer-friendly way (i.e. a write to code memory is immediately seen by fetch, architecturally, causing great pain and suffering in the icache logic) but I imagine this isn't the case on other architectures; do we need to do something special here for e.g. aarch64?</p>",
+        "id": 244731607,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625245804
+    },
+    {
+        "content": "<p>Yes, we do. The 64-bit Arm architecture requires two actions - cache maintenance and context synchronization (usually an <code>ISB</code> instruction). The full sequence can be seen in GCC's <a href=\"https://gcc.gnu.org/git/?p=gcc.git;a=blob;f=libgcc/config/aarch64/sync-cache.c;h=41151e861d7fc32a77772b7f09b5f88779cbfd4c\">implementation</a> of <code>__builtin___clear_cache</code>, for example. Alternatively, section B2.4.4 of the Arm Architecture Reference Manual provides the appropriate instruction sequence.</p>",
+        "id": 244733194,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625246623
+    },
+    {
+        "content": "<p>The Arm Neoverse cores actually have coherent data and instruction caches, so cache maintenance is not necessary in that case (and the GCC code does the appropriate thing), but that's an optional feature of the architecture.</p>",
+        "id": 244733572,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625246805
+    },
+    {
+        "content": "<p>Context synchronization is still necessary and is indeed the trickier bit because it must be performed by all processors (in practice that would mean threads) that may execute the modified code. I remember that <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> had some fun implementing that in Spidermonkey <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>.</p>",
+        "id": 244734324,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625247175
+    },
+    {
+        "content": "<p>Happy to take a PR for this, and thanks for raising the issue!</p>\n<p>And yes, I was just about to ask about the multicore case, especially as we compile on a thread pool. Is it enough to flush dcache out (write back dirty lines, which broadly speaking looks like the first half of that code sequence) at the end of compile, and flush icache (second half of sequence) on all cores?</p>",
+        "id": 244734507,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625247276
+    },
+    {
+        "content": "<p>I can imagine a lazy design for the latter where we track \"code generation number\" and latest generation seen on each core, and flush only when needed</p>",
+        "id": 244734549,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625247296
+    },
+    {
+        "content": "<p>I guess I should go read SpiderMonkey's code to see how <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> solved this :-)</p>",
+        "id": 244734588,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625247321
+    },
+    {
+        "content": "<p>The instruction cache invalidation is not an issue because it broadcasts in the whole coherency domain.</p>",
+        "id": 244734857,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625247459
+    },
+    {
+        "content": "<p>ah, cool, so we don't need the equivalent of the linux kernel's \"run this code on all cores\" primitive</p>",
+        "id": 244735032,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625247544
+    },
+    {
+        "content": "<p>this looks like the right bit?: <a href=\"https://searchfox.org/mozilla-central/rev/60c185194386e8e44bbeb09f5547ad5994d4c774/js/src/jit/ProcessExecutableMemory.cpp#785-791\">https://searchfox.org/mozilla-central/rev/60c185194386e8e44bbeb09f5547ad5994d4c774/js/src/jit/ProcessExecutableMemory.cpp#785-791</a></p>",
+        "id": 244735045,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625247551
+    },
+    {
+        "content": "<p>Well, we don't need it for cache maintenance, but we need it for context synchronization.</p>",
+        "id": 244735224,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625247630
+    },
+    {
+        "content": "<p>The code snippet that you linked to doesn't look like what I had in mind.</p>",
+        "id": 244735570,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625247819
+    },
+    {
+        "content": "<p>So there is some interesting discussion in <a href=\"https://bugzilla.mozilla.org/show_bug.cgi?id=1529933\">https://bugzilla.mozilla.org/show_bug.cgi?id=1529933</a> about how Firefox's scheme is safe due to ordering around an atomic code-pointer update</p>",
+        "id": 244735658,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625247846
+    },
+    {
+        "content": "<p>but I haven't fully internalized this and in any case you would know best what is actually needed -- so please do send a PR if you've got an idea of a reasonable fix :-)</p>",
+        "id": 244735726,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625247878
+    },
+    {
+        "content": "<p>(fwiw we don't update code pointers with atomic stores because we don't do the racy swap-out-new-code thing that FF does between tiers, but we could easily add a fence in the right place)</p>",
+        "id": 244735788,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625247906
+    },
+    {
+        "content": "<p>cranelift-jit also doesn't do cache maintenance or context synchronization.</p>",
+        "id": 244735925,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1625247967
+    },
+    {
+        "content": "<p>Right, I've read through the same discussion before when discussing with <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span>, so I'll just repeat my points - I don't necessarily disagree with what my colleague Jacob Bramley has said, but my feeling is that this is relying on implementation details, which is IMHO fragile.</p>",
+        "id": 244736555,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625248293
+    },
+    {
+        "content": "<p>Basically the idea is that if the only way for a core to see the updated code is via an update to a function pointer, then context synchronization might not be necessary.</p>",
+        "id": 244736789,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625248403
+    },
+    {
+        "content": "<p>The key idea being that an update to a function pointer is a <strong>data</strong> update, not a <strong>code</strong> update.</p>",
+        "id": 244736920,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625248456
+    },
+    {
+        "content": "<p>This assumes that the buffer holding the updated code is \"fresh\", i.e. no one has ever executed code from it before.</p>",
+        "id": 244737082,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625248541
+    },
+    {
+        "content": "<p>Point of clarification: what do you mean by \"context synchronization\" exactly? (I understand cache coherence and weak memory models but am not familiar with that exact term)</p>",
+        "id": 244737288,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625248637
+    },
+    {
+        "content": "<p>and, yes, I agree, relying on the incidental synchronization edges that occur because of the data-structure updates is more fragile than I would prefer as well</p>",
+        "id": 244737398,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625248686
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"300050\">Anton Kirilov</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Code.20generation.20and.20CPU.20cache.20maintenance/near/244737082\">said</a>:</p>\n<blockquote>\n<p>This assumes that the buffer holding the updated code is \"fresh\", i.e. no one has ever executed code from it before.</p>\n</blockquote>\n<p>Is <code>mmap(PROT_EXEC)</code> enough to make it fresh?</p>",
+        "id": 244737529,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1625248784
+    },
+    {
+        "content": "<p>For application programmers \"context synchronization\" almost always means \"execution of an <code>ISB</code> instruction\". That's a good point, I'll just say that from now on to make things clearer - I am obviously used to the Arm architecture terminology <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>.</p>",
+        "id": 244737663,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625248829
+    },
+    {
+        "content": "<p>Ah, OK, so this just means \"happens-before edge exists according to the memory model\"</p>",
+        "id": 244737826,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625248915
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> Do you mean <code>mprotect()</code>? Either way, the answer is no, and part of the reason is that TLB invalidations also broadcast (so there is no need for inter-processor interrupts).</p>",
+        "id": 244737926,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625248957
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> <code>ISB</code> is not so much about the memory model (which is covered by cache maintenance), but about speculative execution and the associated buffers/caches.</p>",
+        "id": 244738453,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625249229
+    },
+    {
+        "content": "<p>right, specifically in-flight instructions in the pipeline that may have already been fetched from stale cache lines are an issue, and data in store buffers, and ... (I worked on hardware details related to this in a past life :-) )</p>",
+        "id": 244738642,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625249316
+    },
+    {
+        "content": "<p><code>ISB</code> is just a full pipeline synchronization/fence?</p>",
+        "id": 244738676,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625249334
+    },
+    {
+        "content": "<p>Yes, that's right</p>",
+        "id": 244738697,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625249349
+    },
+    {
+        "content": "<p>Basically, what people need is a broadcast <code>ISB</code>, which doesn't exist in the architecture.</p>",
+        "id": 244739162,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625249539
+    },
+    {
+        "content": "<p>(and I don't think that's an accidental omission - pretty sure it has been discussed before)</p>",
+        "id": 244739296,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625249606
+    },
+    {
+        "content": "<p>On Linux at least there is a straightforward equivalent system call - <code>membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0)</code>.</p>",
+        "id": 244739384,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625249645
+    },
+    {
+        "content": "<p>OK, great. Happy to take a PR to add that. We should look into whether there is an equivalent on macOS/aarch64 as well (sadly I don't have hardware to test this; friendly ping to <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> if interested)</p>",
+        "id": 244739902,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625249779
+    },
+    {
+        "content": "<p>BTW <a href=\"https://bugzilla.mozilla.org/show_bug.cgi?id=1661016\">bug 1661016</a> covers the work by <span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> I mentioned.</p>",
+        "id": 244740274,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250000
+    },
+    {
+        "content": "<p>I think I can look into adding the cache maintenance, but the <code>ISB</code> part is more complicated because <code>membarrier()</code> doesn't just interrupt all threads in the process.</p>",
+        "id": 244740555,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250148
+    },
+    {
+        "content": "<p>Actually, threads that are interested in the notification have to register first and they are the ones that are interrupted.</p>",
+        "id": 244740609,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250209
+    },
+    {
+        "content": "<p>So, in Wasmtime, for example, threads that just compile functions don't need to execute <code>ISB</code> - I am not sure, do we distinguish between them and the threads that might run generated code?</p>",
+        "id": 244740796,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250324
+    },
+    {
+        "content": "<p>I think that the thread pool management happens under the hood in Rayon (library)</p>",
+        "id": 244740967,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625250441
+    },
+    {
+        "content": "<p>so potentially any compilation task or async wasm function invocation could happen on any thread</p>",
+        "id": 244740997,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625250462
+    },
+    {
+        "content": "<p>I'm kind of thinking again about the lazy-ISB / \"code generation number\" approach. Could we just have a conditional and ISB in the wasm-entry thunk that triggers the first time we execute wasm after someone else generates some code?</p>",
+        "id": 244741143,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625250543
+    },
+    {
+        "content": "<p>that's a cost for sure but if code almost never changes then the branch should be predictable</p>",
+        "id": 244741173,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625250576
+    },
+    {
+        "content": "<p>First thought - you'd need to switch between RX and RW permissions in the middle of execution, though.</p>",
+        "id": 244741294,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250635
+    },
+    {
+        "content": "<p>Oh, no, sorry, you have a conditional branch.</p>",
+        "id": 244741358,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250681
+    },
+    {
+        "content": "<p>right, code itself is static, no patching in an ISB or anything</p>",
+        "id": 244741374,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625250698
+    },
+    {
+        "content": "<p>I was thinking of optimizing it <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>.</p>",
+        "id": 244741376,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250699
+    },
+    {
+        "content": "<p>two different thunks? or some sort of dynamic patching?</p>",
+        "id": 244741406,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625250723
+    },
+    {
+        "content": "<p>Well, the architecture also allows a very limited form of instruction patching that doesn't require any synchronization.</p>",
+        "id": 244741605,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250826
+    },
+    {
+        "content": "<p>One particular case is turning an <code>ISB</code> into a <code>NOP</code>.</p>",
+        "id": 244741660,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250847
+    },
+    {
+        "content": "<p>Still, I think the <code>membarrier()</code> solution is cleaner and simpler, so I'll just have to read up on Rayon a bit.</p>",
+        "id": 244741823,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625250960
+    },
+    {
+        "content": "<p>Ah, I see, then the nop-ification of the ISB lazily propagates into reality, and it's ok if we get a spurious ISB before it is fully synchronized. makes sense!</p>",
+        "id": 244742250,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625251185
+    },
+    {
+        "content": "<p>I would actually lean a bit toward the generation-and-ISB approach because it avoids a syscall, and is more portable (any aarch64 OS)</p>",
+        "id": 244742351,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625251222
+    },
+    {
+        "content": "<p>but if you want to do the membarrier thing first that's fine, I think, as it is simpler</p>",
+        "id": 244742373,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1625251237
+    },
+    {
+        "content": "<p>Hm, I am reading the documentation again and I might be misremembering - the opt-in done by the <code>membarrier()</code> call might be process-wide, so there would be no need for individual threads to opt in, which makes things even easier.</p>",
+        "id": 244743945,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625252067
+    },
+    {
+        "content": "<p>Oh yes, I do remember this stuff <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span> I do remember that the <code>membarrier</code> was process-wide, and past-me seemed to confirm this in the changeset message:</p>\n<blockquote>\n<p>On real hardware, when a background thread finishes compilation, it must signal<br>\nto the other executing threads that they need to reload a new version of the<br>\ncode. Ideally, each executing thread would run an ISB instruction to do so. We<br>\nhereby use a system call membarrier that interrupts every other running thread,<br>\nand will cause the same effect as a local ISB would. It is heavyweight, so we<br>\nmake sure to only run it in the case where we're on a background thread.</p>\n</blockquote>",
+        "id": 244947605,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1625498096
+    },
+    {
+        "content": "<p>That being said, it is not clear what needs to be done on MacOS aarch64.</p>",
+        "id": 244947655,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1625498121
+    },
+    {
+        "content": "<p><a href=\"https://developer.apple.com/documentation/apple-silicon/porting-just-in-time-compilers-to-apple-silicon\">Here</a> is Apple's developer documentation on porting JIT compilers.</p>",
+        "id": 244964934,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1625511006
+    },
+    {
+        "content": "<p>I opened <a href=\"https://github.com/bytecodealliance/wasmtime/issues/3310\">issue #3310</a> to track this. We can also continue the discussion there.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/3310\" style=\"background-image: url(https://opengraph.githubassets.com/c6f9b4634c004ca5dccd966f7ab707b39017e6ce60a0d08a956534ec342d8c1f/bytecodealliance/wasmtime/issues/3310)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/3310\" title=\"Missing cache maintenance and context synchronization operations after JIT compilation is completed on AArch64 · Issue #3310 · bytecodealliance/wasmtime\">Missing cache maintenance and context synchronization operations after JIT compilation is completed on AArch64 · Issue #3310 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Currently (as of commit 164835e), after code generation is finished and before execution from the newly generated code starts on AArch64, both cranelift-jit and wasmtime-jit do not perform any acti...</div></div></div>",
+        "id": 252348180,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1631038557
+    },
+    {
+        "content": "<p>I believe that in order to have a clean solution some additions are necessary to the <code>compiler-builtins</code> and the <code>libc</code> crates (I really don't think that hardcoding the assembly sequence for cache maintenance in Wasmtime is the best approach), which is going to take a while, so it is useful to have a tracking issue.</p>",
+        "id": 252351744,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1631040010
+    },
+    {
+        "content": "<p>Having builtins would be ideal, but fwiw, I don't think it would be too much of a problem to just write the assembly in the meantime. The <code>wasmtime-fiber</code> crate for example has an assembly file per architecture</p>",
+        "id": 252352199,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1631040198
+    },
+    {
+        "content": "<p>I considered adding helpers to the <code>crates/runtime/src/helpers.c</code> file (one helper for the cache maintenance operations and another for <code>membarrier()</code>; in fact, in the former case we can just call the C function, I suppose), but it seemed wrong to make <code>cranelift-jit</code> use that crate, so I decided to pursue what is in any case the proper solution (which would benefit other JIT runtimes implemented in Rust).</p>",
+        "id": 252354685,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1631041053
+    },
+    {
+        "content": "<p>Yeah, that's true, it should be factored out somewhere. If getting things into libc or compiler-builtins becomes a bottleneck, I could see the case for a separate <code>jit-icache-coherence</code> crate (either as part of wasmtime or maybe even as an independent thing on <a href=\"http://crates.io\">crates.io</a>)</p>",
+        "id": 252357510,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1631042108
+    },
+    {
+        "content": "<p>or possibly it could belong in <code>region-rs</code></p>",
+        "id": 252357530,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1631042117
+    }
+]

@@ -1,0 +1,105 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #5709 Legalize `b{and,or,xor}_not` into com... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html">wasmtime / PR #5709 Legalize `b{and,or,xor}_not` into com...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="325886053"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/325886053" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#325886053">(Feb 04 2023 at 22:10)</a>:</h4>
+<p>alexcrichton edited <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a> from <code>wasm-bandnot</code> to <code>main</code>:</p>
+<blockquote>
+<p>I was curious to see the effect of #5701 on the compilation of spidermonkey.wasm and much to my dismay I saw that the <code>andn</code> instruction was never generated. It turns out, however, that WebAssembly does not have a "bnot" equivalent instruction for <code>i32</code> or <code>i64</code>, nor a "band_not" instruction. To trigger the optimization added there I added a few egraph simplification rules to pattern match xor against -1 to <code>bnot</code> and then take a sequence of ands/nots and turn that into a single <code>band_not</code> instruction.</p>
+<p>I'm not so certain that this is the best way to do this, however. There's a lot of optimization rules around just bnot and just band, but most of them don't mention the fused form of <code>band_not</code> (or other forms like <code>bor_not</code>). I tried adding a simple "band_not is equivalent to (band (bnot))" rule but it ended up not generating the <code>band_not</code> instruction. It seems like the best way forward might be to remove the fused instructions from clif entirely, instead pattern matching in backends for those that support fused instructions. If that's the way to go I'm happy to remove the <code>band_not</code> fusing in algebraic.isle and can push on that later.</p>
+</blockquote>
+
+
+
+<a name="325886362"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/325886362" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#325886362">(Feb 04 2023 at 22:15)</a>:</h4>
+<p>alexcrichton edited <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a> from <code>wasm-bandnot</code> to <code>main</code>:</p>
+<blockquote>
+<p>I was curious to see the effect of #5701 on the compilation of spidermonkey.wasm and much to my dismay I saw that the <code>andn</code> instruction was never generated. It turns out, however, that WebAssembly does not have a "bnot" equivalent instruction for <code>i32</code> or <code>i64</code>, nor a "band_not" instruction. To trigger the optimization added there I added a few egraph simplification rules to pattern match xor against -1 to <code>bnot</code>.</p>
+<p>I then additionally noticed that the lowering added in #5701 was for the clif <code>band_not</code> instruction, but this was never actually used by wasm. Additionally egraphs didn't fuse <code>band</code>-of-<code>bnot</code> into one instruction, so the lowering still never fired. To address this issue I've added legalizations now from <code>band_not</code> into <code>band</code>-of-<code>bnot</code> in addition to <code>bor_not</code> and <code>bxor_not</code>. This involved updating all backends with fused lowerings to do more pattern-matching on the top-level operation instead of matching on <code>b*_not</code> since those now never reach the backends.</p>
+<p>After all this I've added a <code>*.wat</code> test to assert that <code>bnot</code> shows up and at least for x86_64 the specialized lowering of <code>band_not</code> is triggered.</p>
+<p>Along the way I noticed a few things:</p>
+<ul>
+<li>I cleaned up some riscv64 bits where <code>band_not</code> unconditionally used <code>gen_andn</code> but internally <code>gen_andn</code> tested for codegen features. Instead the lowering of <code>(band ... (bnot ..))</code> now explicitly tests for codegen features and falls back to normal rules if the feature for <code>andn</code> isn't available.</li>
+<li>I think the <code>bxor_not</code> instruction was buggy on s390x int that it was calculating <code>(bnot (bxor x y))</code> instead of <code>(bxor x (bnot y))</code>. The tests got updated as a result. I'm not so certain that the remaining lowerings are correct since the instructions are called <code>NotXor32</code>, for example, but I haven't tested.</li>
+</ul>
+</blockquote>
+
+
+
+<a name="325886494"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/325886494" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#325886494">(Feb 04 2023 at 22:16)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a> from <code>wasm-bandnot</code> to <code>main</code>.</p>
+
+
+
+<a name="325887282"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/325887282" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#325887282">(Feb 04 2023 at 22:27)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a> from <code>wasm-bandnot</code> to <code>main</code>.</p>
+
+
+
+<a name="325888032"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/325888032" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#325888032">(Feb 04 2023 at 22:36)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a> from <code>wasm-bandnot</code> to <code>main</code>.</p>
+
+
+
+<a name="325896665"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/325896665" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#325896665">(Feb 05 2023 at 00:44)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a> from <code>wasm-bandnot</code> to <code>main</code>.</p>
+
+
+
+<a name="326201272"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/326201272" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#326201272">(Feb 06 2023 at 17:44)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a> from <code>wasm-bandnot</code> to <code>main</code>.</p>
+
+
+
+<a name="326209303"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/326209303" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#326209303">(Feb 06 2023 at 18:24)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5709#pullrequestreview-1285772657">PR review</a>.</p>
+
+
+
+<a name="326209304"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/326209304" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#326209304">(Feb 06 2023 at 18:24)</a>:</h4>
+<p>jameysharp submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/5709#pullrequestreview-1285772657">PR review</a>.</p>
+
+
+
+<a name="326209308"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/326209308" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#326209308">(Feb 06 2023 at 18:24)</a>:</h4>
+<p>jameysharp created <a href="https://github.com/bytecodealliance/wasmtime/pull/5709#discussion_r1097763096">PR review comment</a>:</p>
+<blockquote>
+<p>Tiny whitespace fix:</p>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>(rule 9 (lower (has_type ty @ (multi_lane _bits _lane) (band (bnot y) x)))
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="326215751"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/326215751" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#326215751">(Feb 06 2023 at 18:57)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a> from <code>wasm-bandnot</code> to <code>main</code>.</p>
+
+
+
+<a name="326226239"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%235709%20Legalize%20%60b%7Band%2Cor%2Cxor%7D_not%60%20into%20com.../near/326226239" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.235709.20Legalize.20.60b.7Band.2Cor.2Cxor.7D_not.60.20into.20com.2E.2E.2E.html#326226239">(Feb 06 2023 at 19:53)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/5709">PR #5709</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

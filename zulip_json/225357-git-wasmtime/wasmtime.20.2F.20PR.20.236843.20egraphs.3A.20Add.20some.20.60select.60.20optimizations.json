@@ -1,0 +1,164 @@
+[
+    {
+        "content": "<p>afonso360 opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a> from <code>afonso360:opt-select</code> to <code>bytecodealliance:main</code>:</p>\n<blockquote>\n<p><span aria-label=\"wave\" class=\"emoji emoji-1f44b\" role=\"img\" title=\"wave\">:wave:</span> Hey,</p>\n<p>I was playing around with a project that uses cranelift as it's backend, and found some IR patterns where we could do better optimizations.</p>\n<p>This PR adds a few optimizations:</p>\n<ul>\n<li>\n<p>We try to remove <code>{u,s}extend</code> and <code>ireduce</code> from the controlling input of <code>select</code>. In many cases we can avoid them since <code>select</code> supports pretty much any input type.</p>\n</li>\n<li>\n<p>When we have <code>(select c (iconst -1) (iconst 0))</code> we can remove the <code>select</code> if we know that the controlling value already generates a <code>-1</code> or <code>0</code>. I've implemented this for <code>icmp</code> and <code>fcmp</code><br>\n    * I wanted to add a base rule that would turn any other value into <code>bmask</code>, but it ended up messing with the <code>icmp</code> and <code>fcmp</code> rules, and I'm not sure how to deal with that.</p>\n</li>\n<li>\n<p>Delete consecutive <code>bmask</code>'s</p>\n</li>\n<li>Delete consecutive <code>bswap</code>'s</li>\n</ul>\n<p>I've ran sightglass on these and it shows no difference. I've also fuzzed this change for a couple of hours and it also didn't trigger anything.</p>\n</blockquote>",
+        "id": 384590190,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691964010
+    },
+    {
+        "content": "<p><strong>afonso360</strong> requested <a href=\"https://github.com/abrown\">abrown</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 384590193,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691964011
+    },
+    {
+        "content": "<p><strong>afonso360</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers\">wasmtime-compiler-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 384590194,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691964011
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#pullrequestreview-1577457695\">PR review</a>:</p>\n<blockquote>\n<p>This has some overlap with my PR #6214. I haven't gotten back to that in a while and I'm glad you're picking this up! Although you've marked this a draft, I got excited and reviewed it anyway since I'd reasoned through some of this already.</p>\n</blockquote>",
+        "id": 384884773,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692041001
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#pullrequestreview-1577457695\">PR review</a>:</p>\n<blockquote>\n<p>This has some overlap with my PR #6214. I haven't gotten back to that in a while and I'm glad you're picking this up! Although you've marked this a draft, I got excited and reviewed it anyway since I'd reasoned through some of this already.</p>\n</blockquote>",
+        "id": 384884774,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692041002
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#discussion_r1293850941\">PR review comment</a>:</p>\n<blockquote>\n<p>I think these rules can be simpler.</p>\n<p>Both <code>sextend</code> and <code>uextend</code> preserve whether their argument is non-zero, so removing the extend from select-of-extend is valid regardless of whether the condition came from fcmp/icmp or something else. In my PR I noticed that <code>ineg</code> and <code>bmask</code> also preserve whether the argument is non-zero and can be eliminated inside select for the same reason.</p>\n<p>That's not true of <code>ireduce</code>, but you can use a different rule there: I believe it's safe to eliminate either <code>ireduce</code> or <code>sextend</code> (but not <code>uextend</code>) when they're applied to <code>bmask</code>. At least according to <code>bmask</code>'s definition, it can produce any integer type regardless of the type of its argument. Hopefully the backends implement that faithfully.</p>\n</blockquote>",
+        "id": 384884775,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692041002
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#discussion_r1293850321\">PR review comment</a>:</p>\n<blockquote>\n<p>I think <code>(select c -1 0)</code> can be rewritten to <code>(bmask c)</code>, regardless of the widths of either <code>c</code> or the result type, and even if <code>c</code> doesn't match <code>icmp</code> or <code>fcmp</code>. Then all the other rules we're discussing that match <code>bmask</code> can apply.</p>\n<p>I'm not sure if it's useful, but I guess the other pattern we could extract from these rules is that when <code>bmask</code> is applied to either <code>icmp</code> or <code>fcmp</code>, it's a no-op if the result type is <code>I8</code>, or it's equivalent to <code>sextend</code> for any wider scalar type.</p>\n<p>I always forget that <code>icmp</code> and <code>fcmp</code> return <code>I8</code> when given any width of scalar. That's kinda weird and had me very confused about these rules. Maybe we should change that someday.</p>\n<p>There's a minor efficiency improvement if you reuse unchanged nodes from the input. For example, bind the <code>fcmp</code> to a name using an at-pattern (<code>cmp @ (fcmp fty cc x y)</code>) and then use that name instead of the full pattern on the right-hand side. This avoids having to look up the original node in the GVN map, since we already have the node ID from doing the pattern match. In theory, ISLE could do this transformation automatically, as long as we guarantee that the extractor and constructor for the same term are always inverses of each other.</p>\n</blockquote>",
+        "id": 384884776,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692041002
+    },
+    {
+        "content": "<p>afonso360 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#discussion_r1293955023\">PR review comment</a>:</p>\n<blockquote>\n<p>Separating this into <code>select-&gt;bmask</code> and <code>bmask+icmp-&gt;icmp</code> is a really neat way of simplifying these optimizations! Thanks!</p>\n</blockquote>",
+        "id": 384905606,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692046061
+    },
+    {
+        "content": "<p>afonso360 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#pullrequestreview-1577627359\">PR review</a>.</p>",
+        "id": 384905607,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692046062
+    },
+    {
+        "content": "<p>afonso360 updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 385434565,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692182465
+    },
+    {
+        "content": "<p>afonso360 updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 385928743,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692368773
+    },
+    {
+        "content": "<p><strong>jameysharp</strong> requested <a href=\"https://github.com/jameysharp\">jameysharp</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 385941475,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692372226
+    },
+    {
+        "content": "<p>afonso360 updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 386144289,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692478427
+    },
+    {
+        "content": "<p>afonso360 updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 386204047,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692523773
+    },
+    {
+        "content": "<p>afonso360 updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 386456149,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692644545
+    },
+    {
+        "content": "<p><strong>afonso360</strong> has marked <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a> as ready for review.</p>",
+        "id": 386456161,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692644549
+    },
+    {
+        "content": "<p>afonso360 updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 386456731,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692644783
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#pullrequestreview-1587747571\">PR review</a>:</p>\n<blockquote>\n<p>Looks great and I'm hopeful that CI will pass this time. :grin:</p>\n<p>I'd love to see some Sightglass numbers from this. (Someday I will remember how to use /bench_x64; is today that day?) With the wide range of cases that you've covered now, I imagine these patterns might fire fairly often, and it would be exciting if this made a measurable difference.</p>\n<p>As future work, I think there might be value in a corresponding <code>falsy</code> helper that can be used to swap arguments to <code>select</code>. If nothing else, there's a dedicated wasm instruction that corresponds to <code>(eq ty v 0)</code> so I bet we'd see that match frequently.</p>\n<p><div class=\"codehilite\" data-code-language=\"Common Lisp\"><pre><span></span><code><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">simplify</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">select</span><span class=\"w\"> </span><span class=\"nv\">ty</span><span class=\"w\"> </span><span class=\"nv\">v</span><span class=\"w\"> </span><span class=\"no\">t</span><span class=\"w\"> </span><span class=\"nv\">f</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">if-let</span><span class=\"w\"> </span><span class=\"nv\">c</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">falsy</span><span class=\"w\"> </span><span class=\"nv\">v</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">select</span><span class=\"w\"> </span><span class=\"nv\">ty</span><span class=\"w\"> </span><span class=\"nv\">c</span><span class=\"w\"> </span><span class=\"nv\">f</span><span class=\"w\"> </span><span class=\"no\">t</span><span class=\"p\">))</span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 386463611,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692647953
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#discussion_r1300582340\">PR review comment</a>:</p>\n<blockquote>\n<p>It just occurred to me that \"left\" and \"right\" are not very helpful descriptions of the operands to <code>select</code>. How about this?</p>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>(rule (simplify (select ty v t f)) (if-let c (truthy v)) (select ty c t f))\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 386463612,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692647953
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#pullrequestreview-1587747571\">PR review</a>:</p>\n<blockquote>\n<p>Looks great and I'm hopeful that CI will pass this time. :grin:</p>\n<p>I'd love to see some Sightglass numbers from this. (Someday I will remember how to use /bench_x64; is today that day?) With the wide range of cases that you've covered now, I imagine these patterns might fire fairly often, and it would be exciting if this made a measurable difference.</p>\n<p>As future work, I think there might be value in a corresponding <code>falsy</code> helper that can be used to swap arguments to <code>select</code>. If nothing else, there's a dedicated wasm instruction that corresponds to <code>(eq ty v 0)</code> so I bet we'd see that match frequently.</p>\n<p><div class=\"codehilite\" data-code-language=\"Common Lisp\"><pre><span></span><code><span class=\"p\">(</span><span class=\"nv\">rule</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">simplify</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">select</span><span class=\"w\"> </span><span class=\"nv\">ty</span><span class=\"w\"> </span><span class=\"nv\">v</span><span class=\"w\"> </span><span class=\"no\">t</span><span class=\"w\"> </span><span class=\"nv\">f</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">if-let</span><span class=\"w\"> </span><span class=\"nv\">c</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">falsy</span><span class=\"w\"> </span><span class=\"nv\">v</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"nv\">select</span><span class=\"w\"> </span><span class=\"nv\">ty</span><span class=\"w\"> </span><span class=\"nv\">c</span><span class=\"w\"> </span><span class=\"nv\">f</span><span class=\"w\"> </span><span class=\"no\">t</span><span class=\"p\">))</span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 386463613,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692647953
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#discussion_r1300572611\">PR review comment</a>:</p>\n<blockquote>\n<p>Nice job spotting <code>(ne v 0)</code> as also truthy!</p>\n<p>I'm having a little trouble following the constraints on this rule. I think what you're doing is that the operands to <code>icmp</code> must both have the same type, so if <code>truthy</code> unwraps <code>v</code> to a different type then the rule doesn't apply. Is that right?</p>\n<p>Contrary to what I said before about re-using the existing <code>iconst</code>, I think this rule will be better if we reconstruct the constant at whatever type <code>c</code> has. In the case where the types do match, we'll go through the GVN map and discover that the new <code>iconst</code> is identical to the old one, which is a little silly; but the rule will also succeed when the types don't match, making it more useful.</p>\n<div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>(rule (simplify (ne cty v (iconst _ (u64_from_imm64 0))))\n      (if-let c (truthy v))\n      (if-let (value_type ty) c)\n      (ne cty c (iconst ty (u64_from_imm64 0))))\n</code></pre></div>\n<p>That said, I believe this rule is also correct the way you wrote it; feel free to merge as-is.</p>\n<p>In either case, it would be nice to add a comment, either saying that we're constraining <code>value_type</code> to be equal to the type of <code>zero</code>, or saying that we're extracting the type of <code>c</code> to make sure that the zero has the same type.</p>\n</blockquote>",
+        "id": 386463615,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692647953
+    },
+    {
+        "content": "<p>afonso360 updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 386465258,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692648604
+    },
+    {
+        "content": "<p>afonso360 updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 386466206,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692649074
+    },
+    {
+        "content": "<p>afonso360 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#pullrequestreview-1587810345\">PR review</a>.</p>",
+        "id": 386466208,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692649074
+    },
+    {
+        "content": "<p>afonso360 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#discussion_r1300604409\">PR review comment</a>:</p>\n<blockquote>\n<p>Oh, that's really neat! I don't know how I didn't spot that.</p>\n</blockquote>",
+        "id": 386466209,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692649074
+    },
+    {
+        "content": "<p>afonso360 edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843#discussion_r1300604409\">PR review comment</a>.</p>",
+        "id": 386466301,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692649111
+    },
+    {
+        "content": "<p>afonso360 merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6843\">PR #6843</a>.</p>",
+        "id": 386479234,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1692653895
+    }
+]

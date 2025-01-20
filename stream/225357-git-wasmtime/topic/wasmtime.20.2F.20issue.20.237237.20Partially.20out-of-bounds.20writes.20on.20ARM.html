@@ -1,0 +1,227 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #7237 Partially out-of-bounds writes on ARM · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html">wasmtime / issue #7237 Partially out-of-bounds writes on ARM</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="396553953"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396553953" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396553953">(Oct 13 2023 at 18:29)</a>:</h4>
+<p>fitzgen opened <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<p>Apparently on ARM when</p>
+<ul>
+<li>a store is unaligned</li>
+<li>and crosses a page boundary</li>
+<li>and one page faults but the other doesn't</li>
+</ul>
+<p>then there is no guarantee that the part of the store to the page that didn't fault will not succeed, despite the other part raising a signal.</p>
+<p>This means that partially out-of-bounds Wasm stores that trigger a trap can potentially mutate memory for the in-bounds portion of the write, which is not spec compliant.</p>
+<p>Apparently it is implementation-defined behavior, so it may or may not be an issue on any given ARM machine.</p>
+<p>Thus far, @cfallin tested on the ARM machines he has access to and none of the following have failed the attached test case:</p>
+<ul>
+<li>Apple M2</li>
+<li>RPi4</li>
+<li>the BA ARM server ("Neoverse N1 core, I think, in an Ampere Altra CPU")</li>
+</ul>
+<h3>Test Case</h3>
+<div class="codehilite" data-code-language="WebAssembly"><pre><span></span><code><span class="p">(</span><span class="k">module</span>
+  <span class="p">(</span><span class="k">memory</span> <span class="mi">1</span><span class="p">)</span>
+  <span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">export</span> <span class="s2">"i64.store"</span><span class="p">)</span> <span class="p">(</span><span class="k">param</span> <span class="kt">i32</span> <span class="kt">i64</span><span class="p">)</span>
+    <span class="nb">local.get</span> <span class="mi">0</span>
+    <span class="nb">local.get</span> <span class="mi">1</span>
+    <span class="nb">i64.store</span><span class="p">)</span>
+  <span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">export</span> <span class="s2">"i32.load8_u"</span><span class="p">)</span> <span class="p">(</span><span class="k">param</span> <span class="kt">i32</span><span class="p">)</span> <span class="p">(</span><span class="k">result</span> <span class="kt">i32</span><span class="p">)</span>
+    <span class="nb">local.get</span> <span class="mi">0</span>
+    <span class="nb">i32.load8_u</span><span class="p">))</span>
+
+<span class="p">(</span><span class="err">assert_trap</span> <span class="p">(</span><span class="err">invoke</span> <span class="s2">"i64.store"</span>
+                     <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">65529</span><span class="p">)</span>
+                     <span class="p">(</span><span class="nb">i64.const</span> <span class="mf">0xffffffffffffffff)</span><span class="p">)</span>
+             <span class="s2">"out of bounds memory access"</span><span class="p">)</span>
+
+<span class="c1">;; Partial bytes were not written.</span>
+<span class="p">(</span><span class="err">assert_</span><span class="nb">return</span> <span class="p">(</span><span class="err">invoke</span> <span class="s2">"i32.load8_u"</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">65529</span><span class="p">))</span>
+               <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+<span class="p">(</span><span class="err">assert_</span><span class="nb">return</span> <span class="p">(</span><span class="err">invoke</span> <span class="s2">"i32.load8_u"</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">65530</span><span class="p">))</span>
+               <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+<span class="p">(</span><span class="err">assert_</span><span class="nb">return</span> <span class="p">(</span><span class="err">invoke</span> <span class="s2">"i32.load8_u"</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">65531</span><span class="p">))</span>
+               <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+<span class="p">(</span><span class="err">assert_</span><span class="nb">return</span> <span class="p">(</span><span class="err">invoke</span> <span class="s2">"i32.load8_u"</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">65532</span><span class="p">))</span>
+               <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+<span class="p">(</span><span class="err">assert_</span><span class="nb">return</span> <span class="p">(</span><span class="err">invoke</span> <span class="s2">"i32.load8_u"</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">65533</span><span class="p">))</span>
+               <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+<span class="p">(</span><span class="err">assert_</span><span class="nb">return</span> <span class="p">(</span><span class="err">invoke</span> <span class="s2">"i32.load8_u"</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">65534</span><span class="p">))</span>
+               <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+<span class="p">(</span><span class="err">assert_</span><span class="nb">return</span> <span class="p">(</span><span class="err">invoke</span> <span class="s2">"i32.load8_u"</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">65535</span><span class="p">))</span>
+               <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+</code></pre></div>
+<h3>See Also</h3>
+<ul>
+<li><a href="https://github.com/WebAssembly/design/issues/1490">https://github.com/WebAssembly/design/issues/1490</a></li>
+<li><a href="https://bugzilla.mozilla.org/show_bug.cgi?id=1666747">https://bugzilla.mozilla.org/show_bug.cgi?id=1666747</a></li>
+</ul>
+</blockquote>
+
+
+
+<a name="396554221"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396554221" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396554221">(Oct 13 2023 at 18:31)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1762003450">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<p>Modulo relaxing the spec, the only 100% sure way to fix this that I am aware of would be to use explicit bounds checks for all stores on ARM.</p>
+</blockquote>
+
+
+
+<a name="396554783"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396554783" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396554783">(Oct 13 2023 at 18:35)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1762015159">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<p>Oh also, we should double check whether risc-v and s390x give us the stronger guarantees we need to match wasm semantics.</p>
+<p>cc @uweigand: happen to know the answer for s390x?</p>
+</blockquote>
+
+
+
+<a name="396555589"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396555589" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396555589">(Oct 13 2023 at 18:42)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1762026196">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<p>I've been trying to figure out the state of RISC-V's specs on this matter. The <a href="https://drive.google.com/file/d/1EMip5dZlnypTk7pt4WWUKmtjUKTOkBqh/view">privileged-mode spec</a> includes details on page translation, but the translation algorithm and surrounding text (section 4.3.2) talk about a single address being translated, and don't seem to mention what happens when a single usermode instruction requires multiple translations. The <a href="https://riscv.org/wp-content/uploads/2019/06/riscv-spec.pdf">user-mode spec</a> is pretty high-level and only talks about "invisible traps", including page-faults, that can happen during execution of an instruction but are unobservable. So it seems to be a bit underspecified.</p>
+</blockquote>
+
+
+
+<a name="396556862"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396556862" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396556862">(Oct 13 2023 at 18:54)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1762039461">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<p>Two other possible fixes:</p>
+<ul>
+<li>Somehow detect if the underlying platform actually tears partially-faulting writes, and only enable bounds-checks if so;</li>
+<li>Disallow access to the memory on which the fault occurred, after-the-fact. This would still then be spec-compliant during Wasm execution, we just don't provide the final memory state as an output on affected systems with the "fast" (guard-page) configuration. I'm not sure exactly how to enforce this (maybe unmap the whole thing at trap-termination?) but perhaps there's a way. Or just document it.</li>
+</ul>
+</blockquote>
+
+
+
+<a name="396786741"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396786741" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396786741">(Oct 15 2023 at 22:19)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1763519724">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<blockquote>
+<p>Oh also, we should double check whether risc-v and s390x give us the stronger guarantees we need to match wasm semantics.</p>
+<p>cc @uweigand: happen to know the answer for s390x?</p>
+</blockquote>
+<p>For most instructions on s390x, the architecture guarantees that they either complete successfully, or else are "nullified" or "suppressed", which means none of the output operands (either in memory or in registers) are changed at all.  This also applies to the case of an unaligned store crossing a page boundary.  [ The one side effect allowed by the architecture is that a nullified or suppressed instruction may cause the hardware change bit of a page containing (part of) a memory output operand to be set, even if the output actually is not modified.  This doesn't have any observable effect on a wasm program, though. ]</p>
+<p>The exception to this rule are so-called "interruptible" instructions; these are long-running operations (e.g. copying a large block of memory).  Those are allowed to "partially complete", e.g. after copying only part of the total memory block.  They will indicate this outcome by modifying the output registers and condition code accordingly.   If such an instruction incurs a page fault halfway through, partial completion will usually result.   But those instructions are not generated by the wasmtime s390x backend (certainly not to implement a single wasm store).<br>
+</p>
+</blockquote>
+
+
+
+<a name="396787649"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396787649" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396787649">(Oct 15 2023 at 22:36)</a>:</h4>
+<p>afonso360 <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1763523982">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<p>For RISC-V it looks like this was recently clarified in the ISA (see <a href="https://github.com/riscv/riscv-isa-manual/pull/1119">https://github.com/riscv/riscv-isa-manual/pull/1119</a>). The ISA now states:</p>
+<blockquote>
+<p>On some implementations, misaligned loads, stores, and instruction<br>
+fetches may also be decomposed into multiple accesses, some of which may<br>
+succeed before a page-fault exception occurs. In particular, a<br>
+portion of a misaligned store that passes the exception check may become<br>
+visible, even if another portion fails the exception check. The same behavior<br>
+may manifest for stores wider than XLEN bits (e.g., the FSD instruction<br>
+in RV32D), even when the store address is naturally aligned.</p>
+</blockquote>
+</blockquote>
+
+
+
+<a name="396861651"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396861651" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396861651">(Oct 16 2023 at 09:38)</a>:</h4>
+<p>sparker-arm <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1764095888">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<blockquote>
+<p>Somehow detect if the underlying platform actually tears partially-faulting writes, and only enable bounds-checks if so.</p>
+</blockquote>
+<p>Just FYI, this is what <a href="https://source.chromium.org/chromium/chromium/src/+/main:v8/src/wasm/compilation-environment.h;drc=3252e11c56b69700a79d0335b8bc667cda82b6dc;l=39">V8</a> does, which is on arm64 MacOS.</p>
+</blockquote>
+
+
+
+<a name="396866782"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396866782" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396866782">(Oct 16 2023 at 10:06)</a>:</h4>
+<p>afonso360 edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1763523982">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<p>For RISC-V it looks like this was recently clarified in the ISA (see <a href="https://github.com/riscv/riscv-isa-manual/pull/1119">https://github.com/riscv/riscv-isa-manual/pull/1119</a>). The ISA now states:</p>
+<blockquote>
+<p>On some implementations, misaligned loads, stores, and instruction<br>
+fetches may also be decomposed into multiple accesses, some of which may<br>
+succeed before a page-fault exception occurs. In particular, a<br>
+portion of a misaligned store that passes the exception check may become<br>
+visible, even if another portion fails the exception check. The same behavior<br>
+may manifest for stores wider than XLEN bits (e.g., the FSD instruction<br>
+in RV32D), even when the store address is naturally aligned.</p>
+</blockquote>
+<p>Edit: By the way, I ran the above test on a JH7110 (SiFive u74 core) and it failed with:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">Error</span>: <span class="nc">failed</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">run</span><span class="w"> </span><span class="n">script</span><span class="w"> </span><span class="n">file</span><span class="w"> </span><span class="o">'</span><span class="p">.</span><span class="o">/</span><span class="n">test</span><span class="p">.</span><span class="n">wast</span><span class="o">'</span>
+
+<span class="n">Caused</span><span class="w"> </span><span class="n">by</span>:
+    <span class="mi">0</span>: <span class="nc">failed</span><span class="w"> </span><span class="n">directive</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="p">.</span><span class="o">/</span><span class="n">test</span><span class="p">.</span><span class="n">wast</span>:<span class="mi">17</span>:<span class="mi">1</span>
+<span class="w">    </span><span class="mi">1</span>: <span class="nc">result</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="n">didn</span><span class="o">'</span><span class="na">t</span><span class="w"> </span><span class="k">match</span>
+<span class="w">    </span><span class="mi">2</span>: <span class="nc">expected</span><span class="w">                  </span><span class="mi">0</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mh">0x0000000000000000</span>
+<span class="w">       </span><span class="n">actual</span><span class="w">                  </span><span class="mi">255</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mh">0x00000000000000ff</span>
+</code></pre></div>
+<p>So it looks like this actually happens for RISC-V cores.</p>
+</blockquote>
+
+
+
+<a name="396934647"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396934647" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396934647">(Oct 16 2023 at 16:03)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1764806794">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<blockquote>
+<blockquote>
+<p>Somehow detect if the underlying platform actually tears partially-faulting writes, and only enable bounds-checks if so.</p>
+</blockquote>
+<p>Just FYI, this is what <a href="https://source.chromium.org/chromium/chromium/src/+/main:v8/src/wasm/compilation-environment.h;drc=3252e11c56b69700a79d0335b8bc667cda82b6dc;l=39">V8</a> does, which is on arm64 MacOS.</p>
+</blockquote>
+<p>It seems like given @akirilov-arm's reply <a href="https://github.com/WebAssembly/design/issues/1490#issuecomment-1764552895">here</a>, V8's behavior is also technically non-conforming then: if the platform doesn't guarantee consistency in its behavior, then one can't test and choose a strategy at startup and rely on it to remain working.</p>
+</blockquote>
+
+
+
+<a name="396936356"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396936356" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396936356">(Oct 16 2023 at 16:12)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1764823269">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<blockquote>
+<p>So it looks like this actually happens for RISC-V cores.</p>
+</blockquote>
+<p>Thanks for testing @afonso360!</p>
+<p>Will update the issue title to reflect that this is both an ARM and riscv issue.</p>
+</blockquote>
+
+
+
+<a name="396936404"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%237237%20Partially%20out-of-bounds%20writes%20on%20ARM/near/396936404" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.237237.20Partially.20out-of-bounds.20writes.20on.20ARM.html#396936404">(Oct 16 2023 at 16:12)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/7237#issuecomment-1764823891">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/7237">issue #7237</a>:</p>
+<blockquote>
+<blockquote>
+<p>For most instructions on s390x, the architecture guarantees that they either complete successfully, or else are "nullified" or "suppressed",</p>
+</blockquote>
+<p>Thanks @uweigand!</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

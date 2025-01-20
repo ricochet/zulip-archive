@@ -1,0 +1,170 @@
+[
+    {
+        "content": "<p>It seems to me that the entire literature about SSA IRs is using phi instructions instead of block parameters. Both representations are equivalent to each other, however, I really wonder, given that \"the entire rest of the world\" is using phi instructions why has Cranelift chosen to use block parameters instead?</p>\n<p>When I was taking a look into cranelift I started to feel it might be because translation from Wasm to SSA IR is simpler with block parameters because Wasm already provides block signatures out of the box. For phi instructions it is a bit harder to map since there is no particular ordering as is with block parameters.</p>\n<p>Is there some person who might know a bit more about the rationals behind this design decision?<br>\nI would really appreciate an answer or some clues. :)</p>",
+        "id": 228652575,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1614799812
+    },
+    {
+        "content": "<p>The original idea is that phi instructions aren't really instructions, in some key ways. Their uses don't happen inside the block; they happen on the incoming edges. Block parameters, along with putting the arguments on the jump instructions, mean that the uses of those arguments happen exactly where they appear to.</p>",
+        "id": 228653793,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1614800234
+    },
+    {
+        "content": "<p>It's generally easier to understand block params.</p>\n<p>IIRC, LLVM folks have said that if they knew about block parameters back then, they would have used them instead of Phis.</p>",
+        "id": 228654065,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1614800327
+    },
+    {
+        "content": "<p>Thanks a lot <span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> and <span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> for this information! I didn't know that. For a long time I was wondering about pros and cons between phi instructions and block parameters and over the course of some discussions I dug out people seemed to be more in favor of phi instructions but now I start to feel that this might not be the full story. Due to this information I built my own SSA IR upon phi instructions but now I wonder if this was a backwards decision ... :S<br>\nBlock parameters truly are simpler imo. It is super interesting to know that LLVM folks even would have picked block parameters over phi instructions nowadays.</p>",
+        "id": 228654630,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1614800537
+    },
+    {
+        "content": "<p>One of the things we learned along the way is that the way Cranelift does block parameters creates some tricky corner cases around critical edges.</p>",
+        "id": 228654716,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1614800583
+    },
+    {
+        "content": "<p>The operands on a conditional branch apply to both destinations, and Cranelift currently requires the number of arguments match between every branch and its destination. So if you add a block parameter to a block, you then add an argument to the incoming branch, and if it's conditional, you then have to add a block parameter to the other destination. And if <em>that</em> edge is also critical, then you have to keep iterating to keep things consistent.</p>",
+        "id": 228655054,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1614800716
+    },
+    {
+        "content": "<p>I have seen some tricky code around so-called \"side effects\" if you are referring to those. I have to out myself as a non-compiler expert so I really learned a ton while just looking dumbly at the super cool Cranelift and Wasmtime codebase.</p>",
+        "id": 228655079,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1614800727
+    },
+    {
+        "content": "<p>It's related, yeah. Cranelift early on chose to not allow jump tables to jump to blocks with block parameters.</p>",
+        "id": 228655412,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1614800851
+    },
+    {
+        "content": "<p>This means it has to split critical edges on the fly during SSA construction.</p>",
+        "id": 228655455,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1614800873
+    },
+    {
+        "content": "<p>They are equivalent, so not a big deal.</p>\n<p>Removing params/phis (e.g. because the value is never used) is interesting:</p>\n<ul>\n<li>block params mean you have to update every site that jumps to the block</li>\n<li>phis you only have to remove the one phi</li>\n</ul>\n<p>However, there is a dual problem when removing a whole (never jumped to) block:</p>\n<ul>\n<li>\n<p>removing a block means you need to know all phis that reference values from that block and remove those values <br>\nfrom the phi's arguments</p>\n</li>\n<li>\n<p>block params won't have any jumps to that block, so nothing to fixup</p>\n</li>\n</ul>",
+        "id": 228655649,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1614800938
+    },
+    {
+        "content": "<p>In the graphics shader IR I'm currently designing for the Kazan Vulkan driver, it uses block parameters where every CFG edge has individual arguments for that edge, so a switch instruction has a separate set of parameters for every case</p>",
+        "id": 228656564,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1614801279
+    },
+    {
+        "content": "<p>so it doesn't have that issue with critical edges</p>",
+        "id": 228656707,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1614801333
+    },
+    {
+        "content": "<p>Here's what I did In my (somewhat Cranelift-inspired) IR:</p>\n<ul>\n<li>Only unconditional jump instructions can have block parameters. Conditional branches and jump tables need critical edge splitting.</li>\n<li>The first N instructions of a basic block are phi instructions which refer to the basic block parameter at that index.</li>\n<li>There is an invariant that the number of phi instructions must always match the number of incoming block parameters.</li>\n</ul>\n<p>This works out nicely because it avoids a layer of indirection in the <code>ValueData</code> to check whether a value refers to an instruction or block parameter. Also finding the source value of a phi is easy since there is only one possible terminator (unconditional jump) allowed in the predecessors.</p>",
+        "id": 228657120,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1614801472
+    },
+    {
+        "content": "<p>Currently trying to digest all this amazing information. <span aria-label=\"yum\" class=\"emoji emoji-1f60b\" role=\"img\" title=\"yum\">:yum:</span> <br>\n<span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> What you said about the duality between phi instructions and block parameters sounds super cool.<br>\nI wonder if it might make sense to use for example phi instructions during SSA construction and at the end of construction convert those in a single sweep into block parameters? <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span> <br>\n<span class=\"user-mention\" data-user-id=\"315881\">@Jacob Lifshay</span> Do I understand correctly that the problem with block parameters is when there is the same set of block parameters between 2 blocks that could span over multiple edges between those blocks (for example with <code>br_table</code>) and you are breaking this problem up by \"simply\" using a set of parameters per real edge?<br>\nIs this what people are referring to with \"critical edge splitting\"? Sorry! Will definitely have to look up stuff. <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span> <br>\nSo if I understood correctly the way how Cranelift IR works with multiple branch instructions at the end of a block having only parameters between blocks instead of per edge causes trouble. And if an SSA IR only has a single terminate instruction (without support for <code>br_table</code>) then there are no problems, right?<br>\n<span class=\"user-mention\" data-user-id=\"301625\">@Amanieu</span> I wonder: How are you mapping the ordering between phi instructions and block parameter indices? That's exactly what is missing from the puzzle in my head and what is missing from my SSA IR. I found out about this when inspecting the line starting here <a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator.rs#L400\">https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator.rs#L400</a>.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator.rs#L400\" style=\"background-image: url(https://avatars.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator.rs#L400\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 228659320,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1614802222
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"sd\">/// A `Phi` represents an \"argument\" to a basic block coming from a</span>\n<span class=\"w\">    </span><span class=\"sd\">/// predecessor block. The actual values for all `Phi`s in a basic block are</span>\n<span class=\"w\">    </span><span class=\"sd\">/// passed as a list of values to the `Jump` instructions that point to the</span>\n<span class=\"w\">    </span><span class=\"sd\">/// block.</span>\n<span class=\"w\">    </span><span class=\"sd\">///</span>\n<span class=\"w\">    </span><span class=\"sd\">/// All `Phi` instructions *must* be at the start of the basic block. There</span>\n<span class=\"w\">    </span><span class=\"sd\">/// cannot be any other instructions mixed with the `Phi` instructions.</span>\n<span class=\"w\">    </span><span class=\"sd\">///</span>\n<span class=\"w\">    </span><span class=\"sd\">/// A `Phi` instruction is tied to the basic block that it is located in:</span>\n<span class=\"w\">    </span><span class=\"sd\">/// it cannot be moved to another block, duplicated or removed without also</span>\n<span class=\"w\">    </span><span class=\"sd\">/// adjusting all of the `Jump` instructions that point to that block.</span>\n<span class=\"w\">    </span><span class=\"n\">Phi</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">index</span>: <span class=\"kt\">usize</span> <span class=\"p\">},</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 228659841,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1614802403
+    },
+    {
+        "content": "<p>Basically the phi instruction contains its own index <em>and</em> must be at that index in the basic block.</p>",
+        "id": 228659971,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1614802444
+    },
+    {
+        "content": "<p>If your IR supports multiple results per instruction then you might be able to get away with just a single phi as the first instruction with N results.</p>",
+        "id": 228660346,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1614802571
+    },
+    {
+        "content": "<blockquote>\n<p>If your IR supports multiple results per instruction then you might be able to get away with just a single phi as the first instruction with N results.</p>\n</blockquote>\n<p>It actually does but I do not understand how this solves the problem of having no mapping between phi instructions and block parameters. Sorry for all my non-expertise with compilers. <span aria-label=\"see no evil\" class=\"emoji emoji-1f648\" role=\"img\" title=\"see no evil\">:see_no_evil:</span></p>",
+        "id": 228661363,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1614802955
+    },
+    {
+        "content": "<p>Oh wait do you mean that I merge all my phi instructions into one monster-phi instruction and therefore no longer need a mapping between phi instructions and block parameters since I simply use the tuple indices of the phi instruction operands? :O</p>",
+        "id": 228661826,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1614803123
+    },
+    {
+        "content": "<p>Yes, essentially.</p>",
+        "id": 228662949,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1614803547
+    },
+    {
+        "content": "<p>Thank you all for all the super valuable information! It really helped me a lot! <span aria-label=\"hug\" class=\"emoji emoji-1f917\" role=\"img\" title=\"hug\">:hug:</span></p>",
+        "id": 228663124,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1614803624
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"374806\">Hero Bird</span> <a href=\"#narrow/stream/206238-general/topic/Why.20block.20parameters.20instead.20of.20phi.20nodes.20for.20SSA.20IR.3F/near/228659320\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"315881\">Jacob Lifshay</span> Do I understand correctly that the problem with block parameters is when there is the same set of block parameters between 2 blocks that could span over multiple edges between those blocks (for example with <code>br_table</code>) and you are breaking this problem up by \"simply\" using a set of parameters per real edge?</p>\n</blockquote>\n<p>Yes, afaict.</p>\n<blockquote>\n<p>Is this what people are referring to with \"critical edge splitting\"? Sorry! Will definitely have to look up stuff. <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>\n</blockquote>\n<p>No, critical edge splitting is where a new empty basic block is inserted in all CFG edges where both the edge's source block has multiple target edges (e.g. br_table) and the edge's target block has multiple source edges.</p>\n<p>This process transforms the CFG to a form where every edge has a unique block where instructions can be inserted that are executed when and only when that edge is executed -- basically allowing you to insert instructions in edges.</p>\n<blockquote>\n<p>So if I understood correctly the way how Cranelift IR works with multiple branch instructions at the end of a block having only parameters between blocks instead of per edge causes trouble.</p>\n</blockquote>\n<p>Yup.</p>\n<blockquote>\n<p>And if an SSA IR only has a single terminate instruction (without support for <code>br_table</code>) then there are no problems, right?</p>\n</blockquote>\n<p>Problems are caused whenever a block-ending branch instruction has multiple target blocks that need to share block parameters, hence why I designed Kazan's IR to always have separate parameter sets for each target block.</p>",
+        "id": 228691152,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1614815920
+    },
+    {
+        "content": "<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"315881\">Jacob Lifshay</span>  20:54<br>\nIn the graphics shader IR I'm currently designing for the Kazan Vulkan driver, it uses block parameters where every CFG edge has individual arguments for that edge, so a switch instruction has a separate set of parameters for every case</p>\n</blockquote>\n<p>I find this design very elegant and wonder if there are any non-obvious (or obvious) drawbacks when having different parameter sets per branch edge instead of per block edge. I am currently thinking about adjusting my own SSA IR towards this style using block parameters instead of phi instructions. It seriously is more expressive than using phi instructions or block parameters that only allow the same set of parameters between blocks which may lead to sometimes requiring fewer blocks. However, maybe it has some hidden downsides? <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 229005805,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1614970636
+    },
+    {
+        "content": "<p>well, I haven't gotten far enough along in writing the shader compiler to notice any drawbacks other than the obvious storing more stuff in the IR increases IR memory usage...</p>",
+        "id": 229015151,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1614974369
+    },
+    {
+        "content": "<blockquote>\n<p>Cranelift early on chose to not allow jump tables to jump to blocks with block parameters.</p>\n</blockquote>\n<p>Do you remember why this was chosen? Would people choose this design again with all the knowledge they gained over time today?</p>",
+        "id": 229093684,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1615033315
+    },
+    {
+        "content": "<p>I am currently using this paper (<a href=\"https://pp.info.uni-karlsruhe.de/uploads/publikationen/braun13cc.pdf\">https://pp.info.uni-karlsruhe.de/uploads/publikationen/braun13cc.pdf</a>) for the SSA construction. I found it to be intuitive for IRs with phi instructions. When using block parameters where conditional jumps and branch tables allow for different sets of branch arguments per edge (so you have multiple edges between a pair of blocks) I begin to believe that this algorithm is no longer applicable. <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span></p>",
+        "id": 229094101,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1615033765
+    },
+    {
+        "content": "<p>That paper is exactly what cranelift_frontend uses for SSA construction. <a href=\"https://github.com/bytecodealliance/wasmtime/blob/e41d88214455987751997b9d6173c5dee93204da/cranelift/frontend/src/ssa.rs#L4\">https://github.com/bytecodealliance/wasmtime/blob/e41d88214455987751997b9d6173c5dee93204da/cranelift/frontend/src/ssa.rs#L4</a> (It does link to a different place, but it is the same paper)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/e41d88214455987751997b9d6173c5dee93204da/cranelift/frontend/src/ssa.rs#L4\" style=\"background-image: url(https://avatars.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/e41d88214455987751997b9d6173c5dee93204da/cranelift/frontend/src/ssa.rs#L4\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 229101567,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1615040419
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span> Yes I was aware of this but I was worried that having multiple edges might break certain assumptions. Fortunately they don't.</p>\n<p>I was able to rewrite my SSA IR from phi instructions to block parameters. The new implementation is still very fresh and uses multiple edges between blocks to avoid critical edge splitting.<br>\nThe PR for anyone who is interested: <a href=\"https://github.com/Robbepop/runwell/pull/11\">https://github.com/Robbepop/runwell/pull/11</a></p>\n<p>Thank you all for the help! I would have not been able to pull this off without you. <span aria-label=\"blush\" class=\"emoji emoji-1f60a\" role=\"img\" title=\"blush\">:blush:</span></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/Robbepop/runwell/pull/11\" style=\"background-image: url(https://avatars.githubusercontent.com/u/8193155?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/Robbepop/runwell/pull/11\" title=\"Initial partial implementation of SSA block parameters by Robbepop · Pull Request #11 · Robbepop/runwell\">Initial partial implementation of SSA block parameters by Robbepop · Pull Request #11 · Robbepop/runwell</a></div><div class=\"message_embed_description\">This is to replace the old FunctionBuilder that uses phi instructions instead of block parameters.\nThe underlying algorithm for both SSA constructions remains the same: Simple and Efficient SSA Con...</div></div></div>",
+        "id": 229318607,
+        "sender_full_name": "Robin Freyler",
+        "timestamp": 1615217991
+    }
+]

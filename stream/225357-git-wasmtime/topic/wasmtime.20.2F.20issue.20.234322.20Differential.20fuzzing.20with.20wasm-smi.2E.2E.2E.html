@@ -1,0 +1,248 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #4322 Differential fuzzing with wasm-smi... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html">wasmtime / issue #4322 Differential fuzzing with wasm-smi...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="287443788"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287443788" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287443788">(Jun 25 2022 at 16:29)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Wasmtime recently had <a href="https://github.com/bytecodealliance/wasmtime/issues/4315">https://github.com/bytecodealliance/wasmtime/issues/4315</a> filed against it which discovered that there were two separate bugs in the SIMD implementation on x86_64. This discovery comes after "months of continuous oss-fuzzing" for the simd feature. I wanted to file an issue here with some investigation of why this happened because this theoretically should not happen.</p>
+<p>Specifically here the bug was a buggy instruction lowering (two different ones). One fix (<a href="https://github.com/bytecodealliance/wasmtime/pull/4318">https://github.com/bytecodealliance/wasmtime/pull/4318</a>) surfaced by corrupting an input register which I think only causes issues if the input is attempted to be reused elsewhere (e.g. a constant reused somewhere else). I don't know precisely but my impression was that this involved some register pressure, a "big" function, and constants to line up. This specific bug I could see as very difficult to discover via wasm-smith. The second bug, however, (<a href="https://github.com/bytecodealliance/wasmtime/pull/4317">https://github.com/bytecodealliance/wasmtime/pull/4317</a>) was a trivial bug in the <code>select</code> instruction which showed up with the smallest of tests for <code>select</code>. The fact that wasm-smith never discovered this is alarming to me.</p>
+<p>Digging in it appears to be a confluence of factors which makes wasm-smith basically  unable to find these bugs:</p>
+<ul>
+<li>The <code>select</code> instruction requires 3 operands on the stack of specific types. Turns out this very rarely happens. I inserted a <code>panic!</code> whenever a <code>select</code> instruction was even considered a candidate, and it was rarely hit. Even less rarely is the instruction chosen to be emitted.</li>
+<li>The <code>i32</code> input to <code>select</code> I think is almost always nonzero at runtime itself. The specific bug only happened when the condition was 0, however. I think this is because a lot of i32s come from things like <code>i32.const</code> which is practically never zero.</li>
+<li>Even if <code>select</code> is generated with v128 inputs (which happens quite rarely) it's often never actually even executed at runtime. The few test cases I found which generated this instruction immediately had infinite recursion or an infinite loop with the interesting instructions far away.</li>
+</ul>
+<p>I unfortunately don't know if there's really a "fix" for issues like this. We could throw a bunch more heuristics at wasm-smith but at some point we probably need a somewhat fundamental new strategy for fuzzing here to get significantly more coverage.</p>
+</blockquote>
+
+
+
+<a name="287463495"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287463495" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287463495">(Jun 26 2022 at 00:43)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1166387942">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>I suspect that for individual instruction semantics, something like #3251 might be a reasonable solution. If we focus on generating test cases for individual Wasm instructions, we can drive the random code generation in the other direction: e.g. we have a <code>v128.select</code>, we know what the stack signature is, let's provide those inputs. Along the same lines, "unit-testing" individual instructions lets us more easily run through their input data-space with many test vectors (invocations) for one function.</p>
+<p>Without coverage feedback libFuzzer may not know that some of those inputs are only sensitive to particular values (e.g. zero), but we could maybe bias probabilities too, if needed. (Custom entropy based on... similar bits? Closeness of some args to others? Surely the propcheck/quickcheck folks have some useful heuristics here...)</p>
+<p>All the above won't give us coverage of multiple-instruction patterns (I think this objection was also raised in #3251) but unit-testing instruction lowerings seems like a sufficiently useful and unique use-case to me that it's worth its own fuzz target and approach...</p>
+</blockquote>
+
+
+
+<a name="287633712"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287633712" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287633712">(Jun 27 2022 at 20:38)</a>:</h4>
+<p>alexcrichton labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Wasmtime recently had <a href="https://github.com/bytecodealliance/wasmtime/issues/4315">https://github.com/bytecodealliance/wasmtime/issues/4315</a> filed against it which discovered that there were two separate bugs in the SIMD implementation on x86_64. This discovery comes after "months of continuous oss-fuzzing" for the simd feature. I wanted to file an issue here with some investigation of why this happened because this theoretically should not happen.</p>
+<p>Specifically here the bug was a buggy instruction lowering (two different ones). One fix (<a href="https://github.com/bytecodealliance/wasmtime/pull/4318">https://github.com/bytecodealliance/wasmtime/pull/4318</a>) surfaced by corrupting an input register which I think only causes issues if the input is attempted to be reused elsewhere (e.g. a constant reused somewhere else). I don't know precisely but my impression was that this involved some register pressure, a "big" function, and constants to line up. This specific bug I could see as very difficult to discover via wasm-smith. The second bug, however, (<a href="https://github.com/bytecodealliance/wasmtime/pull/4317">https://github.com/bytecodealliance/wasmtime/pull/4317</a>) was a trivial bug in the <code>select</code> instruction which showed up with the smallest of tests for <code>select</code>. The fact that wasm-smith never discovered this is alarming to me.</p>
+<p>Digging in it appears to be a confluence of factors which makes wasm-smith basically  unable to find these bugs:</p>
+<ul>
+<li>The <code>select</code> instruction requires 3 operands on the stack of specific types. Turns out this very rarely happens. I inserted a <code>panic!</code> whenever a <code>select</code> instruction was even considered a candidate, and it was rarely hit. Even less rarely is the instruction chosen to be emitted.</li>
+<li>The <code>i32</code> input to <code>select</code> I think is almost always nonzero at runtime itself. The specific bug only happened when the condition was 0, however. I think this is because a lot of i32s come from things like <code>i32.const</code> which is practically never zero.</li>
+<li>Even if <code>select</code> is generated with v128 inputs (which happens quite rarely) it's often never actually even executed at runtime. The few test cases I found which generated this instruction immediately had infinite recursion or an infinite loop with the interesting instructions far away.</li>
+</ul>
+<p>I unfortunately don't know if there's really a "fix" for issues like this. We could throw a bunch more heuristics at wasm-smith but at some point we probably need a somewhat fundamental new strategy for fuzzing here to get significantly more coverage.</p>
+</blockquote>
+
+
+
+<a name="287633859"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287633859" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287633859">(Jun 27 2022 at 20:40)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167866006">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>I had forgotten about that issue! That's an excellent point though. I also filed <a href="https://github.com/bytecodealliance/wasmtime/issues/4338">https://github.com/bytecodealliance/wasmtime/issues/4338</a> as possible other wasm fuzzers we could integrate. Otherwise though other wasm-smith improvements include <a href="https://github.com/bytecodealliance/wasm-tools/issues/266">https://github.com/bytecodealliance/wasm-tools/issues/266</a>.</p>
+<p>While this may not be the most useful issue to keep open I'm tempted to leave it here as "if anyone searches the fuzzing tag in the Wasmtime repo this'll trigger them to think about improving wasm-smith"</p>
+</blockquote>
+
+
+
+<a name="287635015"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635015" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635015">(Jun 27 2022 at 20:50)</a>:</h4>
+<p>abrown <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167881081">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Hey, I had completely forgotten about #3251 but I believe when I added <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/trait.Config.html#method.allowed_instructions"><code>allowed_instructions</code></a> to <code>wasm-smith</code> it was motivated in part by that issue. The idea would be to configure <code>wasm-smith</code> to only allow  could be configured to generate functions with, e.g., numeric and vector instructions (see <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/enum.InstructionKind.html"><code>InstructionKind</code></a> for the categories allowed) and set <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/trait.Config.html#method.max_instructions"><code>max_instructions</code></a> to, e.g., 3 (to test possible interactions with other instructions). With the small test case generated, we could then also generate instructions in the other direction @cfallin mentions, by randomizing the function arguments. What do you all think of that as a new fuzz target?</p>
+</blockquote>
+
+
+
+<a name="287635051"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635051" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635051">(Jun 27 2022 at 20:50)</a>:</h4>
+<p>abrown edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167881081">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Hey, I had completely forgotten about #3251 but I believe when I added <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/trait.Config.html#method.allowed_instructions"><code>allowed_instructions</code></a> to <code>wasm-smith</code> it was motivated in part by that issue. The idea would be to configure <code>wasm-smith</code> to generate functions with, e.g., numeric and vector instructions (see <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/enum.InstructionKind.html"><code>InstructionKind</code></a> for the categories allowed) and set <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/trait.Config.html#method.max_instructions"><code>max_instructions</code></a> to, e.g., 3 (to test possible interactions with other instructions). With the small test case generated, we could then also generate instructions in the other direction @cfallin mentions, by randomizing the function arguments. What do you all think of that as a new fuzz target?</p>
+</blockquote>
+
+
+
+<a name="287635082"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635082" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635082">(Jun 27 2022 at 20:51)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167881674">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>We could also add a "no control flow" mode to <code>wasm-smith</code>, which might end up pretty similar to the "test a single instruction" thing in practice.</p>
+<p>In fact, @abrown added the <code>InstructionKinds</code> filtering and we don't really use that in our fuzz targets yet. Covers a lot of the same stuff. We could actually probably use this to avoid control instructions already.</p>
+<p>I think we also only pass zeros in as arguments to whatever functions we generate, and we could probably do much better than that as well (at least try zero, max, and one random bit pattern).</p>
+</blockquote>
+
+
+
+<a name="287635118"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635118" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635118">(Jun 27 2022 at 20:51)</a>:</h4>
+<p>abrown edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167881081">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Hey, I had completely forgotten about #3251 but I believe when I added <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/trait.Config.html#method.allowed_instructions"><code>allowed_instructions</code></a> to <code>wasm-smith</code> it was motivated in part by that issue. The idea would be to configure <code>wasm-smith</code> to generate functions with, e.g., numeric and vector instructions (see <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/enum.InstructionKind.html"><code>InstructionKind</code></a> for the categories allowed) and set <a href="https://docs.rs/wasm-smith/0.11.1/wasm_smith/trait.Config.html#method.max_instructions"><code>max_instructions</code></a> to, e.g., 3 (to test possible interactions with other instructions). With the small test case generated, we could then also randomly generate in the value space that @cfallin mentions, by randomizing the function arguments. What do you all think of that as a new fuzz target?</p>
+</blockquote>
+
+
+
+<a name="287635196"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635196" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635196">(Jun 27 2022 at 20:52)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167882883">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>@abrown jinx ;)</p>
+<blockquote>
+<p>What do you all think of that as a new fuzz target?</p>
+</blockquote>
+<p>Yes, definitely.</p>
+</blockquote>
+
+
+
+<a name="287635251"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635251" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635251">(Jun 27 2022 at 20:52)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167883479">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>One thing I think we'd also want to change about wasm-smith is the signatures of functions as well. Right now we drop all values that don't correspond to the function's type so differential fuzzing has a hard time picking these up. Ideally we want a mode where we generate the function body first and then we wrap that in a function of the appropriate type.</p>
+</blockquote>
+
+
+
+<a name="287635465"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635465" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635465">(Jun 27 2022 at 20:54)</a>:</h4>
+<p>abrown <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167885300">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Hm... how? I wasn't really aware of the limitations on function signatures.<br>
+</p>
+</blockquote>
+
+
+
+<a name="287635509"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635509" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635509">(Jun 27 2022 at 20:54)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167885853">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>We just choose a signature, and then generate a body. Alex is suggesting we generate a body and then derive a signature from that.</p>
+</blockquote>
+
+
+
+<a name="287635564"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635564" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635564">(Jun 27 2022 at 20:55)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167886348">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Makes sense for returns, not necessarily for parameters though, since generating a body needs to know what locals are available.</p>
+</blockquote>
+
+
+
+<a name="287635730"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287635730" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287635730">(Jun 27 2022 at 20:56)</a>:</h4>
+<p>abrown <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167887770">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Or the first instruction dictates what locals _must_ be available which should bubble up to the signature... This is the part that I'm having trouble seeing in wasm-smith. It doesn't seem designed for this kind of thing?<br>
+</p>
+</blockquote>
+
+
+
+<a name="287638216"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287638216" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287638216">(Jun 27 2022 at 21:17)</a>:</h4>
+<p>abrown <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167910802">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Ok, how about this: we add <code>SingleFunctionModule</code> to <code>wasm-smith</code> which takes a <code>Config</code>, an <code>Unstructured</code>, and a <code>Signature</code>. The <code>Signature</code> could be something like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Signature</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">params</span>: <span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ValTy</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">returns</span>: <span class="nb">Vec</span><span class="o">&lt;</span><span class="n">ValTy</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p><code>ValTy</code> would be some set-like struct that could be <code>Arbitrary</code>-generated and would cover the Wasm types (<code>i32</code>, <code>f32</code>, <code>v128</code>, etc.). So one could either manually set the parameters of the function (I think this has come up in the past as a need) OR one could generate this <code>Signature</code> with a range of types. (Or something like that... looking for feedback here).</p>
+<p>The <code>SingleFunctionModule</code> would then... well, what _would_ it do? Generate instructions to use all of the arguments before we get to <code>max_instructions</code>? We don't have to re-<code>local.get</code> the arguments, right?</p>
+</blockquote>
+
+
+
+<a name="287640046"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287640046" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287640046">(Jun 27 2022 at 21:34)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167930199">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>One idea is to perhaps:</p>
+<ul>
+<li>Generate an arbitrary list of parameters</li>
+<li>Generate an arbitrary function body using those parameters</li>
+<li>Using what's left on the stack assign that as the return value of the function</li>
+<li>Insert the final function type into a module</li>
+</ul>
+<p>I like the idea though of using a completely new dedicated <code>SingleFunctionModule</code> (or similar) generator for this. That module could also have a list of values to invoke the exported function with perhaps?</p>
+</blockquote>
+
+
+
+<a name="287640151"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287640151" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287640151">(Jun 27 2022 at 21:35)</a>:</h4>
+<p>abrown <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167931539">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>So you mean "arbitrary list of parameters" not "arbitrary list of parameter types"?</p>
+</blockquote>
+
+
+
+<a name="287640544"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/287640544" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#287640544">(Jun 27 2022 at 21:39)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1167934891">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Oh sorry I meant types there, but I was thinking we could in actuality do:</p>
+<ul>
+<li>generate an arbitrary list of parameter types</li>
+<li>Additionally, afterwards, generate a list of arbitrary values to invoke the function with</li>
+</ul>
+<p>whether that second step belongs in wasm-smith or wasmtime I dunno but either seems fine by me<br>
+</p>
+</blockquote>
+
+
+
+<a name="313403311"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/313403311" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#313403311">(Dec 02 2022 at 00:09)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4322#issuecomment-1334602019">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>The single-instruction generator from Andrew came out of this and nothing else has turned up in the meantime. Additionally Andrew did a lot of refactoring to have one <code>differential</code> fuzzer so I think we're in a better place now (hopefully). I'm going to subsequently close this.</p>
+</blockquote>
+
+
+
+<a name="313403312"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234322%20Differential%20fuzzing%20with%20wasm-smi.../near/313403312" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234322.20Differential.20fuzzing.20with.20wasm-smi.2E.2E.2E.html#313403312">(Dec 02 2022 at 00:09)</a>:</h4>
+<p>alexcrichton closed <a href="https://github.com/bytecodealliance/wasmtime/issues/4322">issue #4322</a>:</p>
+<blockquote>
+<p>Wasmtime recently had <a href="https://github.com/bytecodealliance/wasmtime/issues/4315">https://github.com/bytecodealliance/wasmtime/issues/4315</a> filed against it which discovered that there were two separate bugs in the SIMD implementation on x86_64. This discovery comes after "months of continuous oss-fuzzing" for the simd feature. I wanted to file an issue here with some investigation of why this happened because this theoretically should not happen.</p>
+<p>Specifically here the bug was a buggy instruction lowering (two different ones). One fix (<a href="https://github.com/bytecodealliance/wasmtime/pull/4318">https://github.com/bytecodealliance/wasmtime/pull/4318</a>) surfaced by corrupting an input register which I think only causes issues if the input is attempted to be reused elsewhere (e.g. a constant reused somewhere else). I don't know precisely but my impression was that this involved some register pressure, a "big" function, and constants to line up. This specific bug I could see as very difficult to discover via wasm-smith. The second bug, however, (<a href="https://github.com/bytecodealliance/wasmtime/pull/4317">https://github.com/bytecodealliance/wasmtime/pull/4317</a>) was a trivial bug in the <code>select</code> instruction which showed up with the smallest of tests for <code>select</code>. The fact that wasm-smith never discovered this is alarming to me.</p>
+<p>Digging in it appears to be a confluence of factors which makes wasm-smith basically  unable to find these bugs:</p>
+<ul>
+<li>The <code>select</code> instruction requires 3 operands on the stack of specific types. Turns out this very rarely happens. I inserted a <code>panic!</code> whenever a <code>select</code> instruction was even considered a candidate, and it was rarely hit. Even less rarely is the instruction chosen to be emitted.</li>
+<li>The <code>i32</code> input to <code>select</code> I think is almost always nonzero at runtime itself. The specific bug only happened when the condition was 0, however. I think this is because a lot of i32s come from things like <code>i32.const</code> which is practically never zero.</li>
+<li>Even if <code>select</code> is generated with v128 inputs (which happens quite rarely) it's often never actually even executed at runtime. The few test cases I found which generated this instruction immediately had infinite recursion or an infinite loop with the interesting instructions far away.</li>
+</ul>
+<p>I unfortunately don't know if there's really a "fix" for issues like this. We could throw a bunch more heuristics at wasm-smith but at some point we probably need a somewhat fundamental new strategy for fuzzing here to get significantly more coverage.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

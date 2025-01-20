@@ -1,0 +1,388 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #3180 Reimplement how unwind information is... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html">wasmtime / PR #3180 Reimplement how unwind information is...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="249163970"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249163970" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249163970">(Aug 11 2021 at 20:21)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit is a major refactoring of how unwind information is stored<br>
+after compilation of a function has finished. Previously we would store<br>
+the raw <code>UnwindInfo</code> as a result of compilation and this would get<br>
+serialized/deserialized alongside the rest of the ELF object that<br>
+compilation creates. Whenever functions were registered with<br>
+<code>CodeMemory</code> this would also result in registering unwinding information<br>
+dynamically at runtime, which in the case of Unix, for example, would<br>
+dynamically created FDE/CIE entries on-the-fly.</p>
+<p>Eventually I'd like to support compiling Wasmtime without Cranelift, but<br>
+this means that <code>UnwindInfo</code> wouldn't be easily available to decode into<br>
+and create unwinding information from. To solve this I've changed the<br>
+ELF object created to have the unwinding information encoded into it<br>
+ahead-of-time so loading code into memory no longer needs to create<br>
+unwinding tables. This change has two different implementations for<br>
+Windows/Unix:</p>
+<ul>
+<li>
+<p>On Windows the implementation was much easier. The unwinding<br>
+  information on Windows is already stored after the function itself in<br>
+  the text section. This was actually slightly duplicated in object<br>
+  building and in code memory allocation. Now the object building<br>
+  continues to do the same, recording unwinding information after<br>
+  functions, and code memory no longer manually tracks this.<br>
+  Additionally Wasmtime will emit a special custom section in the object<br>
+  file with unwinding information which is the list of<br>
+<code>RUNTIME_FUNCTION</code> structures that <code>RtlAddFunctionTable</code> expects. This<br>
+  means that the object file has all the information precompiled into it<br>
+  and registration at runtime is simply passing a few pointers around to<br>
+  the runtime.</p>
+</li>
+<li>
+<p>Unix was a little bit more difficult than Windows. Today a <code>.eh_frame</code><br>
+  section is created on-the-fly with offsets in FDEs specified as the<br>
+  absolute address that functions are loaded at. This absolute<br>
+  address hindered the ability to precompile the FDE into the object<br>
+  file itself. I've switched how addresses are encoded, though, to using<br>
+<code>DW_EH_PE_pcrel</code> which means that FDE addresses are now specified<br>
+  relative to the FDE itself. This means that we can maintain a fixed<br>
+  offset between the <code>.eh_frame</code> loaded in memory and the beginning of<br>
+  code memory. When doing so this enables precompiling the <code>.eh_frame</code><br>
+  section into the object file and at runtime when loading an object no<br>
+  further construction of unwinding information is needed.</p>
+</li>
+</ul>
+<p>The overall result of this commit is that unwinding information is no<br>
+longer stored in its cranelift-data-structure form on disk. This means<br>
+that this unwinding information format is only present during<br>
+compilation, which will make it that much easier to compile out<br>
+cranelift in the future.</p>
+<p>This commit also significantly refactors <code>CodeMemory</code> since the way<br>
+unwinding information is handled is not much different from before.<br>
+Previously <code>CodeMemory</code> was suitable for incrementally adding more and<br>
+more functions to it, but nowadays a <code>CodeMemory</code> either lives per<br>
+module (in which case all functions are known up front) or it's created<br>
+once-per-<code>Func::new</code> with two trampolines. In both cases we know all<br>
+functions up front so the functionality of incrementally adding more and<br>
+more segments is no longer needed. This commit removes the ability to<br>
+add a function-at-a-time in <code>CodeMemory</code> and instead it can now only<br>
+load objects in their entirety. A small helper function is added to<br>
+build a small object file for trampolines in <code>Func::new</code> to handle<br>
+allocation there.</p>
+<p>Finally, this commit also refactors the <code>wasmtime-obj</code> crate and its<br>
+builder structure to be more amenable to this strategy of managing<br>
+unwinding tables.</p>
+<p>It is not intentional to have any real functional change as a result of<br>
+this commit. This might accelerate loading a module from cache slightly<br>
+since less work is needed to manage the unwinding information, but<br>
+that's just a side benefit from the main goal of this commit which is to<br>
+remove the dependence on cranelift unwinding information being available<br>
+at runtime.</p>
+<p>On a procedural note this draws from <a href="https://github.com/bytecodealliance/wasmtime/pull/3179">https://github.com/bytecodealliance/wasmtime/pull/3179</a> and <a href="https://github.com/bytecodealliance/wasmtime/pull/3176">https://github.com/bytecodealliance/wasmtime/pull/3176</a> so only the last commit here is what's to be reviewed.</p>
+</blockquote>
+
+
+
+<a name="249164083"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249164083" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249164083">(Aug 11 2021 at 20:22)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249165068"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249165068" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249165068">(Aug 11 2021 at 20:30)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249171426"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249171426" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249171426">(Aug 11 2021 at 21:25)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249171576"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249171576" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249171576">(Aug 11 2021 at 21:26)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249172284"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249172284" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249172284">(Aug 11 2021 at 21:33)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249243229"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249243229" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249243229">(Aug 12 2021 at 14:39)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249287315"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249287315" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249287315">(Aug 12 2021 at 20:16)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249287333"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249287333" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249287333">(Aug 12 2021 at 20:16)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249290041"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249290041" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249290041">(Aug 12 2021 at 20:39)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a>.</p>
+
+
+
+<a name="249298393"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249298393" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249298393">(Aug 12 2021 at 21:59)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249298420"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249298420" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249298420">(Aug 12 2021 at 21:59)</a>:</h4>
+<p>alexcrichton edited <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit is a major refactoring of how unwind information is stored<br>
+after compilation of a function has finished. Previously we would store<br>
+the raw <code>UnwindInfo</code> as a result of compilation and this would get<br>
+serialized/deserialized alongside the rest of the ELF object that<br>
+compilation creates. Whenever functions were registered with<br>
+<code>CodeMemory</code> this would also result in registering unwinding information<br>
+dynamically at runtime, which in the case of Unix, for example, would<br>
+dynamically created FDE/CIE entries on-the-fly.</p>
+<p>Eventually I'd like to support compiling Wasmtime without Cranelift, but<br>
+this means that <code>UnwindInfo</code> wouldn't be easily available to decode into<br>
+and create unwinding information from. To solve this I've changed the<br>
+ELF object created to have the unwinding information encoded into it<br>
+ahead-of-time so loading code into memory no longer needs to create<br>
+unwinding tables. This change has two different implementations for<br>
+Windows/Unix:</p>
+<ul>
+<li>
+<p>On Windows the implementation was much easier. The unwinding<br>
+  information on Windows is already stored after the function itself in<br>
+  the text section. This was actually slightly duplicated in object<br>
+  building and in code memory allocation. Now the object building<br>
+  continues to do the same, recording unwinding information after<br>
+  functions, and code memory no longer manually tracks this.<br>
+  Additionally Wasmtime will emit a special custom section in the object<br>
+  file with unwinding information which is the list of<br>
+<code>RUNTIME_FUNCTION</code> structures that <code>RtlAddFunctionTable</code> expects. This<br>
+  means that the object file has all the information precompiled into it<br>
+  and registration at runtime is simply passing a few pointers around to<br>
+  the runtime.</p>
+</li>
+<li>
+<p>Unix was a little bit more difficult than Windows. Today a <code>.eh_frame</code><br>
+  section is created on-the-fly with offsets in FDEs specified as the<br>
+  absolute address that functions are loaded at. This absolute<br>
+  address hindered the ability to precompile the FDE into the object<br>
+  file itself. I've switched how addresses are encoded, though, to using<br>
+<code>DW_EH_PE_pcrel</code> which means that FDE addresses are now specified<br>
+  relative to the FDE itself. This means that we can maintain a fixed<br>
+  offset between the <code>.eh_frame</code> loaded in memory and the beginning of<br>
+  code memory. When doing so this enables precompiling the <code>.eh_frame</code><br>
+  section into the object file and at runtime when loading an object no<br>
+  further construction of unwinding information is needed.</p>
+</li>
+</ul>
+<p>The overall result of this commit is that unwinding information is no<br>
+longer stored in its cranelift-data-structure form on disk. This means<br>
+that this unwinding information format is only present during<br>
+compilation, which will make it that much easier to compile out<br>
+cranelift in the future.</p>
+<p>This commit also significantly refactors <code>CodeMemory</code> since the way<br>
+unwinding information is handled is not much different from before.<br>
+Previously <code>CodeMemory</code> was suitable for incrementally adding more and<br>
+more functions to it, but nowadays a <code>CodeMemory</code> either lives per<br>
+module (in which case all functions are known up front) or it's created<br>
+once-per-<code>Func::new</code> with two trampolines. In both cases we know all<br>
+functions up front so the functionality of incrementally adding more and<br>
+more segments is no longer needed. This commit removes the ability to<br>
+add a function-at-a-time in <code>CodeMemory</code> and instead it can now only<br>
+load objects in their entirety. A small helper function is added to<br>
+build a small object file for trampolines in <code>Func::new</code> to handle<br>
+allocation there.</p>
+<p>Finally, this commit also refactors the <code>wasmtime-obj</code> crate and its<br>
+builder structure to be more amenable to this strategy of managing<br>
+unwinding tables.</p>
+<p>It is not intentional to have any real functional change as a result of<br>
+this commit. This might accelerate loading a module from cache slightly<br>
+since less work is needed to manage the unwinding information, but<br>
+that's just a side benefit from the main goal of this commit which is to<br>
+remove the dependence on cranelift unwinding information being available<br>
+at runtime.</p>
+<p><del>On a procedural note this draws from <a href="https://github.com/bytecodealliance/wasmtime/pull/3179">https://github.com/bytecodealliance/wasmtime/pull/3179</a> and <a href="https://github.com/bytecodealliance/wasmtime/pull/3176">https://github.com/bytecodealliance/wasmtime/pull/3176</a> so only the last commit here is what's to be reviewed.</del></p>
+</blockquote>
+
+
+
+<a name="249616676"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249616676" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249616676">(Aug 16 2021 at 17:08)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249616823"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249616823" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249616823">(Aug 16 2021 at 17:08)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249619466"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249619466" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249619466">(Aug 16 2021 at 17:28)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249643727"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249643727" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249643727">(Aug 16 2021 at 20:33)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249643747"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249643747" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249643747">(Aug 16 2021 at 20:33)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249644248"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249644248" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249644248">(Aug 16 2021 at 20:37)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249658300"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249658300" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249658300">(Aug 16 2021 at 22:48)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249776372"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776372" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776372">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#pullrequestreview-732160686">PR review</a>.</p>
+
+
+
+<a name="249776373"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776373" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776373">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#pullrequestreview-732160686">PR review</a>.</p>
+
+
+
+<a name="249776374"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776374" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776374">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#discussion_r690699568">PR review comment</a>:</p>
+<blockquote>
+<p>I think we could do a slightly more helpful chained error message here:</p>
+<blockquote>
+<p>failed to parse internal ELF compilation artifact</p>
+</blockquote>
+</blockquote>
+
+
+
+<a name="249776375"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776375" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776375">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#discussion_r690674419">PR review comment</a>:</p>
+<blockquote>
+<p>Nitpick: this can be removed, I guess?</p>
+</blockquote>
+
+
+
+<a name="249776376"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776376" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776376">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#discussion_r690706241">PR review comment</a>:</p>
+<blockquote>
+<p>ugh I forgot about this bug</p>
+</blockquote>
+
+
+
+<a name="249776377"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776377" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776377">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#discussion_r690689336">PR review comment</a>:</p>
+<blockquote>
+<p>To clarify: the alternative to this whole <code>DW_EH_PE_pcrel</code> approach would be to emit relocs for the FDEs, right?</p>
+</blockquote>
+
+
+
+<a name="249776378"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776378" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776378">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#discussion_r690679152">PR review comment</a>:</p>
+<blockquote>
+<p>Nitpick, but I find it more confusing to turbo fish <code>unzip</code> than to give an explicit type to the LHS of the assignment, since <code>unzip</code> has those two extra type parameters that I don't remember what is going on with them and have to look up in the docs again. On the other hand, when the explicit types are in the LHS of the assignment, I don't get side tracked by these meaningless type parameters.</p>
+</blockquote>
+
+
+
+<a name="249776379"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776379" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776379">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#discussion_r690672803">PR review comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>//! symbols that refer to libcalls.
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="249776380"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249776380" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249776380">(Aug 17 2021 at 20:45)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#discussion_r690672623">PR review comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>//! relocation records for the linking stage. If DWARF sections exist, their
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="249780500"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249780500" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249780500">(Aug 17 2021 at 21:20)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#pullrequestreview-732236706">PR review</a>.</p>
+
+
+
+<a name="249780502"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249780502" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249780502">(Aug 17 2021 at 21:20)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/3180#discussion_r690731628">PR review comment</a>:</p>
+<blockquote>
+<p>Indeed yeah. I'll admit that I know so little about relocations I didn't really try to do this at all and I didn't feel I needed to pursue this much because I got the <code>pcrel</code> bits working. Not having relocations is somewhat beneficial in that loading these tables is that much faster (it's just what's in-memory) and in theory amenable to the hypothetical mmap-and-go world.</p>
+</blockquote>
+
+
+
+<a name="249780614"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249780614" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249780614">(Aug 17 2021 at 21:21)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249780758"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249780758" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249780758">(Aug 17 2021 at 21:22)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a> from <code>refactor-unwind</code> to <code>main</code>.</p>
+
+
+
+<a name="249785718"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233180%20Reimplement%20how%20unwind%20information%20is.../near/249785718" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233180.20Reimplement.20how.20unwind.20information.20is.2E.2E.2E.html#249785718">(Aug 17 2021 at 22:14)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/3180">PR #3180</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

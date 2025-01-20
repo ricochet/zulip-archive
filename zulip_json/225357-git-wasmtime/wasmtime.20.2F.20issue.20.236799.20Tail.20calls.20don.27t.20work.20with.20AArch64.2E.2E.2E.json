@@ -1,0 +1,68 @@
+[
+    {
+        "content": "<p>alexcrichton opened <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>Currently Wasmtime will enable pointer authentication bits on AArch64 when possible, notably for macOS by default. This does not currently work with tail calls which means that <code>cargo test</code> currently fails with various segfaults.</p>\n<p>From what I can understand the general pointer authentication scheme right now is:</p>\n<ul>\n<li>When a function is entered, the return address, <code>lr</code>, is \"encrypted\" with both <code>sp</code> and the B key</li>\n<li>When a function returns, the return address is \"decrypted\" with <code>sp</code> and the B key</li>\n</ul>\n<p>For tail calls this decryption isn't happening currently, meaning that the return address is corrupted for when the tail-called function finally returns.</p>\n<p>I've attempted a naive fix for this where I insert an <code>auti*sp</code> instruction before the branch for the <code>ReturnCall</code> instruction, but this does not work because if a function tail calls a function with stack arguments it means that <code>sp</code> is different from the beginning of the function and the end of the function. This means that different values go into the encryption/decryption phases which means that the return address gets corrupted again.</p>\n<p>I'm not entirely sure how to fix this myself, but I'm also a little tired right now so may be missing something. cc @fitzgen </p>\n</blockquote>",
+        "id": 381520195,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691075571
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1664283681\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>Ah, we missed the SP dependence here when thinking about this earlier: we had assumed that moving the return address would be safe.</p>\n<p>It looks like we'll need to decrypt and re-encrypt in the tail-call sequence; the <code>pacibsp</code> instruction encrypts the value currently in <code>LR</code> with the value currently in <code>SP</code> and the B key). Or at least, that's what I'm grokking from <a href=\"https://devblogs.microsoft.com/oldnewthing/20220819-00/?p=107020\">here</a>.</p>\n</blockquote>",
+        "id": 381545159,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691080020
+    },
+    {
+        "content": "<p>cfallin edited a <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1664283681\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>Ah, we missed the SP dependence here when thinking about this earlier: we had assumed that moving the return address would be safe.</p>\n<p>It looks like we'll need to decrypt and re-encrypt in the tail-call sequence; the <code>pacibsp</code> instruction encrypts the value currently in <code>LR</code> with the value currently in <code>SP</code> and the B key. Or at least, that's what I'm grokking from <a href=\"https://devblogs.microsoft.com/oldnewthing/20220819-00/?p=107020\">here</a>.</p>\n</blockquote>",
+        "id": 381545245,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691080034
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1664299295\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>I was poking at this a bit more and trying to see what LLVM does but I don't think LLVM handles this where it doesn't use a tail call with stack arguments and using <code>__attribute__((musttail))</code> it says that the signatures must match exactly.</p>\n<p>I was also wondering if what you said would work, because wouldn't that have the problem that the stack pointer is temporarily decremented to not encompass the current frame? I'm not sure how that interacts with red zone/etc or whether it's ok for the stack pointer to be temporarily invalid.</p>\n<p>Alternatively though, looking at the various instructions, there may be a few other options too:</p>\n<ul>\n<li>One would be to use <code>pacibz</code> and <code>autibz</code> where the \"modifier\" is the zero register rather than the stack pointer for tail calls. I'll admit though that I don't fully understand the implications of this and if that makes it too easy to \"guess\" the return pointer or forge it by accident or something like that. I'm also not sure whether the current <code>pacibsp</code> is required for ABI reasons, but at least from my naive current reading I think that functionally the <code>tail</code> convention could switch to <code>pacibz</code> and <code>autibz</code> functionally at least.</li>\n<li>Instead of using <code>autibsp</code> the <code>autib</code> instruction could be used which uses a \"modifier\" in an arbitrary register. That way the old stack pointer could be calculated in a non-stack-pointer register (e.g. the fp+16) and the original <code>pacibsp</code> would be paired with <code>autib $tmp</code> or something like that.</li>\n</ul>\n</blockquote>",
+        "id": 381548405,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691080669
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1664310216\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>Ah, yeah, I was forgetting that on aarch64 the return address goes in <code>LR</code>, not on the stack, at the call boundary. And is unencrypted in <code>LR</code>; encrypted only by the prologue as it stores the address to the stack.</p>\n<p>That tells me that the <code>autibsp</code> approach with SP at the right spot, or <code>autib</code> as you suggest, should work? It also raises another possibility maybe: could we just... not encrypt in the prologue of a function that does tail calls?</p>\n</blockquote>",
+        "id": 381550736,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691081157
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1664310423\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<blockquote>\n<p>I was poking at this a bit more and trying to see what LLVM does but I don't think LLVM handles this where it doesn't use a tail call with stack arguments and using <code>__attribute__((musttail))</code> it says that the signatures must match exactly.</p>\n</blockquote>\n<p>The signatures-must-match thing is for the regular calling conventions. It has a bunch of other calling conventions designed to support tail calls (used by like ghc and such) that don't have this restriction. But also I wouldn't be surprised if those conventions just don't support pointer auth.</p>\n</blockquote>",
+        "id": 381550814,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691081166
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1664313940\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>I'm a bit surprised that we didn't catch this earlier, as I made sure to have our filetests enable pointer auth for the tail calls runtests, and everything passed so I assumed everything was Just Working.</p>\n</blockquote>",
+        "id": 381551551,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691081321
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1664314777\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>So does that mean that qemu isn't doing the pointer auth for our runtests that claim to enable pointer auth? Or do I have some other misunderstanding here?</p>\n</blockquote>",
+        "id": 381551707,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691081361
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1664321464\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<blockquote>\n<p>could we just... not encrypt in the prologue of a function that does tail calls?</p>\n</blockquote>\n<p>While possible I think the <code>{autib,pacib}z</code> paired instructions may be better to switch to as they do a little bit of pointer authentication but just not maximally so. They should be a workable drop-in replacement when using the <code>tail</code> convention in Cranelift I think to ensure all functions have pointer auth right.</p>\n<blockquote>\n<p>I'm a bit surprised that we didn't catch this earlier</p>\n</blockquote>\n<p>That's probably because we don't have pointer authentication enabled in QEMU so AFAIK the only way to run into this is on macOS aarch64 hardware. I don't run the cranelift tests that often locally so I first ran into it recently after <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6774\">https://github.com/bytecodealliance/wasmtime/pull/6774</a>.</p>\n<p>I believe at the time of the original writing QEMU didn't support pointer authentication (or something like that). If it does support it now, which it may, then we'll want to configure it to turn that on and it should get auto-detected with <code>/proc/cpuinfo</code> support I believe. (or similar)</p>\n</blockquote>",
+        "id": 381553218,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691081671
+    },
+    {
+        "content": "<p>alexcrichton <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799#issuecomment-1666548312\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>I've posted using <code>auti{a,b}z</code> and <code>paci{a,b}z</code> for the <code>tail</code> convention at <a href=\"https://github.com/bytecodealliance/wasmtime/pull/6810\">https://github.com/bytecodealliance/wasmtime/pull/6810</a></p>\n</blockquote>",
+        "id": 382186272,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691253061
+    },
+    {
+        "content": "<p>alexcrichton closed <a href=\"https://github.com/bytecodealliance/wasmtime/issues/6799\">issue #6799</a>:</p>\n<blockquote>\n<p>Currently Wasmtime will enable pointer authentication bits on AArch64 when possible, notably for macOS by default. This does not currently work with tail calls which means that <code>cargo test</code> currently fails with various segfaults.</p>\n<p>From what I can understand the general pointer authentication scheme right now is:</p>\n<ul>\n<li>When a function is entered, the return address, <code>lr</code>, is \"encrypted\" with both <code>sp</code> and the B key</li>\n<li>When a function returns, the return address is \"decrypted\" with <code>sp</code> and the B key</li>\n</ul>\n<p>For tail calls this decryption isn't happening currently, meaning that the return address is corrupted for when the tail-called function finally returns.</p>\n<p>I've attempted a naive fix for this where I insert an <code>auti*sp</code> instruction before the branch for the <code>ReturnCall</code> instruction, but this does not work because if a function tail calls a function with stack arguments it means that <code>sp</code> is different from the beginning of the function and the end of the function. This means that different values go into the encryption/decryption phases which means that the return address gets corrupted again.</p>\n<p>I'm not entirely sure how to fix this myself, but I'm also a little tired right now so may be missing something. cc @fitzgen </p>\n</blockquote>",
+        "id": 383395857,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1691608471
+    }
+]

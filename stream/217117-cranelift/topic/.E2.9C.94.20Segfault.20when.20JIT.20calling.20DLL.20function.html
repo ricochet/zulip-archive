@@ -1,0 +1,243 @@
+<html>
+<head><meta charset="utf-8"><title>✔ Segfault when JIT calling DLL function · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html">✔ Segfault when JIT calling DLL function</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="302028058"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302028058" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302028058">(Oct 03 2022 at 09:28)</a>:</h4>
+<p>hey! I'm running into a segfault when calling a function defined in a DLL compiled from C++. I can successfully find and call the function using <a href="https://docs.rs/dlopen/latest/dlopen/">dlopen</a>: </p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="n">lib</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Library</span>::<span class="n">open</span><span class="p">(</span><span class="s">"SimpleDLL.dll"</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">fn_ptr</span>: <span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">lib</span><span class="p">.</span><span class="n">symbol</span><span class="p">(</span><span class="s">"DisplayHelloFromMyDLL"</span><span class="p">)</span><span class="w"> </span><span class="p">}.</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">display_hello</span>: <span class="nc">fn</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="p">()</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">std</span>::<span class="n">mem</span>::<span class="n">transmute</span><span class="p">(</span><span class="n">fn_ptr</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="n">display_hello</span><span class="p">();</span><span class="w"> </span><span class="c1">// This works.</span>
+</code></pre></div>
+<p>But when I add <code>display_hello</code> to the JITBuilder's symbols, build a call to the function, and execute the finalized main function, I get a segmentation fault.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">jit_builder</span><span class="p">.</span><span class="n">symbols</span><span class="p">(</span><span class="fm">vec!</span><span class="p">[</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// These functions defined in Rust directly work fine.</span>
+<span class="w">    </span><span class="p">(</span><span class="s">"Base.print_int"</span><span class="p">,</span><span class="w"> </span><span class="n">builtin</span>::<span class="n">print_int</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="s">"Base.alloc"</span><span class="p">,</span><span class="w"> </span><span class="n">builtin</span>::<span class="n">alloc</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="s">"Base.dealloc"</span><span class="p">,</span><span class="w"> </span><span class="n">builtin</span>::<span class="n">dealloc</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// This doesn't.</span>
+<span class="w">    </span><span class="p">(</span><span class="s">"DisplayHelloFromMyDLL"</span><span class="p">,</span><span class="w"> </span><span class="n">fn_ptr</span><span class="p">),</span><span class="w"></span>
+<span class="p">]);</span><span class="w"></span>
+</code></pre></div>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="n">callee</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="w"></span>
+<span class="w">    </span><span class="p">.</span><span class="n">module</span><span class="w"></span>
+<span class="w">    </span><span class="p">.</span><span class="n">declare_function</span><span class="p">(</span><span class="o">&amp;</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">Linkage</span>::<span class="n">Import</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">sig</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">.</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">local_callee</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">module</span><span class="p">.</span><span class="n">declare_func_in_func</span><span class="p">(</span><span class="n">callee</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">b</span><span class="p">.</span><span class="n">func</span><span class="p">);</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">call</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">b</span><span class="p">.</span><span class="n">ins</span><span class="p">().</span><span class="n">call</span><span class="p">(</span><span class="n">local_callee</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">args</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+<p>Here's the source for the DLL.</p>
+<div class="codehilite" data-code-language="C++"><pre><span></span><code><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="k">extern</span><span class="w"> </span><span class="s">"C"</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kr">__declspec</span><span class="p">(</span><span class="n">dllexport</span><span class="p">)</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">DisplayHelloFromMyDLL</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">"Hello.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="302037901"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302037901" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302037901">(Oct 03 2022 at 10:40)</a>:</h4>
+<p><a href="https://github.com/bjorn3/rustc_codegen_cranelift">cg_clif</a> (a project of mine) seems to be having the same problem. Could you check that <code>fn_ptr</code> is not a null pointer? And if it isn't get a backtrace at the point of the crash using a debugger?</p>
+<div class="message_embed"><a class="message_embed_image" href="https://github.com/bjorn3/rustc_codegen_cranelift" style="background-image: url(https\:\/\/uploads\.zulipusercontent\.net\/6c13f77c2feb0326be90978e58d7ea2db901d505\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f613464666635316634653863353862356636326433306336653238343834626436653135323632303838333764306637623864616535303064323664383164382f626a6f726e332f72757374635f636f646567656e5f6372616e656c696674)"></a><div class="data-container"><div class="message_embed_title"><a href="https://github.com/bjorn3/rustc_codegen_cranelift" title="GitHub - bjorn3/rustc_codegen_cranelift: Cranelift based backend for rustc">GitHub - bjorn3/rustc_codegen_cranelift: Cranelift based backend for rustc</a></div><div class="message_embed_description">Cranelift based backend for rustc. Contribute to bjorn3/rustc_codegen_cranelift development by creating an account on GitHub.</div></div></div>
+
+
+
+<a name="302114431"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302114431" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302114431">(Oct 03 2022 at 17:47)</a>:</h4>
+<p>When printing <code>fn_ptr</code> after looking up the symbol, it's equal to <code>0x7ff8c57412e9</code>. When stepping through the execution of <code>main()</code> this is the instruction that the debugger crashes at: <a href="/user_uploads/15107/AzCBJQntKSZ0f5omPw8KQZV_/Screenshot-2022-10-03-104320.png">screenshot</a></p>
+<div class="message_inline_image"><a href="/user_uploads/15107/AzCBJQntKSZ0f5omPw8KQZV_/Screenshot-2022-10-03-104320.png" title="screenshot"><img src="/user_uploads/15107/AzCBJQntKSZ0f5omPw8KQZV_/Screenshot-2022-10-03-104320.png"></a></div>
+
+
+
+<a name="302114787"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302114787" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302114787">(Oct 03 2022 at 17:49)</a>:</h4>
+<p>Can you look if there is any memory mapped at 0x7ff8c57412e9 and if so with which permissions?</p>
+
+
+
+<a name="302115736"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302115736" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302115736">(Oct 03 2022 at 17:54)</a>:</h4>
+<p>I'm a bit of a novice with systems stuff. Could you point me to a reference for how to do that?</p>
+
+
+
+<a name="302120964"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302120964" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302120964">(Oct 03 2022 at 18:19)</a>:</h4>
+<p>It depends on which debugger you use. In any case I don't use windows for development, so I don't have any experience with windows debuggers.</p>
+
+
+
+<a name="302128007"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302128007" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302128007">(Oct 03 2022 at 18:57)</a>:</h4>
+<p>I'm currently using LLDB, if that's familiar.  I'll do some more digging and try to find that info.</p>
+
+
+
+<a name="302131801"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302131801" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302131801">(Oct 03 2022 at 19:18)</a>:</h4>
+<p>Oh here's the backtrace message: </p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>* thread #1, stop reason = Exception 0xc0000005 encountered at address 0x7ff8c58912e9:
+User-mode data execution prevention (DEP) violation at location 0x7ff8c58912e9
+  * frame #0: 0x00007ff8c58912e9
+</code></pre></div>
+<p>So this address isn't executable?</p>
+
+
+
+<a name="302135227"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302135227" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302135227">(Oct 03 2022 at 19:39)</a>:</h4>
+<p>Didn't know lldb worked on windows. I thought you had to do eg windbg. Could you try disassembling the first couple of instructions at this address to see if there is executable code not marked as executable or if there is no code there in the first place? Something like <code>disassemble --start-address 0xdeadbeef --count 20</code> works for disassembling 20 instructions at 0xdeadbeef.</p>
+
+
+
+<a name="302135449"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302135449" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302135449">(Oct 03 2022 at 19:41)</a>:</h4>
+<p>By the way feel free to @ mention me in case I don't respond. I don't continuously monitor this, but do have push notifications for mentions enabled.</p>
+
+
+
+<a name="302136510"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302136510" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302136510">(Oct 03 2022 at 19:48)</a>:</h4>
+<p>Thanks, I'm in no rush.</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>&gt; disassemble --start-address 0x7ff8c58912e9 --count 1
+error: Only part of a ReadProcessMemory or WriteProcessMemory request was completed.
+error: Failed to disassemble memory at 0x7ff8c58912e9.
+</code></pre></div>
+<p>I think there are windows os-level protections of some sort?</p>
+
+
+
+<a name="302139863"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302139863" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302139863">(Oct 03 2022 at 20:09)</a>:</h4>
+<p>Could you try <code>image dump sections</code>? Not sure if it works on Windows.</p>
+
+
+
+<a name="302140103"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302140103" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302140103">(Oct 03 2022 at 20:10)</a>:</h4>
+<blockquote>
+<p>I think there are windows os-level protections of some sort?</p>
+</blockquote>
+<p>It seems like that memory isn't mapped at all, not just mapped as non-executable.</p>
+
+
+
+<a name="302140513"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302140513" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302140513">(Oct 03 2022 at 20:13)</a>:</h4>
+<p>Here's the section for the DLL. I can paste the other sections if needed</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>Sections for 'C:\Users\Tim\Projects\hubbub\target\debug\SimpleDLL.dll' (x86_64):
+  SectID     Type             Load Address                             Perm File Off.  File Size  Flags      Section Name
+  ---------- ---------------- ---------------------------------------  ---- ---------- ---------- ---------- ----------------------------
+  0xffffffffffffffff regular  [0x0000000180000000-0x0000000180000400)* r--  0x00000000 0x00000400 0x00000000 SimpleDLL.dll.PECOFF header
+  0x00000001 code             [0x0000000180001000-0x0000000180011000)* rwx  0x00000000 0x00000000 0xe00000a0 SimpleDLL.dll..textbss
+  0x00000002 code             [0x0000000180011000-0x0000000180018da1)* r-x  0x00000400 0x00007e00 0x60000020 SimpleDLL.dll..text
+  0x00000003 data             [0x0000000180019000-0x000000018001bbe7)* r--  0x00008200 0x00002c00 0x40000040 SimpleDLL.dll..rdata
+  0x00000004 data             [0x000000018001c000-0x000000018001c8e8)* rw-  0x0000ae00 0x00000200 0xc0000040 SimpleDLL.dll..data
+  0x00000005 data             [0x000000018001d000-0x000000018001f148)* r--  0x0000b000 0x00002200 0x40000040 SimpleDLL.dll..pdata
+  0x00000006 data             [0x0000000180020000-0x0000000180020d03)* r--  0x0000d200 0x00000e00 0x40000040 SimpleDLL.dll..idata
+  0x00000007 data             [0x0000000180021000-0x000000018002110a)* rw-  0x0000e000 0x00000200 0xc0000040 SimpleDLL.dll..msvcjmc
+  0x00000008 data             [0x0000000180022000-0x0000000180022175)* r--  0x0000e200 0x00000200 0x40000040 SimpleDLL.dll..00cfg
+  0x00000009 data             [0x0000000180023000-0x000000018002343c)* r--  0x0000e400 0x00000600 0x40000040 SimpleDLL.dll..rsrc
+  0x0000000a regular          [0x0000000180024000-0x0000000180024259)* r--  0x0000ea00 0x00000400 0x42000040 SimpleDLL.dll..reloc
+</code></pre></div>
+
+
+
+<a name="302140788"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302140788" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302140788">(Oct 03 2022 at 20:14)</a>:</h4>
+<p>Is there also a range close to the address that causes the crash when being called?</p>
+
+
+
+<a name="302141522"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302141522" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302141522">(Oct 03 2022 at 20:18)</a>:</h4>
+<p>Also are you using libloading 0.7.3 (the latest version)?</p>
+
+
+
+<a name="302141713"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302141713" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302141713">(Oct 03 2022 at 20:20)</a>:</h4>
+<p>Just reread your original message. You are using the dlopen crate. I assumed that you used the libloading crate. My bad.</p>
+
+
+
+<a name="302141843"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302141843" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302141843">(Oct 03 2022 at 20:21)</a>:</h4>
+<p>Listing all exes/libs, the main exe is the closest</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>&gt; image list
+[  0] 6571EF52-F94D-4FCA-8132-A4FC69AF8E87-00000BFB 0x00007ff71f4d0000 C:\Users\Tim\Projects\hubbub\target\debug\hubbub.exe
+[  1] 51CC349D-A70E-6939-8B16-74F9D3A0C814-00000001 0x00007ff93e810000 C:\Windows\System32\ntdll.dll
+[  2] FB221C21-913B-2EAD-8848-085FF757F870-00000001 0x00007ff93dad0000 C:\Windows\System32\kernel32.dll
+...
+[ 21] 19E22631-C79A-9F11-E31E-93E8BB518332-00000001 0x00007ff93e590000 C:\Windows\System32\imm32.dll
+[ 22] 7896C01C-3A5D-6AA1-98D2-71F14C724849-00000001 0x00007ff93bff0000 C:\Windows\System32\bcryptprimitives.dll
+[ 23] 4D7C44AD-7BE4-4CFA-908F-77D2AB12331F-00000001 SimpleDLL.dll[0x0000000180000000] C:\Users\Tim\Projects\hubbub\target\debug\SimpleDLL.dll
+[ 24] 27AC0972-E525-84FE-1A88-B1FE70D1603B-00000002 ucrtbased.dll[0x0000000180000000] C:\Windows\System32\ucrtbased.dll
+[ 25] 44BC4E56-BD3A-8A6E-4D6A-62E50576C750-00000001 vcruntime140d.dll[0x0000000180000000] C:\Windows\System32\vcruntime140d.dl
+</code></pre></div>
+<p>but it doesn't include the fn ptr in its range:</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>&gt; image dump sections hubbub.exe
+Sections for 'C:\Users\Tim\Projects\hubbub\target\debug\hubbub.exe' (x86_64):
+  SectID     Type             Load Address                             Perm File Off.  File Size  Flags      Section Name
+  ---------- ---------------- ---------------------------------------  ---- ---------- ---------- ---------- ----------------------------
+  0xffffffffffffffff regular          [0x00007ff71f4d0000-0x00007ff71f4d0400)  r--  0x00000000 0x00000400 0x00000000 hubbub.exe.PECOFF header
+  0x00000001 code             [0x00007ff71f4d1000-0x00007ff721a07270)  r-x  0x00000400 0x02536400 0x60000020 hubbub.exe..text
+  0x00000002 data             [0x00007ff721a08000-0x00007ff723b718e0)  r--  0x02536800 0x02169a00 0x40000040 hubbub.exe..rdata
+  0x00000003 data             [0x00007ff723b72000-0x00007ff723c3f098)  rw-  0x046a0200 0x00066800 0xc0000040 hubbub.exe..data
+  0x00000004 data             [0x00007ff723c40000-0x00007ff723dc7254)  r--  0x04706a00 0x00187400 0x40000040 hubbub.exe..pdata
+  0x00000005 data             [0x00007ff723dc8000-0x00007ff723dc815c)  r--  0x0488de00 0x00000200 0x40000040 hubbub.exe._RDATA
+  0x00000006 regular          [0x00007ff723dc9000-0x00007ff723e350bc)  r--  0x0488e000 0x0006c200 0x42000040 hubbub.exe..reloc
+</code></pre></div>
+
+
+
+<a name="302142809"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302142809" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302142809">(Oct 03 2022 at 20:27)</a>:</h4>
+<p>Weird. Just as a sanity check, you didn't drop the <code>Library</code> before running the cranelift function? Otherwise the library is probably unloaded.</p>
+
+
+
+<a name="302144247"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302144247" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302144247">(Oct 03 2022 at 20:36)</a>:</h4>
+<p>Nope, no drop.</p>
+
+
+
+<a name="302147796"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302147796" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302147796">(Oct 03 2022 at 21:00)</a>:</h4>
+<p>Wait, I had an error where I was opening the library in a second place and letting it implicitly drop there, which led to the first load being unloaded.</p>
+
+
+
+<a name="302147946"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302147946" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Ngo <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302147946">(Oct 03 2022 at 21:01)</a>:</h4>
+<p>Thanks for walking me through this, it works now!</p>
+
+
+
+<a name="302205582"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/302205582" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#302205582">(Oct 04 2022 at 07:38)</a>:</h4>
+<p><span aria-label="tada" class="emoji emoji-1f389" role="img" title="tada">:tada:</span></p>
+
+
+
+<a name="303283151"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/%E2%9C%94%20Segfault%20when%20JIT%20calling%20DLL%20function/near/303283151" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Notification Bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/.E2.9C.94.20Segfault.20when.20JIT.20calling.20DLL.20function.html#303283151">(Oct 10 2022 at 15:42)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="517638">Tim Ngo</span> has marked this topic as resolved.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

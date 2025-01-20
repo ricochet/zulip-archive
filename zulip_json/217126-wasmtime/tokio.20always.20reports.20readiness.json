@@ -1,0 +1,188 @@
+[
+    {
+        "content": "<p>I'm investigating a bug in the wasi implementation, but can't figure it out.</p>\n<p>If <code>input-stream::blocking-read</code> succeeds, the returned buffer must contain at least one byte. I noticed that this is not the case for TCP sockets.</p>\n<p>I tracked it down to <code>tokio::net::TcpStream::readable().await</code>. That immediately reports readiness. And yet after that, the call to <code>read</code> call returns WouldBlock.<br>\nMy initial instinct was that this would be a one-off spurious wakeup kind of deal. So I wrapped it in a loop, expecting the second await for readiness to correctly suspend.<br>\nUnfortunately, it ends up in a spin loop. Interestingly, it only happens in the <code>async_</code> testsuite, not the <code>sync</code> tests.</p>\n<p>A small repro here: <a href=\"https://github.com/badeend/wasmtime/commit/e788501c3ba8283670cfa5071d99a7565e711d32\">https://github.com/badeend/wasmtime/commit/e788501c3ba8283670cfa5071d99a7565e711d32</a></p>\n<h3><code>sync::preview2_tcp_sample_application</code> (Correct)</h3>\n<p>Outputs just once:</p>\n<div class=\"codehilite\" data-code-language=\"Text only\"><pre><span></span><code>ready?\nready!\n</code></pre></div>\n<h3><code>async_::preview2_tcp_sample_application</code> (Incorrect)</h3>\n<p>Output (truncated):</p>\n<div class=\"codehilite\" data-code-language=\"Text only\"><pre><span></span><code>ready?\nready!\nWouldBlock\nready?\nready!\nWouldBlock\nready?\nready!\nWouldBlock\nready?\nready!\nWouldBlock\nready?\nready!\nWouldBlock\n(repeated many more times...)\n</code></pre></div>\n<hr>\n<p>I see that tokio's readiness states have been <a href=\"https://github.com/badeend/wasmtime/blob/always-readable/crates/wasi/src/preview2/mod.rs#L288\">a problem before</a> in wasmtime. But I don't know if this is related, especially as in this case it's the async variant that's not working instead of the sync variant.</p>\n<p>Any pointers?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/badeend/wasmtime/commit/e788501c3ba8283670cfa5071d99a7565e711d32\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/dd3515ca05d23e90ab539b7543b70f5efa9fedc0\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f353136393066343865326163323831653866306165646130613366656361353732333638636436653864623263626139303764663264633761653463653335362f62616465656e642f7761736d74696d652f636f6d6d69742f65373838353031633362613832383336373063666135303731643939613735363565373131643332)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/badeend/wasmtime/commit/e788501c3ba8283670cfa5071d99a7565e711d32\" title=\"weirdness · badeend/wasmtime@e788501\">weirdness · badeend/wasmtime@e788501</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to badeend/wasmtime development by creating an account on GitHub.</div></div></div>",
+        "id": 419730090,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707079982
+    },
+    {
+        "content": "<p>Weird! You already found the problem line that I would have otherwise pointed out. The general shape of that problem was that we more-or-less weren't pumping the event loop or yielding properly, and once we returned to the event loop the I/O object got to realize it wasn't ready (or was, I forget which)</p>\n<p>You also applied what I would have already suggested which is to throw a loop around the object. The documentation for <a href=\"https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html#method.try_read_buf\"><code>try_read_buf</code></a> has basically what should be happening at the wasm level as well.</p>\n<p>Are you on Windows perhaps? If not, what system are you on?</p>",
+        "id": 419858265,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707145089
+    },
+    {
+        "content": "<p>Linux</p>",
+        "id": 419859627,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707145345
+    },
+    {
+        "content": "<p>(or WSL technically)</p>",
+        "id": 419859714,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707145366
+    },
+    {
+        "content": "<p>I already tried sprinkling yield_now around in various places, but without effect</p>",
+        "id": 419864094,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707146519
+    },
+    {
+        "content": "<p>Can you run strace and find a loop of syscalls?</p>",
+        "id": 419868864,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707147722
+    },
+    {
+        "content": "<p>I can also test out when I land later too</p>",
+        "id": 419868930,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707147734
+    },
+    {
+        "content": "<p>I checked out the commit you referenced above (e788501c3ba8283670cfa5071d99a7565e711d32) and ran <code>cargo test -p wasmtime-wasi sample_application</code> and was unfortunately unable to reproduce:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">test</span><span class=\"w\"> </span><span class=\"n\">async_</span>::<span class=\"n\">preview2_udp_sample_application</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"n\">ok</span>\n<span class=\"n\">test</span><span class=\"w\"> </span><span class=\"n\">sync</span>::<span class=\"n\">preview2_udp_sample_application</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"n\">ok</span>\n<span class=\"n\">test</span><span class=\"w\"> </span><span class=\"n\">sync</span>::<span class=\"n\">preview2_tcp_sample_application</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"n\">ok</span>\n<span class=\"n\">test</span><span class=\"w\"> </span><span class=\"n\">async_</span>::<span class=\"n\">preview2_tcp_sample_application</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"n\">ok</span>\n</code></pre></div>\n<p>I tested a second linux system and also didn't get a failure there. Should I be doing something else to reproduce though?</p>",
+        "id": 419894353,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707154831
+    },
+    {
+        "content": "<p>Correct, the test doesn;t fail, because of the busy loop</p>",
+        "id": 419898353,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707156169
+    },
+    {
+        "content": "<p>If you run with nocapture you see all the log outputs:</p>\n<div class=\"codehilite\" data-code-language=\"Text only\"><pre><span></span><code>RUST_BACKTRACE=full WASMTIME_BACKTRACE_DETAILS=1 cargo test async_::preview2_tcp_sample_application --features wasmtime-wasi/preview2 --package wasmtime-wasi -- --nocapture\n</code></pre></div>",
+        "id": 419898457,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707156204
+    },
+    {
+        "content": "<p>Or revert the change in <a href=\"http://io.rs\">io.rs</a>, then you'll see it fail.</p>",
+        "id": 419898751,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707156315
+    },
+    {
+        "content": "<p>Hm using that command I see one instance of <code>ready?</code> <code>ready!</code> but no more</p>",
+        "id": 419899085,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707156433
+    },
+    {
+        "content": "<p><span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 419899734,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707156655
+    },
+    {
+        "content": "<p>I'm also on a plane connected over ssh to the timings are probably much different than if it were local</p>",
+        "id": 419899855,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707156710
+    },
+    {
+        "content": "<p>Hmm, when I run it on Windows natively, it works fine as well..</p>",
+        "id": 419903727,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707158129
+    },
+    {
+        "content": "<p>May I ask what version of the Linux kernel you're running?</p>",
+        "id": 419907062,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707159264
+    },
+    {
+        "content": "<p>I tested <code>Linux arm2-ci.infra.bytecodealliance.org 5.15.0-89-generic #99-Ubuntu SMP Mon Oct 30 23:43:36 UTC 2023 aarch64 aarch64 aarch64 GNU/Linux</code> and <code>Linux fhaweignbi 6.7.1-060701-generic #202401201133 SMP PREEMPT_DYNAMIC Sat Jan 20 11:43:06 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux</code></p>",
+        "id": 420075613,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707234177
+    },
+    {
+        "content": "<p>so 5.15 and 6.7.1</p>",
+        "id": 420075635,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707234184
+    },
+    {
+        "content": "<p>Alright thanks. I saw <a href=\"https://stackoverflow.com/questions/75094513/how-to-correctly-poll-after-wouldblock\">this stackoverflow post</a> that describes almost the exact same issue, but that was closed without a satisfying answer.</p>\n<p>Anyway, I ran the repro on a fresh ubuntu 22.04 install and the problem still persists there. Next, I ran a <code>strace</code> like you suggested:</p>\n<div class=\"codehilite\" data-code-language=\"Text only\"><pre><span></span><code>[pid 35964] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 8\n[pid 35964] epoll_ctl(5, EPOLL_CTL_ADD, 8, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data={u32=0, u64=0}} &lt;unfinished ...&gt;\n[pid 35965] &lt;... epoll_wait resumed&gt;[{events=EPOLLOUT|EPOLLHUP, data={u32=0, u64=0}}], 1024, 948) = 1\n[pid 35964] &lt;... epoll_ctl resumed&gt;)    = 0\n[pid 35965] epoll_wait(3,  &lt;unfinished ...&gt;\n[pid 35964] connect(8, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr(\"93.184.216.34\")}, 16) = -1 EINPROGRESS (Operation now in progress)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n\n(many more times...)\n\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 0 (Timeout)\n[pid 35964] poll([{fd=8, events=POLLOUT}], 1, 0) = 1 ([{fd=8, revents=POLLOUT}])\n[pid 35965] &lt;... epoll_wait resumed&gt;[{events=EPOLLOUT, data={u32=0, u64=0}}], 1024, 989) = 1\n[pid 35964] getsockopt(8, SOL_SOCKET, SO_ERROR, [0], [4]) = 0\n[pid 35965] epoll_wait(3,  &lt;unfinished ...&gt;\n[pid 35964] sendto(8, \"GET / HTTP/1.1\\r\\nHost: example.co\"..., 37, MSG_NOSIGNAL, NULL, 0) = 37\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n\n(many more times...)\n\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7)     = 7\n[pid 35964] recvfrom(8, 0x7f73f4382b00, 10000, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)\n[pid 35964] write(1, \"WouldBlock\\n\", 11) = 11\n[pid 35964] write(1, \"ready?\\n\", 7)     = 7\n[pid 35964] write(1, \"ready!\\n\", 7 &lt;unfinished ...&gt;\n[pid 35965] &lt;... epoll_wait resumed&gt;[{events=EPOLLIN|EPOLLOUT, data={u32=0, u64=0}}], 1024, -1) = 1\n[pid 35964] &lt;... write resumed&gt;)        = 7\n[pid 35965] epoll_wait(3,  &lt;unfinished ...&gt;\n[pid 35964] recvfrom(8,  &lt;unfinished ...&gt;\n[pid 35965] &lt;... epoll_wait resumed&gt;[{events=EPOLLIN|EPOLLOUT, data={u32=0, u64=0}}], 1024, -1) = 1\n[pid 35964] &lt;... recvfrom resumed&gt;\"HTTP/1.1 200 OK\\r\\nAge: 33142\\r\\nCac\"..., 10000, 0, NULL, NULL) = 1590\n[pid 35965] epoll_wait(3,  &lt;unfinished ...&gt;\n[pid 35964] mprotect(0x7f7244120000, 65536, PROT_READ|PROT_WRITE) = 0\n[pid 35964] epoll_ctl(5, EPOLL_CTL_DEL, 8, NULL) = 0\n[pid 35964] close(8)                    = 0\n</code></pre></div>\n<p>First of all, the same problem apparently also happens while the socket is connecting.<br>\nSecondly, I'm not familar with the inner workings of tokio, but I would expect there to be a <code>poll</code>/<code>epoll_wait</code> call after the initial <code>recvfrom</code> returns <code>EAGAIN</code>.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://stackoverflow.com/questions/75094513/how-to-correctly-poll-after-wouldblock\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/925df65c212e80f19e81fcac1fb25e660797c3ce\\/68747470733a2f2f63646e2e737374617469632e6e65742f53697465732f737461636b6f766572666c6f772f496d672f6170706c652d746f7563682d69636f6e40322e706e673f763d373364373961383962646564)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://stackoverflow.com/questions/75094513/how-to-correctly-poll-after-wouldblock\" title=\"How to correctly poll after WouldBlock?\">How to correctly poll after WouldBlock?</a></div><div class=\"message_embed_description\">I am developing Rust Tokio library for ISO-TP. CAN protocol, which lets you send larger messages. The program is aimed towards linux only.\nFor this, I am using Tokio structure AsyncFd. When the wri...</div></div></div>",
+        "id": 420243676,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707309913
+    },
+    {
+        "content": "<p>Looking into this so the looping behavior on <code>connect</code> makes sense since we're not properly hooking into tokio, we need to do something along the lines of <code>io.do_io(|| ...)</code> or similar. Either that or we need to avoid using <code>rustix</code> here and need to use the tokio primitives, but I haven't looked too much into this.</p>",
+        "id": 420258988,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707314691
+    },
+    {
+        "content": "<p>I'm still not sure why after a read we don't hit epoll</p>",
+        "id": 420259182,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707314760
+    },
+    {
+        "content": "<p>Even with <a href=\"https://github.com/badeend/wasmtime/commit/d4675fad4db2c016327a73c0de5d03c107182cfe\">these changes</a>, connecting still performs a busy loop</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/badeend/wasmtime/commit/d4675fad4db2c016327a73c0de5d03c107182cfe\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/3f499c349e6a1bd70f71cd0eb7dbc956805fdbf8\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f646139333031363236373265326264663538376266636165643330353662326665613161316262323030313639383461303563316535306634333833613237322f62616465656e642f7761736d74696d652f636f6d6d69742f64343637356661643464623263303136333237613733633064653564303363313037313832636665)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/badeend/wasmtime/commit/d4675fad4db2c016327a73c0de5d03c107182cfe\" title=\"Let tokio know the socket is not ready yet. Also, just to be sure; re… · badeend/wasmtime@d4675fa\">Let tokio know the socket is not ready yet. Also, just to be sure; re… · badeend/wasmtime@d4675fa</a></div><div class=\"message_embed_description\">…wrote TcpSocket::subscribe to only poll the event we're interested in</div></div></div>",
+        "id": 420268143,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707317232
+    },
+    {
+        "content": "<p>I attached the debugger and logged tokio's internal ready state of the socket over the program's lifetime</p>",
+        "id": 420275356,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707319040
+    },
+    {
+        "content": "<p>prettier names for the states:</p>\n<div class=\"codehilite\" data-code-language=\"Text only\"><pre><span></span><code>0:  Ready::EMPTY\n1:  Ready::READABLE\n2:  Ready::WRITABLE\n3:  Ready::READABLE | Ready::WRITABLE\n4:  Ready::READ_CLOSED\n10: Ready::WRITABLE | Ready::WRITE_CLOSED\n14: Ready::WRITABLE | Ready::READ_CLOSED | Ready::WRITE_CLOSED\n31: Ready::ALL\n</code></pre></div>\n<p>Results for the <code>sync</code> version:</p>\n<div class=\"codehilite\" data-code-language=\"Text only\"><pre><span></span><code>wasi tcp-socket::create_tcp_socket\nwasi tcp-socket::start_connect\ntokio::io::Registration::try_io: ev.ready == 0\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ntokio::io::ScheduledIo::wake was called with: ready == 2\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\nwasi output-stream::write\ntokio::io::Registration::try_io: ev.ready == 2\ncrate::preview2::tcp::TcpReadStream: ready?\ntokio::io::ScheduledIo::wake was called with: ready == 3\ncrate::preview2::tcp::TcpReadStream: ready!\nwasi input-stream::read\ntokio::io::Registration::try_io: ev.ready == 1\ntokio::io::ScheduledIo::wake was called with: ready == 2\nwasi tcp-socket::drop\n</code></pre></div>\n<p>Seems all ok to me.</p>",
+        "id": 420275730,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707319150
+    },
+    {
+        "content": "<p>But the <code>async_</code> version:</p>\n<div class=\"codehilite\" data-code-language=\"Text only\"><pre><span></span><code>wasi tcp-socket::create_tcp_socket\ntokio::io::ScheduledIo::wake was called with: ready == 14\nwasi tcp-socket::start_connect\ntokio::io::Registration::try_io: ev.ready == 10\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\nwasi tcp-socket::finish_connect\ncrate::preview2::tcp::TcpSocket: ready?\ncrate::preview2::tcp::TcpSocket: ready!\ntokio::io::ScheduledIo::wake was called with: ready == 2\nwasi tcp-socket::finish_connect\nwasi output-stream::write\ntokio::io::Registration::try_io: ev.ready == 10\ncrate::preview2::tcp::TcpReadStream: ready?\ncrate::preview2::tcp::TcpReadStream: ready!\nwasi input-stream::read\ntokio::io::Registration::try_io: ev.ready == 4\ntokio's TcpStream::try_read_buf returned WouldBlock\ncrate::preview2::tcp::TcpReadStream: ready?\ncrate::preview2::tcp::TcpReadStream: ready!\nwasi input-stream::read\ntokio::io::Registration::try_io: ev.ready == 4\ntokio's TcpStream::try_read_buf returned WouldBlock\ncrate::preview2::tcp::TcpReadStream: ready?\ncrate::preview2::tcp::TcpReadStream: ready!\nwasi input-stream::read\ntokio::io::Registration::try_io: ev.ready == 4\ntokio's TcpStream::try_read_buf returned WouldBlock\ncrate::preview2::tcp::TcpReadStream: ready?\ncrate::preview2::tcp::TcpReadStream: ready!\nwasi input-stream::read\ntokio::io::Registration::try_io: ev.ready == 4\ntokio's TcpStream::try_read_buf returned WouldBlock\ncrate::preview2::tcp::TcpReadStream: ready?\ncrate::preview2::tcp::TcpReadStream: ready!\nwasi input-stream::read\ntokio::io::Registration::try_io: ev.ready == 4\ntokio's TcpStream::try_read_buf returned WouldBlock\ncrate::preview2::tcp::TcpReadStream: ready?\ncrate::preview2::tcp::TcpReadStream: ready!\nwasi input-stream::read\ntokio::io::Registration::try_io: ev.ready == 4\ntokio::io::ScheduledIo::wake was called with: ready == 3\ntokio::io::ScheduledIo::wake was called with: ready == 2\nwasi tcp-socket::drop\ntokio::io::ScheduledIo::wake was called with: ready == 31\n</code></pre></div>\n<p>The socket immediately jumps to <code>Ready::WRITABLE | Ready::READ_CLOSED | Ready::WRITE_CLOSED</code> after creation.<br>\n<span aria-label=\"face with raised eyebrow\" class=\"emoji emoji-1f928\" role=\"img\" title=\"face with raised eyebrow\">:face_with_raised_eyebrow:</span></p>",
+        "id": 420275980,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707319221
+    },
+    {
+        "content": "<p>weird! From the syscalls above that's probably:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">[</span><span class=\"n\">pid</span><span class=\"w\"> </span><span class=\"mi\">35964</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">epoll_ctl</span><span class=\"p\">(</span><span class=\"mi\">5</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">EPOLL_CTL_ADD</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"n\">events</span><span class=\"o\">=</span><span class=\"n\">EPOLLIN</span><span class=\"o\">|</span><span class=\"n\">EPOLLOUT</span><span class=\"o\">|</span><span class=\"n\">EPOLLRDHUP</span><span class=\"o\">|</span><span class=\"n\">EPOLLET</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"o\">=</span><span class=\"p\">{</span><span class=\"kt\">u32</span><span class=\"o\">=</span><span class=\"mi\">0</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u64</span><span class=\"o\">=</span><span class=\"mi\">0</span><span class=\"p\">}}</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"n\">unfinished</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"o\">&gt;</span>\n<span class=\"p\">[</span><span class=\"n\">pid</span><span class=\"w\"> </span><span class=\"mi\">35965</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">&lt;..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"n\">epoll_wait</span><span class=\"w\"> </span><span class=\"n\">resumed</span><span class=\"o\">&gt;</span><span class=\"p\">[{</span><span class=\"n\">events</span><span class=\"o\">=</span><span class=\"n\">EPOLLOUT</span><span class=\"o\">|</span><span class=\"n\">EPOLLHUP</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"o\">=</span><span class=\"p\">{</span><span class=\"kt\">u32</span><span class=\"o\">=</span><span class=\"mi\">0</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u64</span><span class=\"o\">=</span><span class=\"mi\">0</span><span class=\"p\">}}],</span><span class=\"w\"> </span><span class=\"mi\">1024</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">948</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">1</span>\n</code></pre></div>\n<p>at the very beginning</p>",
+        "id": 420281852,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707320764
+    },
+    {
+        "content": "<p>if it thinks it's hung up that makes sense why it keeps returning immediately</p>",
+        "id": 420281978,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707320803
+    },
+    {
+        "content": "<p>why it things it's hung up though is a mystery</p>",
+        "id": 420281999,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707320808
+    },
+    {
+        "content": "<p>I wonder if this is like WSL-specific behavior where we have to avoid adding the socket to the epoll set until after the connect is issued? Or something like that?</p>",
+        "id": 420282483,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707320928
+    },
+    {
+        "content": "<p>I don't think this is WSL specific.</p>\n<ol>\n<li><a href=\"https://stackoverflow.com/questions/14765203/why-am-i-getting-the-epollhup-event-on-a-brand-new-socket\">https://stackoverflow.com/questions/14765203/why-am-i-getting-the-epollhup-event-on-a-brand-new-socket</a>.</li>\n<li><a href=\"https://issues.apache.org/jira/browse/MESOS-9877\">https://issues.apache.org/jira/browse/MESOS-9877</a> \"In Linux, calling <code>epoll()</code> on a TCP socket before calling connect() will return an EPOLLHUP event on that socket.\"</li>\n<li><a href=\"https://groups.google.com/g/comp.os.linux.development.apps/c/ifXtb2dsF3g\">https://groups.google.com/g/comp.os.linux.development.apps/c/ifXtb2dsF3g</a> \"EPOLLHUP means the<br>\nother end of a communication was closed. In this particular case, it<br>\nis returned for an unconnected stream socket.\"</li>\n</ol>\n<p>I suspect this has to do with the fact that we <a href=\"https://github.com/badeend/wasmtime/blob/always-readable/crates/wasi/src/preview2/tcp.rs#L310\">forcefully construct</a> a <code>tokio::net::TcpStream</code> <em>before</em> socket has been connected and that tokio was just never designed to handle this.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://stackoverflow.com/questions/14765203/why-am-i-getting-the-epollhup-event-on-a-brand-new-socket\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/925df65c212e80f19e81fcac1fb25e660797c3ce\\/68747470733a2f2f63646e2e737374617469632e6e65742f53697465732f737461636b6f766572666c6f772f496d672f6170706c652d746f7563682d69636f6e40322e706e673f763d373364373961383962646564)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://stackoverflow.com/questions/14765203/why-am-i-getting-the-epollhup-event-on-a-brand-new-socket\" title=\"Why am I getting the EPOLLHUP event on a brand new socket\">Why am I getting the EPOLLHUP event on a brand new socket</a></div><div class=\"message_embed_description\">I have some code that when run on a virtual machine is misbehaving for some reason.\n\nThe order of initialization is:\n\ns_listen = socket(...)\nbind(s_listen, ...)\nepoll_ctl(epfd, EPOLL_CTL_ADD, s_lis...</div></div></div>",
+        "id": 420288366,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1707322379
+    },
+    {
+        "content": "<p>This might be possible to fix by sticking to tokio types rather than using rustix perhaps? We might be able to leverage rustix for anything tokio doesn't implement but basic things like connection and such seems like it should be doable with tokio</p>",
+        "id": 420379153,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707360673
+    }
+]

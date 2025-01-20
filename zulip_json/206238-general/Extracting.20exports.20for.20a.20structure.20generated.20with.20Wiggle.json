@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>I'm exploring how to write a custom API layer in WITX, then link the module at runtime when instantiating with Wasmtime.<br>\nThe first part is trivial using Wiggle:</p>\n<div class=\"codehilite\"><pre><span></span><code>wiggle::from_witx!({\n    witx: [&quot;custom_witx.witx&quot;],\n    ctx: MyCtx,\n});\n...\n}\n</code></pre></div>\n\n\n<p>However, I haven't been able to find how to extract the exports and link them when instantiating a module:</p>\n<div class=\"codehilite\"><pre><span></span><code>    let imports = module\n        .imports()\n        .map(|i| {\n            let export = match i.module() {\n                &quot;wasi_snapshot_preview1&quot; =&gt; wasi_snapshot_preview1.get_export(i.name()),\n                &quot;wasi_unstable&quot; =&gt; wasi_unstable.get_export(i.name()),\n\n                &quot;custom_witx&quot; =&gt; panic!(&quot;get exports&quot;),\n\n            };\n</code></pre></div>\n\n\n<p>I started down the path of exploring how this is done in WASI (the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/crates/wasi-common/wig/src/wasi.rs#L23\"><code>define_struct</code> function in <code>wig</code></a>), but before I go too deep, I want to make sure there isn't an easier way of doing this (i.e reusing it / parts of it, rather than re-implementing it for every custom module).</p>\n<p>Thanks!</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/master/crates/wasi-common/wig/src/wasi.rs#L23\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/crates/wasi-common/wig/src/wasi.rs#L23\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 197898680,
+        "sender_full_name": "Radu Matei",
+        "timestamp": 1589786770
+    },
+    {
+        "content": "<p>Hey <span class=\"user-mention\" data-user-id=\"269505\">@Radu M</span>, if I understood your needs right, you essentially want the VM to export your own module at runtime, right? In that case, you'll need to call at least some bits of <code>wig::wasi_define_struct_for_wiggle</code>. Just to quickly bring you up to speed, <code>wig::wasi_define_struct_for_wiggle</code> is called from <code>wasmtime_wasi</code> crate to load all syscalls from <code>wasi_common</code>, generate appropriate C shims, and export them to any linking WASI module at runtime. So to be able to link your own module at runtime, you'll need at the very least run <code>wig::wasi_define_struct_for_wiggle</code> in <code>wasmtime_wasi</code> crate to register your syscalls with the VM. It might actually be a good exercise in extracting some common bits from <code>wig</code> that could be re-used for different modules that we'd like to link with that are not necessarily <code>wasi-common</code> specific. Anyhow, I'm happy to help you out here if you get blocked by anything.</p>",
+        "id": 197915709,
+        "sender_full_name": "Jakub Konka",
+        "timestamp": 1589797915
+    },
+    {
+        "content": "<p>I think this _could_ be also achieved with some changes to the <code>Linker</code> structure, if it accepted a set of existing imports.<br>\n(it would not be as seamless as the WASI imports, because you would still have to manually map the function names, but it could be a slightly easier start, if I am not missing something).</p>",
+        "id": 198371470,
+        "sender_full_name": "Radu Matei",
+        "timestamp": 1590092275
+    },
+    {
+        "content": "<p>I ended up taking this approach, and now I link all all WASI exports using a <code>Linker</code>. This seems to work fine in the limited tests I've done so far, and it's a bit more straightforward, in that you can now use the same method to link both WASI and your custom modules / Rust functions.</p>",
+        "id": 198491404,
+        "sender_full_name": "Radu Matei",
+        "timestamp": 1590179389
+    },
+    {
+        "content": "<p>I did have to add a new public method to the linker though, similar to <code>Linker::func</code>, but accepting an <code>Extern</code> directly:</p>\n<div class=\"codehilite\"><pre><span></span><code>diff --git a/crates/wasmtime/src/linker.rs b/crates/wasmtime/src/linker.rs\nindex 888ad1cff..dcfdf79ea 100644\n--- a/crates/wasmtime/src/linker.rs\n+++ b/crates/wasmtime/src/linker.rs\n@@ -215,6 +215,11 @@ impl Linker {\n         self._define(module, name, Func::wrap(&amp;self.store, func).into())\n     }\n\n+    /// Links an external item\n+    pub fn add_extern(&amp;mut self, module: &amp;str, name: &amp;str, item: Extern) -&gt; Result&lt;&amp;mut Self&gt; {\n+        self.define(module, name, item)\n+    }\n</code></pre></div>\n\n\n<p>I'd be happy to chat to better understand if the Linker is indeed supposed to be able to do this, or I am abusing its role in this way.</p>",
+        "id": 198492096,
+        "sender_full_name": "Radu Matei",
+        "timestamp": 1590179848
+    },
+    {
+        "content": "<p>Does <code>Linker::define</code> do what you need?</p>",
+        "id": 198492543,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590180118
+    },
+    {
+        "content": "<p>oh, heh. You're using that <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span></p>",
+        "id": 198492625,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590180145
+    },
+    {
+        "content": "<p>Ah, there is <code>_define</code>, which is private, and <code>define</code> which is public - you're right, I can use it directly.</p>\n<p>That being said, do you see any issues with instantiating the modules using the linker?</p>",
+        "id": 198493322,
+        "sender_full_name": "Radu Matei",
+        "timestamp": 1590180589
+    },
+    {
+        "content": "<p>I don't have full context here, but in general, the <code>Linker</code> is quite flexible</p>",
+        "id": 198494492,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1590181282
+    },
+    {
+        "content": "<p>The idea is to instantiate a module and provide the imports for both WASI and custom modules / in the same way.<br>\nUltimately, I'd like to express an API layer as WITX and link that, but I'm not there yet.</p>",
+        "id": 198498755,
+        "sender_full_name": "Radu Matei",
+        "timestamp": 1590184140
+    }
+]

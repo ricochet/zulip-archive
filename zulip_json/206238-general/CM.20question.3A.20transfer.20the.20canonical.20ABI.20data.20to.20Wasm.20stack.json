@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>Hello, I have a question regarding how runtime transfer the canonical ABI data to Wasm stack when handling a call into the canon-lift function. When a component is loaded by the runtime, the runtime can have the IDL info from component, so it can understand the canonical ABI data format according to the spec. Then it needs to transfer the ABI data into the Wasm stack for calling the associated core function.  Since the core function type is also given from the core module.  The runtime must have some knowledge about how to map the  canonical ABI data to the core function arguments. That implies the core function type must be predefined (even standardized) rather than variant? If not, then how the runtime can finish this step? Currently wit-bindgen creates the core function with its type and it looks it generates different type of core functions between C/C++ and Java. I appreciate that anyone can help me to explain it. thanks!</p>",
+        "id": 386968673,
+        "sender_full_name": "Wang Xin",
+        "timestamp": 1692837204
+    },
+    {
+        "content": "<p>Hosts can have a fixed world, or set of worlds, that they support. That way, they can have statically-generated host bindings for the worlds they'll support.</p>",
+        "id": 386979511,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1692845928
+    },
+    {
+        "content": "<p>The core-wasm code on the inside of a component may have different types, and the inner core types may depend on the programming language. Source languages can use the options on the <code>canon lift</code> and <code>canon lower</code> to select different behaviors.</p>",
+        "id": 386979846,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1692846121
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> Thank you! Host side only needs to get the data from the canonic ABI defined data format, and process the data in any host side native function and return the results in canonical ABI format, right? However my question is about how runtime handles the Wasm side canon life call. Before the runtime calls into the inner core function, how it can map the canonical ABI data to the Wasm stack? I assume the runtime has the responsibility to prepare the wasm stack for calling the inner core function, right?</p>",
+        "id": 386987379,
+        "sender_full_name": "Wang Xin",
+        "timestamp": 1692849296
+    },
+    {
+        "content": "<p>Great questions, thanks for asking.  From a host perspective, once I have fixed the <code>world</code> that I am supporting, the Canonical ABI defines a fixed core function type for each import and export in the world as well as the runtime contract for how data is copied into and out of linear memory.  Thus, with a fixed world, the host can mostly just statically follow these rules for each import/export.  There is a little runtime dynamism, though, that requires reflecting on the component's internal <code>canon lift</code> and <code>canon lower</code> definitions to see:</p>\n<ul>\n<li>when copying strings, which string encoding to use (there are currently 3 fixed options)</li>\n<li>when there are multiple linear memories, which one to use</li>\n<li>when linear memory needs to be allocated, which core exported function should be called</li>\n<li>after a call to a core export completes, which \"post-return\" core function to call (to allow the core module to perform cleanup/deallocation, now that its returned memory has been copied from)</li>\n</ul>\n<p>The host needs to extract these bits of information from the component binary at load time, record it in metadata associated with the component, and then use this metadata at runtime to do what the component said to do.</p>\n<p>Overall, a host implementation for a fixed world is mostly similar to a host for a fixed core module signature, just with a few additional points of component-determined dynamic behavior.  I hope that helps, happy to discuss further!</p>",
+        "id": 387123670,
+        "sender_full_name": "Luke Wagner",
+        "timestamp": 1692895828
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253998\">@Luke Wagner</span>  Thank you very much! For the \"fixed core function type\", it seems the proposal doesn't specify  how to determin the exact typel.  Currently we relies on how wit-bindgen generates the core function to assume the rule of core function type for a given IDL function.  If a runtime uses the rule observed from wit-bindgen output, is it safe?</p>",
+        "id": 387176680,
+        "sender_full_name": "Wang Xin",
+        "timestamp": 1692920243
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"268650\">@Wang Xin</span> Great question!  It's a bit buried in the middle of CanonicalABI.md (see <code>flatten_functype</code> in <a href=\"https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md#flattening\">this section</a>), but the Component Model does indeed define this mapping.  wit-bindgen should conform to <code>flatten_functype</code>, so it's valid to use wit-bindgen to derive the core function type as a reference.  Alternatively, you could run <code>flatten_functype</code> in <a href=\"https://github.com/WebAssembly/component-model/blob/main/design/mvp/canonical-abi/definitions.py\"><code>canonical-abi/definitions.py</code></a> directly (it's tested <a href=\"https://github.com/WebAssembly/component-model/blob/8f0a9175d5d3982c14aab581fc56a73552c9f74c/design/mvp/canonical-abi/run_tests.py#L294\">here</a>).</p>",
+        "id": 387182109,
+        "sender_full_name": "Luke Wagner",
+        "timestamp": 1692923658
+    },
+    {
+        "content": "<p>We've observed that for one function in WIT , <em>bind-gen</em> will generate different function signatures for C and Java which leads to different <code>core functype</code>.</p>\n<p>Here is the case</p>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>interface types {\n  record coord {\n    x: u32,\n    y: u32,\n  }\n\n  record monster {\n    name: string,\n    hp: u32,\n    pos: coord,\n    elite: bool\n  }\n\n  type error = u32\n}\n\nworld caller {\n  use types.{coord, error, monster}\n\n  import get-positions: func(m: list&lt;monster&gt;) -&gt; list&lt;coord&gt;\n  export run: func()\n}\n\nworld callee {\n  use types.{coord, error, monster}\n\n  export get-positions: func(m: list&lt;monster&gt;) -&gt; list&lt;coord&gt;\n}\n</code></pre></div>\n<p>if  implement \"caller\" with C, the import likes:</p>\n<div class=\"codehilite\" data-code-language=\"C\"><pre><span></span><code><span class=\"n\">__attribute__</span><span class=\"p\">((</span><span class=\"n\">__import_module__</span><span class=\"p\">(</span><span class=\"s\">\"$root\"</span><span class=\"p\">),</span><span class=\"w\"> </span><span class=\"n\">__import_name__</span><span class=\"p\">(</span><span class=\"s\">\"get-positions\"</span><span class=\"p\">)))</span>\n<span class=\"kt\">void</span><span class=\"w\"> </span><span class=\"n\">__wasm_import_caller_get_positions</span><span class=\"p\">(</span><span class=\"kt\">int32_t</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">int32_t</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">int32_t</span><span class=\"p\">);</span>\n</code></pre></div>\n<p>if implement \"callee\" with Java, the export likes:</p>\n<div class=\"codehilite\" data-code-language=\"Java\"><pre><span></span><code><span class=\"nd\">@Export</span><span class=\"p\">(</span><span class=\"n\">name</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"s\">\"get-positions\"</span><span class=\"p\">)</span>\n<span class=\"kd\">private</span><span class=\"w\"> </span><span class=\"kd\">static</span><span class=\"w\"> </span><span class=\"kt\">int</span><span class=\"w\"> </span><span class=\"nf\">wasmExportGetPositions</span><span class=\"p\">(</span><span class=\"kt\">int</span><span class=\"w\"> </span><span class=\"n\">p0</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">int</span><span class=\"w\"> </span><span class=\"n\">p1</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"p\">}</span>\n</code></pre></div>\n<p>That actually brings two different <code>oore.functype</code>, <code>(import \"get-positions\" (func (param i32 i32 i32))</code> and <code>(export \"get-positions\" (func (param i32 i32) (result i32))</code>, targets the same component type <code>get-positions: func(m: list&lt;monster&gt;) -&gt; list&lt;coord&gt;</code>. </p>\n<p>We are not sure that is an issue of \"bind-gen\" or the  flexible for \"core module\" ?</p>",
+        "id": 387186393,
+        "sender_full_name": "lum1n0us",
+        "timestamp": 1692925439
+    },
+    {
+        "content": "<p>Those caller and callee ABIs aren't directly linked to each other. These are the ABIs that toolchains use to talk to the canonical ABI on the inside of a component. Effectively, these are the ABIs that are used to talk to the <code>canon lift</code> and <code>canon lower</code> constructs, which allows linkers to generate adapters that translate from one side to the other.</p>",
+        "id": 387187864,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1692926090
+    },
+    {
+        "content": "<p>Yes. From the angle of \"aren't directly linked to each other\", it is understandable. But if from the angle of \"the Canonical ABI defines a fixed core function type for each import and export in a fixed world\", how to think about it ?</p>",
+        "id": 387194489,
+        "sender_full_name": "lum1n0us",
+        "timestamp": 1692929838
+    },
+    {
+        "content": "<p>The core function type also depends on whether it's for an import or an export.</p>",
+        "id": 387278587,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1692971002
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"415410\">@lum1n0us</span> I think the way to think of it is that, from a host perspective, you are always running a <em>single</em> root component whose imports are supplied by the host and whose exports are called by the host. Multi-component scenarios work by linking N components into a single root component (that encapsulates the N components, describing how they are linked together).</p>\n<p>If the root component only contains a single core module, then the core module's imports and exports are derived via the Canonical ABI from the world as discussed above. (Dan makes a good point that I forgot to mention earlier which is that the Canonical ABI produces different core function types for the same Wit-level function type depending on whether the function type is imported vs exported; that is the <code>context</code> parameter to <code>flatten_functype</code>.)</p>\n<p>If instead the root component contains multiple nested components or modules, it is possible to \"fuse\" them all together to produce a single core module (using multi-memory) whose imports and exports are defined by the Canonical ABI (just like the single-module case).  It is this \"fusion\" process that will synthesize core function \"adapters\" that sit in-between one component's core exports and another component's core imports, doing the copying between, and that is why import and export core function types don't have to be the exact same -- because when two components are linked together, there is always a generated adapter function that sits in-between.</p>\n<p>In any case, at runtime, the host can always treat the running component as a single (possibly fused) core module.  It is also possible, to enable better code-sharing between components and to preserve offsets in custom sections, to not fuse a component into a single core module but instead produce a list of core modules that are linked together according to some engine-internal metadata produced at compile-time (iirc, Wasmtime does this).</p>\n<p>I hope that helps, let me know if you have any other questions!</p>",
+        "id": 387326081,
+        "sender_full_name": "Luke Wagner",
+        "timestamp": 1692988937
+    },
+    {
+        "content": "<p>Hi <span class=\"user-mention\" data-user-id=\"253998\">@Luke Wagner</span> I would like to confirm that the proposal didn't specifiy the in-memory data structure for the canonical ABI. For example, in lift_flat_record, the python code only defines a python dict type for the record: <br>\ndef lift_flat_record(cx, vi, fields):<br>\n  record = {}<br>\n  for f in fields:<br>\n    record[f.label] = lift_flat(cx, vi, f.t)<br>\n  return record<br>\nSince it is the same runtime that takes care of the serialization and de-serialization (even it is possible just runtime internal data structure), it seems no problem to leave the in-memory data structure to runtime implementation. Is my understanding right?</p>",
+        "id": 387485421,
+        "sender_full_name": "Wang Xin",
+        "timestamp": 1693104928
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"268650\">@Wang Xin</span> Yes, that's right, the lifted values are abstract and their representation is not exposed to wasm.  Moreover, the spec ensures that when passing values between components, the lifted values don't have to be materialized; the fused adapter can copy directly from one linear memory to the other.</p>",
+        "id": 387485950,
+        "sender_full_name": "Luke Wagner",
+        "timestamp": 1693105329
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253998\">@Luke Wagner</span> all my questions are around how to handle the static linking requirements in the component model. It seems it is close to enable static linking for the import and export core modules (since only sligtly difference in the function type, we may think about solving it). The \"fuse\" you mentioned sounds pretty like static linking with some adapt wasm bytecode (or a function?) to fit the function type difference?</p>",
+        "id": 387486615,
+        "sender_full_name": "Wang Xin",
+        "timestamp": 1693105826
+    },
+    {
+        "content": "<p>forgot to mention static link of the core modules also requires modules following the wasm-ld convesion.</p>",
+        "id": 387488008,
+        "sender_full_name": "Wang Xin",
+        "timestamp": 1693106850
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"268650\">@Wang Xin</span> yes, it could be implemented via static linking.  The adapter functions mentioned above do have to be generated/compiled into new wasm functions, but those can then be statically linked with all the original core modules in the components. (It is also possible to dynamically link compiled module code in order to share code (like libc or language runtime) between components, like a DLL, as an optimization.)</p>",
+        "id": 387495140,
+        "sender_full_name": "Luke Wagner",
+        "timestamp": 1693112407
+    },
+    {
+        "content": "<p>Oh, but one difference to mention from traditional static linking is that there will be multiple linear memories. This can be supported using wasm's multi-memory feature, though.</p>",
+        "id": 387495321,
+        "sender_full_name": "Luke Wagner",
+        "timestamp": 1693112575
+    }
+]

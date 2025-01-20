@@ -1,0 +1,200 @@
+[
+    {
+        "content": "<p><span aria-label=\"wave\" class=\"emoji emoji-1f44b\" role=\"img\" title=\"wave\">:wave:</span>  Hey!</p>\n<p>Lately i've been working on a jump threading pass. The scope has blown up a bit and it has become more of a general control flow optimization pass now.</p>\n<p>The pass does a few optimizations:</p>\n<ul>\n<li>merges consecutive blocks when they end with a jump</li>\n<li>const eval brif and br_table's</li>\n<li>replace terminators with jumps when all block calls are the same</li>\n<li>selectify br_if's when both sides jump to the same block but have different arguments</li>\n</ul>\n<p>I also had plans to add another optimization that would inline jump terminated blocks into all its predecessors gated on some cost function. This is the optimization that I think has the most potential to bring performance benefits, and I have this mostly working but it fails a few fuzz cases that I'm not entirely sure how to fix.</p>\n<p>The pass works iteratively, by visiting all blocks and applying the optimizations. Each optimization may also schedule visits to other blocks if it thinks there are further optimization opportunities.</p>\n<p>I'm also very surprised that all of the optimizations above run at least once on pretty much all wasm files, I wouldn't have expected that, especially from the \"const eval\" optimization.</p>\n<p>The performance results of this haven't been very positive so far, they're mostly neutral or slightly negative. So now I'm not sure if this is worth upstreaming, but either way, I think it's worth exploring.</p>\n<ul>\n<li><a href=\"https://gist.github.com/afonso360/5ec7971f3322ff9a85c0251564de1e08\">Sightglass benchmark results for the pass</a></li>\n<li><a href=\"https://github.com/afonso360/wasmtime/tree/jump-threading\">Pass branch</a></li>\n</ul>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://gist.github.com/afonso360/5ec7971f3322ff9a85c0251564de1e08\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/91f9baed8f4fc08c462d1a4de5a8c23942d45e97/68747470733a2f2f6769746875622e6769746875626173736574732e636f6d2f6173736574732f676973742d6f672d696d6167652d3534666437646330373133652e706e67&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://gist.github.com/afonso360/5ec7971f3322ff9a85c0251564de1e08\" title=\"Jump threading sightglass benchmark results\">Jump threading sightglass benchmark results</a></div><div class=\"message_embed_description\">Jump threading sightglass benchmark results. GitHub Gist: instantly share code, notes, and snippets.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/afonso360/wasmtime/tree/jump-threading\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/d259672f6e7dba0a033e680147257f915a465917/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f313762643363366238666161663564346536393736616637303965356537393065386333363637313561656431643633393030633166613431363731316332362f61666f6e736f3336302f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/afonso360/wasmtime/tree/jump-threading\" title=\"GitHub - afonso360/wasmtime at jump-threading\">GitHub - afonso360/wasmtime at jump-threading</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - GitHub - afonso360/wasmtime at jump-threading</div></div></div>",
+        "id": 453139558,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721644027
+    },
+    {
+        "content": "<p>The backend already does jump threading implicitly. It tries to layout all basic blocks such that fallthroughs are possible as much as possible. And then when emitting machine code it will omit unconditional jump instructions if the target is the next basic block.</p>",
+        "id": 453167166,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1721652190
+    },
+    {
+        "content": "<blockquote>\n<p>And then when emitting machine code it will omit unconditional jump instructions if the target is the next basic block.</p>\n</blockquote>\n<p>Yes, these show up a lot in generated machine code, and are something that we may be able to avoid.  (i.e. when it isn't the next basic block)</p>\n<blockquote>\n<p>The backend already does jump threading implicitly. It tries to layout all basic blocks such that fallthroughs are possible as much as possible.</p>\n</blockquote>\n<p>Right, that works for simple jump terminated blocks, my goal was to try to perform more advanced optimizations, such as inlining a block into multiple predecessors if we can justify it for a given cost function. Or the const eval thing. Those are probably harder to do later on, and can allow further optimization opportunities for egraphs.</p>\n<p>Although that doesen't seem to be reflected in the performance numbers above.</p>",
+        "id": 453168026,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721652473
+    },
+    {
+        "content": "<p>this is something we've talked about a lot over the years, exciting to see you looking into it!</p>",
+        "id": 453251264,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721673612
+    },
+    {
+        "content": "<p>I wouldn't be that discouraged by the initial results: a 1% compilation overhead is actually pretty low, and is something we can work on improving, so as a starting point this is pretty promising</p>",
+        "id": 453251402,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721673653
+    },
+    {
+        "content": "<p>regarding the jump fusion that the lowering does: its great that it does that stuff, but it is also fairly limited and cannot, by its design, feed into other mid-end optimizations, which is the kind of thing I'd hope this new pass would be able to do</p>",
+        "id": 453251595,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721673729
+    },
+    {
+        "content": "<p>have you tried measuring each optimization in isolation? eg enabled const eval'ing <code>br_if</code> and <code>br_table</code> but not any of the other things, etc... and doing a sightglass run for each of them? one suspicion I have is that the \"selectify\" optimization is actually a pessimization for well-predicted branches, and the conditional moves that the <code>select</code>s are lowering to are effectively acting as barriers to speculation</p>",
+        "id": 453251954,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721673895
+    },
+    {
+        "content": "<p>aside: we should try lowering plain <code>select</code>s (not <code>select_spectre_guard</code>s, of course) into pseudo-instructions that become little branches, instead of conditional moves, at emit time</p>",
+        "id": 453252185,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721673975
+    },
+    {
+        "content": "<blockquote>\n<p>n I have is that the \"selectify\" optimization is actually a pessimization for well-predicted branches, and the conditional moves that the <code>select</code>s are lowering to are effectively acting as barriers to speculation</p>\n</blockquote>\n<p>Yes! I had the same concern wrt the selectify pass.  I haven't exactly measured each one individually, but I did measure selectify and it didn't have any impact on the benchmarks. All of these slowdowns show up before that.</p>\n<p>That being said, I'm not too confident in my setup for measuring such small changes. I'll run those individual benchmarks.</p>",
+        "id": 453252366,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674066
+    },
+    {
+        "content": "<p>My only goal with selectify was really to get more optimization opportunites for egraphs, since <code>select</code> is something we can optimize, otherwise i'm not 100% convinced it's worth it</p>",
+        "id": 453252558,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674127
+    },
+    {
+        "content": "<p>my other big piece of feedback would be to see if we can figure out a way to do this at the same time as the e-graphs pass, so that if we merge two blocks together and replace block params with uses of instruction results, that the e-graph rewrite rules can try (re?)running now that we have additional visibility on the inputs to some of the instructions</p>",
+        "id": 453252852,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721674227
+    },
+    {
+        "content": "<p>That would be amazing for the const eval opt here, since it's quite limited. I have no idea how to go about it, I've never looked too much into how egraphs work internally</p>",
+        "id": 453253084,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674306
+    },
+    {
+        "content": "<blockquote>\n<p>at the same time as the e-graphs pass</p>\n</blockquote>\n<p>specifically, I mean not having two different passes here, one for e-graph and one for the control-flow-y stuff. because we don't want to have a phase ordering problem where the <code>br_if</code> const-eval could benefit from having already cleaned up the straight-line code leading to the condition, but the e-graph rules would benefit from having already cleaned up control flow. Ideally we would be Doing Everything All At Once, which was the big benefit that e-graphs give us (supposedly)</p>",
+        "id": 453253292,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721674387
+    },
+    {
+        "content": "<p>yeah, I know a bit about it, but not as much as Chris (who is out sick rn, unfortunately) and <span class=\"user-mention\" data-user-id=\"504918\">@Jamey Sharp</span></p>",
+        "id": 453253367,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721674417
+    },
+    {
+        "content": "<p>Also, one of the things that might be slightly incompatible (not sure) is that we invalidate the DFG in this pass very early on (on the first change) and never rebuild it until the end of the pass.</p>\n<p>This was one of the most impactful changes in terms of build time. BZ2 had a 10-15% regression before doing this.</p>",
+        "id": 453253735,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674541
+    },
+    {
+        "content": "<p>hm gotcha</p>",
+        "id": 453253809,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721674563
+    },
+    {
+        "content": "<p>I'm not sure if this would be a dealbreaker for merging with egraphs</p>",
+        "id": 453253867,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674582
+    },
+    {
+        "content": "<p>are you available to talk about this stuff in more detail on Wednesday's cranelift meeting?</p>",
+        "id": 453253871,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721674584
+    },
+    {
+        "content": "<p>Sorry, I unfortunately have some work related stuff on that time slot</p>",
+        "id": 453253932,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674616
+    },
+    {
+        "content": "<p>Although I think I might be able on the 14th of August</p>",
+        "id": 453254043,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674662
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"410955\">Afonso Bordado</span> <a href=\"#narrow/stream/217117-cranelift/topic/Jump.20threading.20pass/near/453253867\">said</a>:</p>\n<blockquote>\n<p>I'm not sure if this would be a dealbreaker for merging with egraphs</p>\n</blockquote>\n<p>the e-graphs pass needs the DFG in a non-broken state</p>\n<p>10-15% compile time regression is not acceptable, in my view. but if we could make it optional, with a 0% overhead to compile time when disabled, that is probably okay to land, with the understanding that it is going to be improved and worked on in the near future (and ultimately removed if we can't get it to some acceptable threshold or if it gets abandoned). this is something that would be good to talk to more folks about tho, and get more opinions on.</p>",
+        "id": 453254223,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721674725
+    },
+    {
+        "content": "<p>When looking into this on LLVM's side, i noticed that they can incrementally rebuild the DFG, which would be very neat, because we know precisely which blocks have changed</p>",
+        "id": 453254337,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674772
+    },
+    {
+        "content": "<p>another option is to open an issue or even a draft PR with more details there and consolidate larger, more code-focused discussion</p>",
+        "id": 453254356,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721674781
+    },
+    {
+        "content": "<p>Yeah, I'm happy to do that</p>",
+        "id": 453255108,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721674984
+    },
+    {
+        "content": "<p>I would love to chat about this a bunch more! We haven't re-evaluated the Cranelift meeting's schedule in a while, maybe it's time to poll folks. I have a bunch of thoughts on this topic, but a few very brief comments:</p>\n<ul>\n<li>I think it's possible, but I haven't proven it, to update the dominator tree dynamically in the special case of const eval on conditional branches, and maybe that's all we need to make that work inline with the egraph pass</li>\n<li>it would be fantastic in conjunction with this to also do a dynamic version of the remove-constant-phis pass integrated with the egraph pass, but that's hard</li>\n<li>it's not obvious to me that merging blocks that are connected by a single-predecessor/single-successor edge buys us anything in the egraph pass, but if there are optimizations we can't do without it I'd love to hear about them</li>\n<li>I think there's some version of this that ought to help with the patterns we see in interpreter loops, and we've investigated that use case before, but I can't remember the details right now</li>\n</ul>",
+        "id": 453255381,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1721675047
+    },
+    {
+        "content": "<blockquote>\n<p>it's not obvious to me that merging blocks that are connected by a single-predecessor/single-successor edge buys us anything in the egraph pass, but if there are optimizations we can't do without it I'd love to hear about them</p>\n</blockquote>\n<p>yeah I guess the remove-constant-phis pass already makes that stuff visible</p>",
+        "id": 453255636,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1721675131
+    },
+    {
+        "content": "<p>exactly. between that and the machbuffer optimizations (which should always fire for that specific case) I don't know what else we can get from doing this earlier</p>",
+        "id": 453255864,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1721675180
+    },
+    {
+        "content": "<p>My real goal was to get a single-successor/multi-predecessor opt working, That's the one I think would bring some real benefits, but unfortunatley I ran into a bunch of issues with that</p>",
+        "id": 453255973,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1721675204
+    },
+    {
+        "content": "<p>makes sense!</p>",
+        "id": 453256083,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1721675233
+    },
+    {
+        "content": "<p>Late to this thread (sorry, was out sick the last few days) but my major +1 is to the \"let's do this as part of the egraph pass\" discussion above. I share the intuition that there is likely a lot of opportunity if we can get the whole thing into a fixpoint loop: branch folding and block merging and redundant blockparam removal leads to more visibility for mid-end rules and further cprop. I suspect that this is where we'll find the wins that make the cost (if any) worth it; and I have a hunch that the integration (doing this as part of existing passes) may reduce the compile-time overhead as well.</p>\n<p>The challenge is dealing with cycles (removing redundant blockparams means we need to -- or at least should -- revisit nodes in our eager egraph build/rewrite pass; treating blockparams as opaque roots is what let us get away with a single pass before) and updating dominance, as Jamey notes.</p>\n<p>On the latter (domtree updates) I'll throw out an observation that might help: for correctness the egraph pass I think technically only needs us to keep entries in the scopedhashmap for <em>at most</em> their actual scope; in other words it's fine if we process a block as-if it were further down the domtree, I think, it just loses GVN opportunity. If we can do a precise update then of course all the better!</p>",
+        "id": 453745937,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1721839172
+    },
+    {
+        "content": "<p>(oh, and keyword for the above \"all in the fixpoint\": this is Sparse Conditional Constant Propagation, IIUC)</p>",
+        "id": 453746059,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1721839201
+    },
+    {
+        "content": "<p>(and one more footnote, I know Jamey has a lot more thoughts about the \"revisit blockparams\" bit above; he's done way more thinking about this than I have :-) )</p>",
+        "id": 453746290,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1721839246
+    },
+    {
+        "content": "<p>It's very possible I'm confused, but I think SCCP is different than any of the optimizations Afonso has been working on so far. I understood SCCP to mean path-dependent constant propagation, where we know an SSA value has a particular constant value at a use site due to conditional branches which dominate that use. I think Afonso has done constant-folding on conditional branches, where we know that an SSA value is a particular constant at all uses and we see it used as the controlling condition in a conditional branch, so we know only one of the branches can ever be taken. Our current approach to Spectre-safety prohibits SCCP as far as I understand it, but should allow what I think Afonso has implemented.</p>\n<p>And it's true, I do have a lot of thoughts on revisiting blocks. <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span> I'm not sure which of those thoughts are immediately useful but I'm definitely interested in discussing the topic.</p>",
+        "id": 453783037,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1721850891
+    }
+]

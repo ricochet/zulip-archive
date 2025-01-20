@@ -1,0 +1,174 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #734 [wasi-common] Re-design of generate... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.23734.20.5Bwasi-common.5D.20Re-design.20of.20generate.2E.2E.2E.html">wasmtime / issue #734 [wasi-common] Re-design of generate...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="242904429"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%23734%20%5Bwasi-common%5D%20Re-design%20of%20generate.../near/242904429" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.23734.20.5Bwasi-common.5D.20Re-design.20of.20generate.2E.2E.2E.html#242904429">(Jun 16 2021 at 16:17)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/wasmtime/issues/734#issuecomment-862517300">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/734">issue #734</a>:</p>
+<blockquote>
+<p>wiggle exists now! its neat to go back and remember the bad old days</p>
+</blockquote>
+
+
+
+<a name="242904432"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%23734%20%5Bwasi-common%5D%20Re-design%20of%20generate.../near/242904432" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.23734.20.5Bwasi-common.5D.20Re-design.20of.20generate.2E.2E.2E.html#242904432">(Jun 16 2021 at 16:17)</a>:</h4>
+<p>pchickey closed <a href="https://github.com/bytecodealliance/wasmtime/issues/734">issue #734</a>:</p>
+<blockquote>
+<p><code>wig</code> presently generates <code>wasi-common</code> types from <code>witx</code> descriptions of the standard. This is a great start, but there are a handful of ways in which the design of <code>wasi-common</code> is difficult to automatically generate more code for. I want to generate as much of the boilerplate for each hostcall as I can, but before we get there, we need to sort out some difficulties with datatypes.</p>
+<p>This proposal seeks to redesign we manage 1. validating and chasing pointers into guest memory, ensuring that all references into guest memory are safe, and 2. validating enum and flag values.</p>
+<p>We currently depend on some hand-written <code>enc_</code>/<code>dec_</code> functions to serialize and deserialize some types to and from guest memory. I want to replace those with automatically generated implementations without losing any of the zero-copy optimizations we currently have.</p>
+<h1>Generated Types</h1>
+<p>There are two purposes for generated types:</p>
+<ul>
+<li>
+<p>Using a value that resides in guest memory. This includes reading a value<br>
+  from the guest memory (via a pointer), or writing a value into guest memory.<br>
+  These should only be used in the host calls, and not by any business logic,<br>
+  except for logic that determines if a value has a valid encoding (memory<br>
+  out-of-bounds, memory alignment, or value out-of-range).</p>
+<ul>
+<li>
+<p><code>struct GuestMemory&lt;'a&gt;</code> encapsulates a Linear Memory and ensures all<br>
+  borrows of that memory are safe Rust - there can be multiple immutable borrows of the same memory, but at most one mutable borrow. Constructed from a <code>*mut u8</code> pointer<br>
+  to the start of linear memory, and <code>usize</code> length. The base pointer for linear <br>
+  memory be pointer-aligned to simplify alignment checks for pointers to structs<br>
+  in this memory, but this can be relaxed in the future. Lifetime parameter<br>
+  ensures that use of memory doesn't survive longer than the host call.</p>
+<p>* The biggest problem that <code>GuestMemory</code> needs to solve is to track<br>
+    all of the mutable and immutable borrows at run-time to make sure they<br>
+    do not cause UB. It will keep a map of the immutable and mutable<br>
+    borrows, and use the drop impls on <code>GuestPtr</code> and friends to remove<br>
+    those borrows from the map.</p>
+</li>
+<li>
+<p><code>MemoryError</code> describes an out-of-bounds memory access or misaligned pointer.</p>
+</li>
+<li>
+<p><code>struct GuestPtr&lt;'a, T&gt;</code> is a pointer to a read-only T in guest memory.<br>
+  Constructed from <code>GuestMemory&lt;'a&gt;::ptr(&amp;self, ptr: i32) -&gt;
+  Result&lt;GuestPtr&lt;'a, T&gt;, MemoryError&gt;</code></p>
+</li>
+<li>
+<p><code>struct GuestPtrMut&lt;'a, T&gt;</code> is a pointer to a writable T in guest memory.<br>
+  Constructed from <code>GuestMemory&lt;'a&gt;::ptr_mut(&amp;self, ptr: i32) -&gt;
+  Result&lt;GuestPtrMut&lt;'a, T&gt;, MemoryError&gt;</code></p>
+</li>
+<li>
+<p><code>struct GuestArray&lt;'a, T&gt;</code> is an array of read-only T in guest memory.<br>
+  Constructed from <code>GuestMemory&lt;'a&gt;::array(&amp;self, ptr: i32, len: i32) -&gt;
+  Result&lt;GuestArray&lt;'a, T&gt;, MemoryError&gt;</code></p>
+</li>
+<li>
+<p>All <code>T</code> above have a <code>GuestValue</code> trait constraint. This trait describes<br>
+  the memory layout of the value.</p>
+</li>
+<li>
+<p>Construction of the above are only possible if they point to a valid guest<br>
+  memory location.</p>
+</li>
+<li>
+<p>GuestPtr and GuestPtrMut each have a <code>fn offset(&amp;self, elems: i32) -&gt;
+  Result&lt;GuestPtr{Mut}&lt;'a, T&gt;, MemoryError&gt;</code> for accessing subsequent<br>
+  elements. This allows them to be used like an array, in types like <code>iovec</code><br>
+  and <code>ciovec</code>.</p>
+</li>
+<li>
+<p><code>ReprError</code> describes an invalid representation of a type in guest memory.</p>
+</li>
+<li>
+<p><code>impl GuestPtr&lt;'a, T&gt; { pub fn read(&amp;self) -&gt; Result&lt;T, ReprError&gt; }</code><br>
+  dereferences a pointer. As part of dereferencing, it validates the pointee</p>
+<ul>
+<li>that will check if enum and flag values are in bounds, and recursively<br>
+for each member of a struct. It won't do any validation on a union - you<br>
+  have to pick a variant in order to validate it.</li>
+</ul>
+</li>
+<li>
+<p><code>impl GuestPtrMut&lt;'a, T&gt; { pub fn write(&amp;self, T) }</code> writes a <code>T: GuestValue</code><br>
+   into the memory it references.</p>
+</li>
+<li>
+<p>The <code>T: GuestValue</code> for a witx enum should be the host <code>enum $Typename</code>. The<br>
+<code>GuestValue</code> impl will be used to validate and decode memory into this<br>
+  owned type. This decoding can be done inside <code>GuestPtr::read</code>, or on a bare<br>
+  integer of the enum's repr size.</p>
+</li>
+<li>
+<p>The <code>T: GuestValue</code> for a witx flags should be the host <code>struct $Typename</code>.<br>
+  As above, <code>GuestValue</code> does the validation into an owned type.</p>
+</li>
+<li>
+<p>The <code>T: GuestValue</code> for a witx struct has layout defined by witx. The generated<br>
+  struct depends on whether the struct recursively contains any unions, pointers,<br>
+  or arrays:</p>
+<ul>
+<li>
+<p>If it does contain a guest memory reference - lets call these <code>complex
+   GuestValues</code> until I think of a better name, it is a <code>mod guest { struct
+   $Typename }</code>. Rather than have public members, the struct has methods<br>
+   corresponding to each field, with a constructor function to create complex GuestValues.</p>
+<p>* All fields have a<br>
+<code>fn $fieldname_{ref,mut}(&amp;self) -&gt; Result&lt;GuestPtr{Mut}&lt;T&gt;, MemoryError&gt;</code><br>
+    accessor to take references of fields</p>
+<p>* Fields containing flat values are <code>fn $fieldname(&amp;self) -&gt; Result&lt;T, ReprError&gt;</code><br>
+  * Fields which are a (mut) pointer are <code>fn $fieldname(&amp;self) -&gt;
+    Result&lt;GuestPtr{Mut}&lt;’a, T&gt;, MemoryError&gt;</code>. Same for arrays.</p>
+<p>* Fields which are a union are <code>fn $fieldname(&amp;self) -&gt; T</code></p>
+</li>
+<li>
+<p>If it does not - lets call these <code>flat GuestValues</code> - then additionally derive <code>ToOwned</code><br>
+    to be used without ceremony by the host</p>
+</li>
+</ul>
+</li>
+<li>
+<p>The <code>T: GuestValue</code> for a witx union is an opaque struct with a method<br>
+  for each variant: <code>fn $variantname(&amp;self) -&gt; Result&lt;T, ReprError&gt;</code></p>
+</li>
+</ul>
+</li>
+<li>
+<p>Using a value in the Rust implementation of wasi-common. This should be an<br>
+  idiomatic, wholly owned Rust value. It should look like a Rust type: use modules<br>
+  for namespacing instead of repeated prefixes, use <code>CamelCase</code> not<br>
+<code>__SHOUTING_SNAKE_CASE</code>.</p>
+<ul>
+<li>A witx struct should be a rust struct</li>
+<li>A witx union should be a rust enum</li>
+<li>A witx enum should be a rust enum</li>
+<li>
+<p>A witx flags should be a rust <code>struct $Typename { val: repr_type }</code>, and a<br>
+  rust <code>enum $TypenameFlag { flag_variants... }</code>, and Typename should have<br>
+  setter and getter methods in terms of $TypenameFlag.</p>
+</li>
+<li>
+<p>A witx array should be a rust Vec</p>
+</li>
+<li>A witx (const,) pointer should be a <code>Box&lt;T&gt;</code> where <code>T</code> is the owned rust value.</li>
+</ul>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="242904452"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%23734%20%5Bwasi-common%5D%20Re-design%20of%20generate.../near/242904452" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.23734.20.5Bwasi-common.5D.20Re-design.20of.20generate.2E.2E.2E.html#242904452">(Jun 16 2021 at 16:17)</a>:</h4>
+<p>pchickey edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/734#issuecomment-862517300">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/734">issue #734</a>:</p>
+<blockquote>
+<p>wiggle has been done for a while now! its neat to go back and remember the bad old days</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

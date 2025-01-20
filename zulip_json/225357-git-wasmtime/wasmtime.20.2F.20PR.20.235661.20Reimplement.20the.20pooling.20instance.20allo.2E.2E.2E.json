@@ -1,0 +1,170 @@
+[
+    {
+        "content": "<p>alexcrichton opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661\">PR #5661</a> from <code>lru</code> to <code>main</code>:</p>\n<blockquote>\n<p>This commit is a reimplementation of the strategy by which the pooling instance allocator selects a slot for a module. Previously there was a choice amongst three different algorithms: \"reuse affinity\", \"next available\", and \"random\". The default was \"reuse affinity\" but some new data has come to light which shows that this may not always be a good default.</p>\n<p>Notably the pooling allocator will retain some memory per-slot in the pooling instance allocator, for example instance data or memory data if-so-configured. This means that a currently unused, but previously used, slot can contribute to the RSS usage of a program using Wasmtime. Consequently the RSS impact here is O(max slots) which can be counter-intuitive for embedders. This particularly affects \"reuse affinity\" because the algorithm for picking a slot when there are no affine slots is \"pick a random slot\", which means eventually all slots will get used.</p>\n<p>In discussions about possible ways to tackle this, an alternative to \"pick a strategy\" arose and is now implemented in this commit. Concretely the new allocation algorithm for a slot is now:</p>\n<ul>\n<li>First pick the most recently used affine slot, if one exists.</li>\n<li>Otherwise if the number of affine slots to other modules is above some threshold N then pick the least-recently used affine slot.</li>\n<li>Otherwise pick a slot that's affine to nothing.</li>\n</ul>\n<p>The \"N\" in this algorithm is configurable and setting it to 0 is the same as the old \"next available\" strategy while setting it to infinity is the same as the \"reuse affinity\" algorithm. Setting it to something in the middle provides a knob to allow a modest \"cache\" of affine slots while not allowing the total set of slots used to grow too much beyond the maximal concurrent set of modules. The \"random\" strategy is now no longer possible and was removed to help simplify the allocator.</p>\n<p>&lt;!--</p>\n<p>Please ensure that the following steps are all taken care of before submitting<br>\nthe PR.</p>\n<ul>\n<li>\n<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>\n  here.</p>\n</li>\n<li>\n<p>[ ] A short description of what this does, why it is needed; if the<br>\n  description becomes long, the matter should probably be discussed in an issue<br>\n  first.</p>\n</li>\n<li>\n<p>[ ] This PR contains test cases, if meaningful.</p>\n</li>\n<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>\n  If you don't know who could review this, please indicate so. The list of<br>\n  suggested reviewers on the right can help you.</li>\n</ul>\n<p>Please ensure all communication adheres to the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md\">code of\nconduct</a>.<br>\n--&gt;<br>\n</p>\n</blockquote>",
+        "id": 324798975,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675121657
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661\">PR #5661</a> from <code>lru</code> to <code>main</code>.</p>",
+        "id": 324827298,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675141001
+    },
+    {
+        "content": "<p><strong>alexcrichton</strong> requested <a href=\"https://github.com/cfallin\">cfallin</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661\">PR #5661</a>.</p>",
+        "id": 325032728,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675205131
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1278146632\">PR review</a>.</p>",
+        "id": 325037508,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206865
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1278146632\">PR review</a>.</p>",
+        "id": 325037509,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206865
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1092568409\">PR review comment</a>:</p>\n<blockquote>\n<p>This is just the number of slots, right? Might be slightly clearer named as <code>num_slots</code> (otherwise the name could imply that the range of cold indices considered is a subset of the whole range), or maybe <code>max_instances</code> to match the constructor's arg name below.</p>\n</blockquote>",
+        "id": 325037510,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206866
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1092570073\">PR review comment</a>:</p>\n<blockquote>\n<p>Can we name this <code>affine_list_link</code> and the below <code>warm_list_link</code>? Otherwise the names are easy to confuse IMHO (and e.g. <code>unused</code> I would expect to be an unused padding field). <code>warm</code> in <code>warm_list</code> to match <code>Inner::warm</code> above.</p>\n</blockquote>",
+        "id": 325037511,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206866
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1092575437\">PR review comment</a>:</p>\n<blockquote>\n<p>I started off wondering if this should be <code>&lt;=</code> instead, and eventually convinced myself that this is correct, but for a pretty subtle reason that I think should be documented (if it's right).</p>\n<p>My initial uncertainty came because we aren't creating new unused warm slots here (rather, we're creating an <em>used</em> slot, by allocating it). So if our unused-warm count is <em>at</em> the maximum (the <code>=</code> case), we don't violate our promise by taking a new cold slot.</p>\n<p>The subtle bit though is then once this slot is eventually terminated, we're already committed to having a new unused warm slot, unless we actively reclaim down to the limit (which would take more plumbing). So really we're conservatively accounting for that later effect.</p>\n<p>Could we add a (short) comment to this effect?</p>\n</blockquote>",
+        "id": 325037512,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206866
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1092573157\">PR review comment</a>:</p>\n<blockquote>\n<p>Similarly, I had initially thought here that <code>pick_warm</code> should always succeed so the <code>pick_cold</code> should probably be omitted in lieu of a panic (or at least a debug_assert); but this is <em>not</em> true in the case that <code>max_unused_warm_slots</code> is 0 and we're starting out with <code>unused_warm_slots</code> at 0 too. Because <code>&lt;</code> rather than <code>&lt;=</code> (see ablove) we'll come here even though we have no warm slots. So this is correct as written, but we should comment why.</p>\n</blockquote>",
+        "id": 325037513,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206866
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1092577465\">PR review comment</a>:</p>\n<blockquote>\n<p>Can we debug-assert here that <code>unused_warm</code> is correct, since we're collecting the linked list into a <code>Vec</code> anyway?</p>\n</blockquote>",
+        "id": 325037514,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206866
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1092571194\">PR review comment</a>:</p>\n<blockquote>\n<p><code>debug_assert!(max_unused_warm_slots &lt;= max_instances)</code> ?</p>\n</blockquote>",
+        "id": 325037515,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206866
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1092579506\">PR review comment</a>:</p>\n<blockquote>\n<p>Tiny efficiency tweak, but should we monomorphize here rather than take a fn ptr? It's a small function and potentially hot in high-allocation scenarios...</p>\n</blockquote>",
+        "id": 325037516,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675206866
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1279333421\">PR review</a>.</p>",
+        "id": 325187347,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675264922
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1093371524\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah good point! This can actually be removed entirely in favor of just looking at the length of <code>slot_state</code></p>\n</blockquote>",
+        "id": 325187348,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675264922
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1279348915\">PR review</a>.</p>",
+        "id": 325189717,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675265394
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1093382479\">PR review comment</a>:</p>\n<blockquote>\n<p>Adding this assertion would require adding validation to the <code>PoolingAllocatorConfig</code> in <code>wasmtime</code> as well to provide a better error message than tripping the assertion. Thinking about that though I think it may not be worth it since it's not really a problem if <code>max_unused_warm_slots</code> is bigger than the number of slots. It's a bit silly but it can also perhaps be helpful to always pass a large value here to say \"always keep everything warm\"</p>\n</blockquote>",
+        "id": 325189720,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675265394
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1279352879\">PR review</a>.</p>",
+        "id": 325190258,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675265517
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1093385132\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah so full disclosure I didn't think about <code>&lt;</code> or <code>&lt;=</code> at all here. I wrote one down, it passed tests, and I never looked back.</p>\n<p>To be clear though the <code>max_unused_warm_slots</code> isn't a hard contract or anything, it's more of a guideline than anything else. If the max warm slots is set to 5, for example, but you create 10 instances concurrently, then when those 10 instances are deallocated there will be 10 warm slots.</p>\n<p>In that sense I don't think that the <code>&lt;</code> or <code>&lt;=</code> really matters here since off-by-one is expected to happen naturally when the concurrency limit goes high.</p>\n</blockquote>",
+        "id": 325190263,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675265518
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1279360623\">PR review</a>.</p>",
+        "id": 325191125,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675265753
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1093390360\">PR review comment</a>:</p>\n<blockquote>\n<p>Personally I think we should defer to a future profiler, if necessary. My guess is that LLVM is already devirtualizing, and if not the mutex lock/unlock is likely much more expensive.</p>\n<p>In general Rust, I personally think, doesn't rely enough on devirtualization and relies much too heavily on monomorphization, leading to numerous compile time issues.</p>\n</blockquote>",
+        "id": 325191127,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675265753
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661\">PR #5661</a> from <code>lru</code> to <code>main</code>.</p>",
+        "id": 325191719,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675265883
+    },
+    {
+        "content": "<p><strong>alexcrichton</strong> requested <a href=\"https://github.com/cfallin\">cfallin</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661\">PR #5661</a>.</p>",
+        "id": 325211050,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675270763
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1279571678\">PR review</a>.</p>",
+        "id": 325223752,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675272771
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1093533668\">PR review comment</a>:</p>\n<blockquote>\n<p>Yep, that's fine!</p>\n</blockquote>",
+        "id": 325223755,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675272771
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1279573911\">PR review</a>.</p>",
+        "id": 325224097,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675272860
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#discussion_r1093535125\">PR review comment</a>:</p>\n<blockquote>\n<p>Yeah, that's a good point, we don't do reclamation so it's really heuristic rather than a true invariant. Seems fine then.</p>\n</blockquote>",
+        "id": 325224099,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675272860
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661#pullrequestreview-1279574690\">PR review</a>.</p>",
+        "id": 325224188,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675272885
+    },
+    {
+        "content": "<p>alexcrichton merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/5661\">PR #5661</a>.</p>",
+        "id": 325226267,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1675273434
+    }
+]

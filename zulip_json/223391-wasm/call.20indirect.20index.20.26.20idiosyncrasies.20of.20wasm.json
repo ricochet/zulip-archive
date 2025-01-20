@@ -1,0 +1,104 @@
+[
+    {
+        "content": "<p>Hi, i am new here and hope this is the correct stream for this. I am trying to understand, where <code>call_indirect</code>'s come from and i want to determine the call indirect index for a static analysis call graph generator.<br>\nWhy are there so many in Rust? Even if you compile this simple code snippet:</p>\n<div class=\"codehilite\" data-code-language=\"Bash\"><pre><span></span><code>fn<span class=\"w\"> </span>main<span class=\"o\">()</span><span class=\"w\"> </span><span class=\"o\">{</span><span class=\"w\"> </span><span class=\"nb\">let</span><span class=\"w\"> </span><span class=\"nv\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"m\">123</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"o\">}</span>\n</code></pre></div>\n<p>to WebAssembly you get 76 indirect calls. For a hello world you get over one hundred.<br>\nI analyzed the <a href=\"https://github.com/sola-st/WasmBench\">WasmBench dataset</a> and looked for pattern ahead of a call indirect and it turns out, that there are basically two patterns determining over 87% the index. <br>\nThe first one is the <code>Add Case</code> and the second one the <code>Load Offset Case</code>:<br>\n<a href=\"/user_uploads/15107/ZlsphItJBc6BqR0R79dH24RV/add.png\">add.png</a><br>\n<a href=\"/user_uploads/15107/6pm8o6XYbZ97RJwoLGjlNyWR/load-offset.png\">load-offset.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/ZlsphItJBc6BqR0R79dH24RV/add.png\" title=\"add.png\"><img src=\"/user_uploads/15107/ZlsphItJBc6BqR0R79dH24RV/add.png\"></a></div><div class=\"message_inline_image\"><a href=\"/user_uploads/15107/6pm8o6XYbZ97RJwoLGjlNyWR/load-offset.png\" title=\"load-offset.png\"><img src=\"/user_uploads/15107/6pm8o6XYbZ97RJwoLGjlNyWR/load-offset.png\"></a></div><p>The interesting part is that the <code>Add Case</code> has a bitwise AND and only the last instruction differs, which is either a <code>load/load offset</code> or a <code>local.get</code>(they sum up to 99.78% of this pattern). And the <code>Load Offset Case</code>is just a mixture of <code>load/load offset</code> and the <code>local.get</code> instruction.</p>\n<p>So to predict the index, i would have the read from the memory and get a local variable(which could also be a function parameter). I build the memory from the data segments with <a href=\"https://docs.rs/walrus/latest/walrus/\">Walrus</a> assuming that the memory holding the value doesn't change - but encountered, that the assumption is wrong - since i've found that in a file we read from a different offset and call a different function type, but with the same \"self read from memory index\" 0, which is a violation to the language, as the table only holds one function under each index with a fixed type.<br>\nThis leads me to the question, why does WebAssembly take the indirection over the memory?</p>\n<p>Another idiosyncrasie i found, was when looking at the metadata file containing the source languages/compilers of each file. I did this, because i thought there must be correlation between the compiler and the occurrence of these two cases.</p>\n<div class=\"codehilite\" data-code-language=\"Bash\"><pre><span></span><code>Case:<span class=\"w\"> </span>C++<span class=\"w\"> </span>-<span class=\"w\"> </span>Rust\nAdd:<span class=\"w\">   </span><span class=\"m\">540</span><span class=\"w\"> </span>-<span class=\"w\"> </span><span class=\"m\">46</span>\nLoad:<span class=\"w\"> </span><span class=\"m\">305</span><span class=\"w\"> </span>-<span class=\"w\"> </span><span class=\"m\">1118</span>\n\nFiles<span class=\"w\"> </span>from<span class=\"w\"> </span>C++:<span class=\"w\"> </span><span class=\"m\">4047</span>\nFiles<span class=\"w\"> </span>from<span class=\"w\"> </span>Rust:<span class=\"w\"> </span><span class=\"m\">1261</span>\nFiles<span class=\"w\"> </span>with<span class=\"w\"> </span>both<span class=\"w\"> </span>cases:<span class=\"w\"> </span><span class=\"m\">0</span>\n</code></pre></div>\n<p>The interesting thing is, that i never found a file, which contained both cases. It seems like once the compiler decides to use either the <code>Add Case</code> or the <code>Load Offset Case</code> it sticks to it.<br>\nAnother obscure thing is, that there are often empty function declarations as the first local function in WebAssembly - since they do not have any function body, they can't do anything <code>(func (;;1;;) (type 1: [], [])</code>. </p>\n<p>So hopefully you can help me with my questions:</p>\n<ol>\n<li>Why are there so many indirect calls in even the simplest Rust code?</li>\n<li>Where do these indirect calls come from, when does the compiler decide to use one?</li>\n<li>Why does WebAssembly use the indirection over the memory determining the index?</li>\n</ol>\n<hr>\n<p>Not so relevant, but still interesting questions:</p>\n<ol start=\"4\">\n<li>Why are there never both cases in a file?</li>\n<li>Why is there often an empty function as the first local function?</li>\n<li>Why is the a bitwise AND instruction in the Add Case, if we are working on an integer, which is the index of a table?</li>\n</ol>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/sola-st/WasmBench\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/a6bd9343c6437d66341888ce32dc5d388c59c8ed\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f356566333339663361326638633930376230373537653761386338316230333962663436366335623639316438653239333133613566336630623039616631382f736f6c612d73742f5761736d42656e6368)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/sola-st/WasmBench\" title=\"GitHub - sola-st/WasmBench: A large dataset of real-world WebAssembly binaries, collected from the Web, GitHub, NPM and other sources. Useful as test data, to study WebAssembly, for training machine learning models, and much more.\">GitHub - sola-st/WasmBench: A large dataset of real-world WebAssembly binaries, collected from the Web, GitHub, NPM and other sources. Useful as test data, to study WebAssembly, for training machine learning models, and much more.</a></div><div class=\"message_embed_description\">A large dataset of real-world WebAssembly binaries, collected from the Web, GitHub, NPM and other sources. Useful as test data, to study WebAssembly, for training machine learning models, and much ...</div></div></div>",
+        "id": 405119373,
+        "sender_full_name": "Jannik Schütz",
+        "timestamp": 1701351526
+    },
+    {
+        "content": "<blockquote>\n<p>Why are there so many indirect calls in even the simplest Rust code?</p>\n</blockquote>\n<p>This is more-or-less answered \"the rust standard library\". There's code that runs before <code>main</code>, so your function isn't literally the only one in the program, and this supporting code does indirect calls.</p>\n<blockquote>\n<p>Where do these indirect calls come from, when does the compiler decide to use one?</p>\n</blockquote>\n<p>The answer to this is an indirect function call. Think calling through a function pointer in Rust or C/C++.</p>\n<blockquote>\n<p>Why does WebAssembly use the indirection over the memory determining the index?</p>\n</blockquote>\n<p>WebAssembly functions are stored in a \"table\" which cannot be modified by Rust/C/C++ at this time (or at least wasn't modifiable historically, Clang may have niche intrinsics nowadays). This means that function \"pointers\" are actually indices into this table (as represented in these languages). The function pointer is frequently stored in memory since that's how the program stored it.</p>",
+        "id": 405146252,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701359499
+    },
+    {
+        "content": "<blockquote>\n<p>Why are there never both cases in a file?</p>\n</blockquote>\n<p>Unsure! Might just be idiomatic differences between languages.</p>\n<blockquote>\n<p>Why is there often an empty function as the first local function?</p>\n</blockquote>\n<p>Table index 0 is intended to be empty, or the equivalent of <code>ref.null func</code>. This is so if you happen to call the \"null pointer\", which in this case is table index 0, then you'll get a trap which is similar to a segfault on native platforms.</p>\n<blockquote>\n<p>Why is the a bitwise AND instruction in the Add Case, if we are working on an integer, which is the index of a table?</p>\n</blockquote>\n<p>I'm not sure myself.</p>",
+        "id": 405146841,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701359671
+    },
+    {
+        "content": "<p>Hi Alex,</p>\n<p>thank you so far, for your answers. I want to dig deeper and i hope you can help me.<br>\nCan you give me a link to the code, where the call_indirects are produced by the compiler?</p>\n<p>Thank you in advance</p>",
+        "id": 405844991,
+        "sender_full_name": "Jannik Schütz",
+        "timestamp": 1701702590
+    },
+    {
+        "content": "<p>Ah sorry I dont know where they're produced in LLVM</p>",
+        "id": 405848077,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701703403
+    },
+    {
+        "content": "<blockquote>\n<blockquote>\n<p>Why is there often an empty function as the first local function?</p>\n</blockquote>\n<p>Table index 0 is intended to be empty, or the equivalent of <code>ref.null func</code>. This is so if you happen to call the \"null pointer\", which in this case is table index 0, then you'll get a trap which is similar to a segfault on native platforms.</p>\n</blockquote>\n<p>As there is currently only one table at most allowed in WA, that can only hold <code>funcref</code>s i thought, that the table is the function table, used for the <code>call_indirect</code>s, to determine which function is called.<br>\nHow is this table build? I thought it was simply first all the imported functions starting at index 0 and then the local functions? But this doesn't work out with the <code>elem</code>statements - do these come before or after the imports? Are all functions of the module in this function table? Or is it rather, that the function table only contains <code>call_indirect</code> related functions (so a limited set of all functions in the module)? For example only the functions set with an active elem declaration. </p>\n<blockquote>\n<blockquote>\n<p>Why does WebAssembly use the indirection over the memory determining the index?</p>\n</blockquote>\n<p>WebAssembly functions are stored in a \"table\" which cannot be modified by Rust/C/C++ at this time (or at least wasn't modifiable historically, Clang may have niche intrinsics nowadays). This means that function \"pointers\" are actually indices into this table (as represented in these languages). The function pointer is frequently stored in memory since that's how the program stored it.</p>\n</blockquote>\n<p>Why do they use the memory to store pointer, rather than the stack? Isn't this causing a lot of overhead (reading and writing from and to the memory)?</p>\n<blockquote>\n<blockquote>\n<p>Why are there so many indirect calls in even the simplest Rust code?</p>\n</blockquote>\n<p>This is more-or-less answered \"the rust standard library\". There's code that runs before <code>main</code>, so your function isn't literally the only one in the program, and this supporting code does indirect calls.</p>\n</blockquote>\n<p>Yes, nice - i compiled <code>main() { let a=123; }</code> to WebAssembly and received 76 call_indirects. Compiling the same example with <code>#[no_std] #[no_main]</code>gives us zero call_indirects <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 406292501,
+        "sender_full_name": "Jannik Schütz",
+        "timestamp": 1701864904
+    },
+    {
+        "content": "<p>Presumably function pointers <em>are</em> sometimes stored in on the stack.  But also sometimes in memory, e.g.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">bar</span><span class=\"p\">(</span><span class=\"n\">x</span>: <span class=\"kt\">u32</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">u32</span> <span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"p\">}</span>\n<span class=\"k\">struct</span> <span class=\"nc\">Foo</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">  </span><span class=\"n\">ptr</span>: <span class=\"nc\">fn</span><span class=\"p\">(</span><span class=\"kt\">u32</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">u32</span><span class=\"p\">,</span>\n<span class=\"p\">}</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"nb\">Box</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">Foo</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">ptr</span>: <span class=\"nc\">bar</span><span class=\"w\"> </span><span class=\"p\">});</span>\n</code></pre></div>",
+        "id": 406321188,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701874075
+    },
+    {
+        "content": "<p>Rust function pointers are lowered to indexes into the wasm table with function referenced.</p>",
+        "id": 406331981,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1701877097
+    },
+    {
+        "content": "<p>You can't directly store a funcref in the linear memory.</p>",
+        "id": 406332053,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1701877115
+    },
+    {
+        "content": "<p>Note that the emulated stack is stored in the linear memory next to the heap and global variables.</p>",
+        "id": 406332231,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1701877170
+    },
+    {
+        "content": "<p>right, but you can store the table index in linear memory, which is what the code above illustrates.</p>",
+        "id": 406332266,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701877180
+    },
+    {
+        "content": "<p>Indeed</p>",
+        "id": 406332431,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1701877213
+    },
+    {
+        "content": "<p>and as long as you don't take the address of that index, you can put it on the actual wasm stack</p>",
+        "id": 406332444,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701877216
+    },
+    {
+        "content": "<p>(I assume)</p>",
+        "id": 406332548,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701877245
+    },
+    {
+        "content": "<p>That is correct.</p>",
+        "id": 406332647,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1701877273
+    },
+    {
+        "content": "<p>Ok, thank you. And how is the table build? Are all functions of the module in this function table? Or is it rather, that the function table only contains a subset of functions, which are loaded via <code>elem</code> segments into the table?</p>",
+        "id": 406956942,
+        "sender_full_name": "Jannik Schütz",
+        "timestamp": 1702142378
+    },
+    {
+        "content": "<p>The wasm file contains the list of things to put in the table. I believe wasm-ld by default only puts functions that actually get turned into a function pointer there, not every function in existence.</p>",
+        "id": 407030235,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1702199666
+    }
+]

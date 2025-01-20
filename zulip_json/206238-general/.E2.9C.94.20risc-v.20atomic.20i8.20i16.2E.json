@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>if a target didn't support <code>i8</code> or <code>i16</code> is that ok to use <code>i32</code> instructions .<br>\nI mean if you use <code>sc.w</code>to implement <code>i8</code> store operation, you may overwrite some data.<br>\n<a href=\"https://msyksphinz-self.github.io/riscv-isadoc/html/rva.html#sc-w\">https://msyksphinz-self.github.io/riscv-isadoc/html/rva.html#sc-w</a></p>",
+        "id": 294604135,
+        "sender_full_name": "yang yu",
+        "timestamp": 1661143318
+    },
+    {
+        "content": "<p>If you do lr.w and then sc.w on the same address, with the bytes that need to stay the same unchanged, then there will be no overwite with a different value than the correct one as the sc.w would fail if another thread overwrites the other bytes.</p>",
+        "id": 294614649,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1661150776
+    },
+    {
+        "content": "<p>At least that is how I understand it. You can always look at what LLVM does.</p>",
+        "id": 294614699,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1661150807
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span>  my main concern is if only alloc 2 bytes for i16 , I do <code>sc.w</code> may overwirte arbitrary data.</p>",
+        "id": 294639369,
+        "sender_full_name": "yang yu",
+        "timestamp": 1661161437
+    },
+    {
+        "content": "<p>This is how LLVM codegens it: <a href=\"https://rust.godbolt.org/z/hb8s9EWYT\">https://rust.godbolt.org/z/hb8s9EWYT</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://rust.godbolt.org/z/hb8s9EWYT\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/4bf336f7597f851df0732b12f8d4b7b383508ec8\\/68747470733a2f2f6769746875622e636f6d2f636f6d70696c65722d6578706c6f7265722f696e6672612f626c6f622f6d61696e2f6c6f676f2f66617669636f6e2e706e673f7261773d74727565)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://rust.godbolt.org/z/hb8s9EWYT\" title=\"Compiler Explorer - Rust (rustc 1.63.0)\">Compiler Explorer - Rust (rustc 1.63.0)</a></div><div class=\"message_embed_description\">use std::sync::atomic::*;\n\npub fn foo(a: &amp;AtomicU8) {\n    a.fetch_add(1, Ordering::SeqCst);\n}\n</div></div></div>",
+        "id": 294640156,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1661161766
+    },
+    {
+        "content": "<p>As long as you preserve the top two bytes and then re-write them, it should work out. Here's what llvm does: <a href=\"https://godbolt.org/z/eW8Gv115o\">https://godbolt.org/z/eW8Gv115o</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://godbolt.org/z/eW8Gv115o\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/4bf336f7597f851df0732b12f8d4b7b383508ec8\\/68747470733a2f2f6769746875622e636f6d2f636f6d70696c65722d6578706c6f7265722f696e6672612f626c6f622f6d61696e2f6c6f676f2f66617669636f6e2e706e673f7261773d74727565)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://godbolt.org/z/eW8Gv115o\" title=\"Compiler Explorer - Rust (rustc 1.63.0)\">Compiler Explorer - Rust (rustc 1.63.0)</a></div><div class=\"message_embed_description\">use std::sync::atomic::{AtomicU16, Ordering};\n\npub fn square(num: u16) -&gt; u16 {\n\n    let mut a = AtomicU16::new(42);\n    a.fetch_add(num, Ordering::SeqCst);\n    a.load(Ordering::SeqCst)\n}</div></div></div>",
+        "id": 294640163,
+        "sender_full_name": "Afonso Bordado",
+        "timestamp": 1661161768
+    },
+    {
+        "content": "<p>I think LLVM also does some trickery to exactly align the load and store to a 32bit boundary as necessary for performance (unaligned atomics may need to be emulated by machine mode) and correctness (oversized memory accesses may cause erroneous page faults if the memory are at the end of a page) reasons.</p>",
+        "id": 294640613,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1661161928
+    },
+    {
+        "content": "<p>This is the actual code in LLVM that does the atomic rmw handling: <a href=\"https://github.com/llvm/llvm-project/blob/ce381281940fb6a9cc2fa1a16fa36bf0911f43f1/llvm/lib/Target/RISCV/RISCVExpandAtomicPseudoInsts.cpp#L341\">https://github.com/llvm/llvm-project/blob/ce381281940fb6a9cc2fa1a16fa36bf0911f43f1/llvm/lib/Target/RISCV/RISCVExpandAtomicPseudoInsts.cpp#L341</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/llvm/llvm-project/blob/ce381281940fb6a9cc2fa1a16fa36bf0911f43f1/llvm/lib/Target/RISCV/RISCVExpandAtomicPseudoInsts.cpp#L341\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/3341760b9ee7859811d8f4e2f2df32608e6e3970\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f343431663761373834663861393038303866623936383238663636383565353033363435636434333630633162363065663439643237666335316336653535322f6c6c766d2f6c6c766d2d70726f6a656374)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/llvm/llvm-project/blob/ce381281940fb6a9cc2fa1a16fa36bf0911f43f1/llvm/lib/Target/RISCV/RISCVExpandAtomicPseudoInsts.cpp#L341\" title=\"llvm-project/RISCVExpandAtomicPseudoInsts.cpp at ce381281940fb6a9cc2fa1a16fa36bf0911f43f1 · llvm/llvm-project\">llvm-project/RISCVExpandAtomicPseudoInsts.cpp at ce381281940fb6a9cc2fa1a16fa36bf0911f43f1 · llvm/llvm-project</a></div><div class=\"message_embed_description\">The LLVM Project is a collection of modular and reusable compiler and toolchain technologies. Note: the repository does not accept github pull requests at this moment. Please submit your patches at...</div></div></div>",
+        "id": 294641271,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1661162211
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"264278\">@bjorn3</span>  thanks.</p>",
+        "id": 294641405,
+        "sender_full_name": "yang yu",
+        "timestamp": 1661162270
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"466261\">yang yu</span> has marked this topic as resolved.</p>",
+        "id": 294814970,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1661239024
+    }
+]

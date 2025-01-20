@@ -1,0 +1,116 @@
+<html>
+<head><meta charset="utf-8"><title>Calling functions without a safepoint · cranelift · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/index.html">cranelift</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Calling.20functions.20without.20a.20safepoint.html">Calling functions without a safepoint</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="232740178"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Calling%20functions%20without%20a%20safepoint/near/232740178" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Will Robson <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Calling.20functions.20without.20a.20safepoint.html#232740178">(Apr 01 2021 at 11:17)</a>:</h4>
+<p>For my OCaml bytecode JIT I'm using the stackmap support for its GC. It works well but is overly conservative because it inserts a safepoint at every call. For things like the GC write barrier (part of the runtime in C) which gets called fairly often this can slow things down as it tends to spill and restore. The GC will only run during allocations which means a lot of the primitives from the runtime don't need to spill and emit a stackmap but currently do. Inlining the write barrier wouldn't work as it just pushes the issue down to the functions used in the write barrier itself.</p>
+<p>I'd like to somehow have a way to do a call without a safepoint and think it would be a useful thing for the project. I am potentially able to do the work myself (although running out of time to give to this project). However, I'm not sure what the best design would be to represent it in the IR:</p>
+<ol>
+<li>Have separate call instructions like <code>call_no_safepoint</code> and <code>call_indirect_no_safepoint</code></li>
+<li>
+<p>Represent it in the signature either by<br>
+  a. Having special calling conventions (messy but less work)<br>
+  b. Adding another metadata field - perhaps could become something more general like the LLVM 'gc strategy'</p>
+</li>
+<li>
+<p>Something else?</p>
+</li>
+</ol>
+<p>For passing this to codegen I think for the old backend it's just a case of extending <code>is_safepoint</code> in <code>inst_predicates.rs</code> but the new backend (which I actually use) looks more involved. As far as I can tell it might be a case of making <code>gen_call</code> return <code>InstIsSafepoint::No</code>for each <code>ABIMachineSpec</code> impl but I haven't looked in to the effects doing this has downstream.</p>
+<p>Which strategy would be best for adding this to the IR? Am I missing any complications in the implementation?</p>
+
+
+
+<a name="232778872"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Calling%20functions%20without%20a%20safepoint/near/232778872" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Fallin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Calling.20functions.20without.20a.20safepoint.html#232778872">(Apr 01 2021 at 15:42)</a>:</h4>
+<p>Greetings <span class="user-mention" data-user-id="398072">@Will Robson</span> -- this is a very good question! You're correct that at the moment we simply decide that all callsites are safepoints; this was driven by the original application (in SpiderMonkey) where there was not a guarantee that a hostcall would not GC, in general.</p>
+<p>I do like the idea of an ABI dimension that is "safepoint call" or "no-safepoint call" (your option 2b); this feels like the cleanest approach. You're correct that this basically means returning a different flag from <code>gen_call</code>; the rest should Just Work. </p>
+<p>I'm happy to review a PR for this if you want to try your hand at it! (I won't be able to get to it for a while otherwise, unfortunately)</p>
+
+
+
+<a name="232828578"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Calling%20functions%20without%20a%20safepoint/near/232828578" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fitzgen (he/him) <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Calling.20functions.20without.20a.20safepoint.html#232828578">(Apr 01 2021 at 21:36)</a>:</h4>
+<p>interesting, do your gc barriers never trigger gc? for something like a generational barrier, usually you would have something like </p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">generational_barrier</span><span class="p">(</span><span class="n">obj</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">remembered_set</span><span class="p">.</span><span class="n">is_full</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">gc</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">remembered_set</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">obj</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="232922429"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Calling%20functions%20without%20a%20safepoint/near/232922429" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Will Robson <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Calling.20functions.20without.20a.20safepoint.html#232922429">(Apr 02 2021 at 16:51)</a>:</h4>
+<p>This is from the existing OCaml GC. I'm not that familiar with how it's implemented (beyond the interface the JIT needs to care about) but this is what it says in the source:</p>
+<div class="codehilite" data-code-language="C"><pre><span></span><code><span class="cm">/* You must use [caml_modify] to change a field of an existing shared block,</span>
+<span class="cm">   unless you are sure the value being overwritten is not a shared block and</span>
+<span class="cm">   the value being written is not a young block. */</span>
+<span class="cm">/* [caml_modify] never calls the GC. */</span>
+<span class="cm">/* [caml_modify] can also be used to do assignment on data structures that are</span>
+<span class="cm">   in the minor heap instead of in the major heap.  In this case, it</span>
+<span class="cm">   is a bit slower than simple assignment.</span>
+<span class="cm">   In particular, you can use [caml_modify] when you don't know whether the</span>
+<span class="cm">   block being changed is in the minor heap or the major heap. */</span>
+<span class="cm">/* PR#6084 workaround: define it as a weak symbol */</span>
+
+<span class="n">CAMLexport</span> <span class="n">CAMLweakdef</span> <span class="kt">void</span> <span class="n">caml_modify</span> <span class="p">(</span><span class="n">value</span> <span class="o">*</span><span class="n">fp</span><span class="p">,</span> <span class="n">value</span> <span class="n">val</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="cm">/* The write barrier implemented by [caml_modify] checks for the</span>
+<span class="cm">     following two conditions and takes appropriate action:</span>
+<span class="cm">     1- a pointer from the major heap to the minor heap is created</span>
+<span class="cm">        --&gt; add [fp] to the remembered set</span>
+<span class="cm">     2- a pointer from the major heap to the major heap is overwritten,</span>
+<span class="cm">        while the GC is in the marking phase</span>
+<span class="cm">        --&gt; call [caml_darken] on the overwritten pointer so that the</span>
+<span class="cm">            major GC treats it as an additional root.</span>
+</code></pre></div>
+<p>Allocation in the minor heap is a simple pointer bump unless there's not enough space. This is almost the only condition causing the GC to trigger. I think the basic heuristic is as it's a functional language where you're creating new values all the time rather than mutating, most things in the minor heap are garbage. Most GC stop-the-worlds just touch the minor heap.</p>
+
+
+
+<a name="232922721"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217117-cranelift/topic/Calling%20functions%20without%20a%20safepoint/near/232922721" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Will Robson <a href="https://bytecodealliance.github.io/zulip-archive/stream/217117-cranelift/topic/Calling.20functions.20without.20a.20safepoint.html#232922721">(Apr 02 2021 at 16:53)</a>:</h4>
+<p>this is the actual implementation:</p>
+<div class="codehilite" data-code-language="C"><pre><span></span><code>  <span class="n">value</span> <span class="n">old</span><span class="p">;</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">Is_young</span><span class="p">((</span><span class="n">value</span><span class="p">)</span><span class="n">fp</span><span class="p">))</span> <span class="p">{</span>
+    <span class="cm">/* The modified object resides in the minor heap.</span>
+<span class="cm">       Conditions 1 and 2 cannot occur. */</span>
+    <span class="o">*</span><span class="n">fp</span> <span class="o">=</span> <span class="n">val</span><span class="p">;</span>
+  <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+    <span class="cm">/* The modified object resides in the major heap. */</span>
+    <span class="n">CAMLassert</span><span class="p">(</span><span class="n">Is_in_heap</span><span class="p">(</span><span class="n">fp</span><span class="p">));</span>
+    <span class="n">old</span> <span class="o">=</span> <span class="o">*</span><span class="n">fp</span><span class="p">;</span>
+    <span class="o">*</span><span class="n">fp</span> <span class="o">=</span> <span class="n">val</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Is_block</span><span class="p">(</span><span class="n">old</span><span class="p">))</span> <span class="p">{</span>
+      <span class="cm">/* If [old] is a pointer within the minor heap, we already</span>
+<span class="cm">         have a major-&gt;minor pointer and [fp] is already in the</span>
+<span class="cm">         remembered set.  Conditions 1 and 2 cannot occur. */</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">Is_young</span><span class="p">(</span><span class="n">old</span><span class="p">))</span> <span class="k">return</span><span class="p">;</span>
+      <span class="cm">/* Here, [old] can be a pointer within the major heap.</span>
+<span class="cm">         Check for condition 2. */</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">caml_gc_phase</span> <span class="o">==</span> <span class="n">Phase_mark</span><span class="p">)</span> <span class="n">caml_darken</span><span class="p">(</span><span class="n">old</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="cm">/* Check for condition 1. */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Is_block</span><span class="p">(</span><span class="n">val</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">Is_young</span><span class="p">(</span><span class="n">val</span><span class="p">))</span> <span class="p">{</span>
+      <span class="n">add_to_ref_table</span> <span class="p">(</span><span class="n">Caml_state</span><span class="o">-&gt;</span><span class="n">ref_table</span><span class="p">,</span> <span class="n">fp</span><span class="p">);</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+</code></pre></div>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

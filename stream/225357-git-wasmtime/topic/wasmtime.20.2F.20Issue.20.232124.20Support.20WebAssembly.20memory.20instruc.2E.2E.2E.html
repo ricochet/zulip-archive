@@ -1,0 +1,382 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / Issue #2124 Support WebAssembly memory instruc... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html">wasmtime / Issue #2124 Support WebAssembly memory instruc...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="206493572"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/206493572" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#206493572">(Aug 10 2020 at 18:13)</a>:</h4>
+<p>uweigand opened <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>&lt;!-- Please try to describe precisely what you would like to do in<br>
+Cranelift/Wasmtime and/or expect from it. You can answer the questions below if<br>
+they're relevant and delete this text before submitting. Thanks for opening an<br>
+issue! --&gt;</p>
+<h4>Feature</h4>
+<p>&lt;!-- What is the feature or code improvement you would like to do in<br>
+Cranelift/Wasmtime? --&gt;<br>
+Current wasmtime maps the WebAssembly memory instructions (t.load, t.store etc.) directly to Cranelift IR memory instructions (load, store, uloadN, etc.).</p>
+<p>This causes problems on big-endian platforms, because the Cranelift IR instruction are implemented as native load and store instructions using the machine byte order, while the WebAssembly memory instructions are specified to use little-endian byte order always.</p>
+<p>Now, I initially thought that one way to solve this problem could be to treat Cranelift IR memory instructions also as always little-endian by specification.  However, that does not work, because there are many other uses of these instructions that do require native byte order.</p>
+<p>Some examples of those include:</p>
+<ul>
+<li>
+<p>Memory accesses added by platform ABI code (implicit pointers for argument or return values), in particular if this needs to be compatible with native code.</p>
+</li>
+<li>
+<p>Memory accesses to values prepared by trampoline code at the boundaries of VM native code and JITted code.</p>
+</li>
+<li>
+<p>Memory accesses to parts of the VMContext that is also accessed by VM native code.</p>
+</li>
+</ul>
+<p>In addition, there are cases where -while not strictly necessary for correctness- it is preferable for performance reasons to use native byte order, e.g. for spill code, for accessing variables on the stack, when implementing code such as inlined copies for small memcpy etc.</p>
+<p>So, I believe we need some way of representing <em>both</em> always-little-endian memory operations (used to translate<br>
+the WebAssembly instructions), and native memory operation (used for everything else).</p>
+<h4>Benefit</h4>
+<p>&lt;!-- What is the value of adding this in Cranelift/Wasmtime? --&gt;</p>
+<p>Enabling support for Wasmtime on big-endian platforms like IBM Z.</p>
+<h4>Implementation</h4>
+<p>&lt;!-- Do you have an implementation plan, and/or ideas for data structures or<br>
+algorithms to use? --&gt;<br>
+My current implementation of this approach simply duplicates all Cranelift IR memory instructions to create always-LE versions.  So in addition to "load" there is "load_le" etc. The full list is:<br>
+  load_le<br>
+  load_le_complex<br>
+  store_le<br>
+  store_le_complex<br>
+  uload16_le<br>
+  uload16_le_complex<br>
+  sload16_le<br>
+  sload16_le_complex<br>
+  istore16_le<br>
+  istore16_le_complex<br>
+  uload32_le<br>
+  uload32_le_complex<br>
+  sload32_le<br>
+  sload32_le_complex<br>
+  istore32_le<br>
+  istore32_le_complex</p>
+<p>Advantages of this approach include:</p>
+<ul>
+<li>Most code that creates load/store instructions can remain unchanged, the WebAssembly translator simply always uses the new instructions.</li>
+<li>It's already implemented and working :-)</li>
+</ul>
+<p>But there are disadvantages:</p>
+<ul>
+<li>All back-ends must implement all the new instructions (usually by   just mapping them back to normal loads/stores), or else the target will stop working.</li>
+<li>Middle-end code changes operating on loads/stores (e.g. the code that recognizes and creates _complex operations) should be adapted or else we can get performance regressions.</li>
+</ul>
+<h4>Alternatives</h4>
+<p>&lt;!-- Have you considered alternative implementations? If so, how are they<br>
+better or worse than your proposal? --&gt;<br>
+There's various alternative ways this could be implemented:</p>
+<p>A) Add an additional flag argument to load/store instructions that<br>
+specifies the requested byte order.  A detail question is whether the flag is<br>
+  little-endian vs. native<br>
+  little-endian vs. big-endian<br>
+  little-endian vs. big-endian vs. native</p>
+<p>Advantages:</p>
+<ul>
+<li>no new IR instructions required</li>
+<li>existing back-ends could simply ignore the flag</li>
+</ul>
+<p>Disadvantages:</p>
+<ul>
+<li>it's still an IR change as that flag must be considered part of the IR (e.g. parsing IR, serialization ...)</li>
+<li>All creators of loads/stores (including outside of cranelift, and possibly even outside of wasmtime!) must be updated.  If there is no "native" flag setting, all those updates must include finding out the native byte order somehow.</li>
+</ul>
+<p>B) Add an additional flag bit to the existing MemFlags<br>
+Advantages:</p>
+<ul>
+<li>no new IR (should be covered by existing serialization ...)</li>
+<li>can be ignored by existing back-ends</li>
+<li>no change to (most) creators of loads/stores necessary</li>
+</ul>
+<p>Disadvantages:</p>
+<ul>
+<li>MemFlags can no longer be dropped, it becomes required for correctness to always preserve in in the middle end</li>
+</ul>
+<p>C) Open-code the conversion in the WebAssembly translator<br>
+Only emit a plain "load" if the target is little-endian.  Otherwise emit a load followed by a byte-swap (possibly followed by an extension). Vice-versa for stores.  This would probably require addition of a new "bswap" Cranelift IR instruction, unless we want to open-code bswap itself as well (possible, but a bit tedious).</p>
+<p>Advantages:</p>
+<ul>
+<li>Only "bswap" as new IR element, can be ignored by back-ends for little-endian architectures and everywhere else.</li>
+</ul>
+<p>Disadvantages:</p>
+<ul>
+<li>No major ones  I can see - this would be my preferred approach.</li>
+</ul>
+</blockquote>
+
+
+
+<a name="206493749"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/206493749" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#206493749">(Aug 10 2020 at 18:15)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-671509288">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>@cfallin @julian-seward1 - opened issue as discussed in our call today.</p>
+</blockquote>
+
+
+
+<a name="216112316"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/216112316" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#216112316">(Nov 09 2020 at 16:55)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-724139759">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>See the PR I just posted.   This is not necessarily ready to go in as-is, it is intended to showcase a possible implementation.</p>
+<p>The PR implements a variant of method (C) above, where I'm creating just two new Cranelift IR opcodes, LoadRev and StoreRev - load reverse and store reverse.  (These map directly to instructions IBM Z has, and a number of other platforms have as well.)</p>
+<p>Note that there are no extending load / truncating store versions of those (I'm not aware of any ISA that directly has them, and in any case any new back-end could just match the combination if necessary).   Likewise, there are no _complex versions, those are no longer really used with new back-end anyway.</p>
+</blockquote>
+
+
+
+<a name="218318845"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/218318845" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#218318845">(Nov 30 2020 at 17:34)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-735932166">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>Thanks for exploring the design space and laying out our choices @uweigand.</p>
+<p>I would personally be in favor of alternative A. I think having clif's semantics defined irrespective of the current target is valuable and will make hacking on the compiler easier.</p>
+<p>(I think B is also a strong contender, but A will be easier from an engineering perspective, since we can leverage compiler errors to automatically tell us exactly which code needs updates, rather than manually hunting down places where mem flags are silently dropped and/or created with defaults.)</p>
+<p>Although I don't strongly hold this opinion, I'm leaning towards only discriminating between big and little endian, not including a native endian option.</p>
+<blockquote>
+<p>If there is no "native" flag setting, all those updates must include finding out the native byte order somehow.</p>
+</blockquote>
+<p>We can expose the target's endianness relatively easily, since our <code>target-lexicon</code> crate already has this information, and the <code>cranelift-frontend</code> builders can implement a load-with-native-endian builder method.</p>
+<p><a href="https://docs.rs/target-lexicon/0.11.1/target_lexicon/enum.Endianness.html">https://docs.rs/target-lexicon/0.11.1/target_lexicon/enum.Endianness.html</a></p>
+</blockquote>
+
+
+
+<a name="218321440"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/218321440" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#218321440">(Nov 30 2020 at 17:54)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-735943287">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>+1 to the combination of two choices:</p>
+<ul>
+<li>Only "big endian" and "little endian" as choices (no "native");</li>
+<li>Make the <em>current</em> load-instruction builders choose the target's native endian.</li>
+</ul>
+<p>In other words we want existing users of the builder API to continue to see the same semantics, and new builder methods can take an <code>Endianness</code>. Removing the "native" option at the CLIF level fully closes the target-specific semantics hole, which is nice!</p>
+</blockquote>
+
+
+
+<a name="218546500"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/218546500" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#218546500">(Dec 02 2020 at 11:59)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-737185743">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>I've made an initial attempt at implementing something along those lines here: <a href="https://github.com/uweigand/wasmtime/pull/1">https://github.com/uweigand/wasmtime/pull/1</a></p>
+<p>Note that this is currently not ready to even attempt merging upstream, in particular because the addition of the extra endianness member to various clif instructions makes the InstructionData structure exceed its target size of 16 bytes.</p>
+<p>So either we find some way to encode InstructionData more efficiently (but that would need advice from somebody much more familiar with Rust than I am ...), we accept the (significantly) memory consumption, or else we go back and try something else.</p>
+<p>However, adding the explicit endianness member also makes the code more verbose, if you look at the patch above you'll see a large number of mostly "boilerplate" changes.   As an aside, I have not been able to implement this suggestion:</p>
+<blockquote>
+<p>Make the current load-instruction builders choose the target's native endian.</p>
+</blockquote>
+<p>as is (or maybe I misunderstood it).   The builders that are used by most of the code are the ones automatically generated by the "meta" machinery, and not only did I not find an easy way to provide a default value for any member, but the builders don't seem to even have the required information (they don't have access to the TargetIsa or triple or anything else to determine the default target endianness, unless I'm missing something).   That said, changing the callers to provide an explicit endianness (usually retrieved from the TargetIsa) was mostly straightforward.</p>
+<p>As a result of those issues with adding and explicit endianness member, I've been thinking of maybe going back to option B and encoding endianness with the MemFlags.   This solves the InstructionData size problem, and also removes most of the boilerplate code changes.   I was originally sceptically about option B due to the potential issue of introducing errors by accidentally dropping MemFlags during optimizations.   However, I think this problem can be fixed: all builders of load/store instructions already make it mandatory to provide a MemFlags value.  This can be either copied from another instruction, or else created afresh by starting from MemFlags::new() or MemFlags::trusted().  Now, if we simply added a mandatory endianness argument to all such MemFlags constructors, then we could easily enforce that every copy of MemFlags always contains target endianness information, and thus this cannot be silently dropped.</p>
+<p>I'll see if I can come up with another implementation along those lines.</p>
+<p>Finally, I'd appreciate any further comments on the patch above.  In particular, there are some user-visible changes to the textual representation of clif instructions - please let me know if this approach looks good:</p>
+<ul>
+<li>When dumping an instruction for debug purposes, I'm now always including endian information (by adding "little" or "big" to the output, alongside where MemFlags are printed).</li>
+<li>When reading an instruction (e.g. for clif-util testing), the parser will accept "little" or "big" as well.  If neither is present, the endianness will default to the ISA currently in operation (similarly for how register names are parsed); if no ISA is currently in operation, the parser will reject any memory instruction without explicit "little" or "big".  (This happens just once in the existing filetests.)<br>
+</li>
+</ul>
+</blockquote>
+
+
+
+<a name="218603797"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/218603797" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#218603797">(Dec 02 2020 at 19:04)</a>:</h4>
+<p>fitzgen <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-737433078">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<blockquote>
+<p>As a result of those issues with adding and explicit endianness member, I've been thinking of maybe going back to option B and encoding endianness with the MemFlags. This solves the InstructionData size problem, and also removes most of the boilerplate code changes. I was originally sceptically about option B due to the potential issue of introducing errors by accidentally dropping MemFlags during optimizations. However, I think this problem can be fixed: all builders of load/store instructions already make it mandatory to provide a MemFlags value. This can be either copied from another instruction, or else created afresh by starting from MemFlags::new() or MemFlags::trusted(). Now, if we simply added a mandatory endianness argument to all such MemFlags constructors, then we could easily enforce that every copy of MemFlags always contains target endianness information, and thus this cannot be silently dropped.</p>
+</blockquote>
+<p>This sounds very reasonable to me.</p>
+<blockquote>
+<p>In particular, there are some user-visible changes to the textual representation of clif instructions - please let me know if this approach looks good:</p>
+</blockquote>
+<p>This sounds good to me.</p>
+</blockquote>
+
+
+
+<a name="218859052"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/218859052" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#218859052">(Dec 04 2020 at 16:50)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-738890684">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>Here's an updated patch set along those lines: <a href="https://github.com/uweigand/wasmtime/pull/2">https://github.com/uweigand/wasmtime/pull/2</a></p>
+<p>I'm still not completely happy, in particular because of the following two issues:</p>
+<ul>
+<li>
+<p>New-style back ends now attach MemFlags to machine instructions, which is used only to decide whether the emitted instruction can trap or not.  Having endianness encoded into MemFlags can make this more tedious, in particular with test cases that create new MemFlags (e.g. <a href="http://emit_tests.rs">emit_tests.rs</a>).  At this point, there's usually no TargetIsa available so the endianness needs to be hardcoded.  (In any case it is later ignored anyway.)    @cfallin you added this recently -- would it maybe be preferable to just attach a may_trap flag instead?</p>
+</li>
+<li>
+<p>GlobalValue "load" instructions use somelike similar, but not quite identical to MemFlags; it is printed and parsed as if it were MemFlags, but in the data structure there's actually just a "readonly" flag.    Should this now include endianness in printing and parsing?  Should the data structure transition to a full MemFlags instead?</p>
+</li>
+</ul>
+<p>Comment on these questions as well as general comments on the approach are welcome - thanks!</p>
+</blockquote>
+
+
+
+<a name="218873420"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/218873420" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#218873420">(Dec 04 2020 at 18:32)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-738946646">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<blockquote>
+<p>At this point, there's usually no TargetIsa available so the endianness needs to be hardcoded. (In any case it is later ignored anyway.) @cfallin you added this recently -- would it maybe be preferable to just attach a may_trap flag instead?</p>
+</blockquote>
+<p>Hmm, yeah, I think we may want to reconsider this. I had refactored things away from attaching a <code>SourceLoc</code> to every may-trap memory instruction explicitly, as that was becoming untenable, and plumbing the flags through was simple enough; but considering the bits that actually exist in the <code>MemFlags</code>, the trap-ness is the only thing that wouldn't otherwise translate to a machine-specific thing (e.g. alignedness should manifest in how the lowering chooses instructions, if at all, not in flags on one machine instruction).</p>
+<p>In particular, the endianness flag at the CLIF level should translate to a different instruction sequence at the VCode level on most machines (excepting only a hypothetical machine that has a "swap bytes" bit on every load instruction). So it would be suboptimal to be able to represent meaningless flags at the VCode level.</p>
+<p>An alternative we had considered was to instead make the trap-ness part of a new "instruction metadata", along with the safepoint bit, that lives alongside the <code>MachInst</code>s in the body rather than inside of them. I'm starting to warm up to this more; trap-ness is analogous to safepoint-ness in that both result in metadata attached to the <code>MachBuffer</code> during emission, and both are properties of the instruction that are known when it is given to the <code>LowerCtx</code>.</p>
+<p>So I might suggest the following: (i) create a <code>MachInstMetadata</code> that has, for now, two flags (safepoint, may_trap); (ii) unify <code>LowerCtx::emit()</code> and <code>LowerCtx::emit_safepoint()</code> to <code>emit_with_opts()</code> and <code>emit()</code>, the latter forwarding to former with <code>MachInstMetadata::default()</code>; (iii) store the metadata alongside instructions; (iv) feed the metadata to <code>EmitState</code> where we currently attach the stackmap on safepoints.</p>
+<p>That's a large enough refactor that, for now, I think your PR's approach is fine (keep <code>MemFlags</code> on instructions, add a bit of verbosity to emission tests); but eventually we can clean things up.</p>
+<blockquote>
+<p>GlobalValue "load" instructions</p>
+</blockquote>
+<p>Yes, these should also carry <code>MemFlags</code>, I suspect; and since the lowering happens during CLIF legalization, we can just pass the flags through.</p>
+</blockquote>
+
+
+
+<a name="219204745"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/219204745" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#219204745">(Dec 08 2020 at 13:15)</a>:</h4>
+<p>uweigand <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-740612506">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<blockquote>
+<p>That's a large enough refactor that, for now, I think your PR's approach is fine (keep <code>MemFlags</code> on instructions, add a bit of verbosity to emission tests); but eventually we can clean things up.</p>
+<blockquote>
+<p>GlobalValue "load" instructions</p>
+</blockquote>
+<p>Yes, these should also carry <code>MemFlags</code>, I suspect; and since the lowering happens during CLIF legalization, we can just pass the flags through.</p>
+</blockquote>
+<p>Thanks @cfallin, I've now updated the patch to carry a MemFlags in GlobalValueData::Load and left the MemFlags on machine instructions for now.  The updated patch is now posted as PR #2488 above.<br>
+</p>
+</blockquote>
+
+
+
+<a name="219908069"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/219908069" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#219908069">(Dec 14 2020 at 22:00)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/2124#issuecomment-744737286">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>Fixed with #2492.</p>
+</blockquote>
+
+
+
+<a name="219908071"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%232124%20Support%20WebAssembly%20memory%20instruc.../near/219908071" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.232124.20Support.20WebAssembly.20memory.20instruc.2E.2E.2E.html#219908071">(Dec 14 2020 at 22:00)</a>:</h4>
+<p>cfallin closed <a href="https://github.com/bytecodealliance/wasmtime/issues/2124">Issue #2124</a>:</p>
+<blockquote>
+<p>&lt;!-- Please try to describe precisely what you would like to do in<br>
+Cranelift/Wasmtime and/or expect from it. You can answer the questions below if<br>
+they're relevant and delete this text before submitting. Thanks for opening an<br>
+issue! --&gt;</p>
+<h4>Feature</h4>
+<p>&lt;!-- What is the feature or code improvement you would like to do in<br>
+Cranelift/Wasmtime? --&gt;<br>
+Current wasmtime maps the WebAssembly memory instructions (t.load, <a href="http://t.store">t.store</a> etc.) directly to Cranelift IR memory instructions (load, store, uloadN, etc.).</p>
+<p>This causes problems on big-endian platforms, because the Cranelift IR instruction are implemented as native load and store instructions using the machine byte order, while the WebAssembly memory instructions are specified to use little-endian byte order always.</p>
+<p>Now, I initially thought that one way to solve this problem could be to treat Cranelift IR memory instructions also as always little-endian by specification.  However, that does not work, because there are many other uses of these instructions that do require native byte order.</p>
+<p>Some examples of those include:</p>
+<ul>
+<li>
+<p>Memory accesses added by platform ABI code (implicit pointers for argument or return values), in particular if this needs to be compatible with native code.</p>
+</li>
+<li>
+<p>Memory accesses to values prepared by trampoline code at the boundaries of VM native code and JITted code.</p>
+</li>
+<li>
+<p>Memory accesses to parts of the VMContext that is also accessed by VM native code.</p>
+</li>
+</ul>
+<p>In addition, there are cases where -while not strictly necessary for correctness- it is preferable for performance reasons to use native byte order, e.g. for spill code, for accessing variables on the stack, when implementing code such as inlined copies for small memcpy etc.</p>
+<p>So, I believe we need some way of representing <em>both</em> always-little-endian memory operations (used to translate<br>
+the WebAssembly instructions), and native memory operation (used for everything else).</p>
+<h4>Benefit</h4>
+<p>&lt;!-- What is the value of adding this in Cranelift/Wasmtime? --&gt;</p>
+<p>Enabling support for Wasmtime on big-endian platforms like IBM Z.</p>
+<h4>Implementation</h4>
+<p>&lt;!-- Do you have an implementation plan, and/or ideas for data structures or<br>
+algorithms to use? --&gt;<br>
+My current implementation of this approach simply duplicates all Cranelift IR memory instructions to create always-LE versions.  So in addition to "load" there is "load_le" etc. The full list is:<br>
+  load_le<br>
+  load_le_complex<br>
+  store_le<br>
+  store_le_complex<br>
+  uload16_le<br>
+  uload16_le_complex<br>
+  sload16_le<br>
+  sload16_le_complex<br>
+  istore16_le<br>
+  istore16_le_complex<br>
+  uload32_le<br>
+  uload32_le_complex<br>
+  sload32_le<br>
+  sload32_le_complex<br>
+  istore32_le<br>
+  istore32_le_complex</p>
+<p>Advantages of this approach include:</p>
+<ul>
+<li>Most code that creates load/store instructions can remain unchanged, the WebAssembly translator simply always uses the new instructions.</li>
+<li>It's already implemented and working :-)</li>
+</ul>
+<p>But there are disadvantages:</p>
+<ul>
+<li>All back-ends must implement all the new instructions (usually by   just mapping them back to normal loads/stores), or else the target will stop working.</li>
+<li>Middle-end code changes operating on loads/stores (e.g. the code that recognizes and creates _complex operations) should be adapted or else we can get performance regressions.</li>
+</ul>
+<h4>Alternatives</h4>
+<p>&lt;!-- Have you considered alternative implementations? If so, how are they<br>
+better or worse than your proposal? --&gt;<br>
+There's various alternative ways this could be implemented:</p>
+<p>A) Add an additional flag argument to load/store instructions that<br>
+specifies the requested byte order.  A detail question is whether the flag is<br>
+  little-endian vs. native<br>
+  little-endian vs. big-endian<br>
+  little-endian vs. big-endian vs. native</p>
+<p>Advantages:</p>
+<ul>
+<li>no new IR instructions required</li>
+<li>existing back-ends could simply ignore the flag</li>
+</ul>
+<p>Disadvantages:</p>
+<ul>
+<li>it's still an IR change as that flag must be considered part of the IR (e.g. parsing IR, serialization ...)</li>
+<li>All creators of loads/stores (including outside of cranelift, and possibly even outside of wasmtime!) must be updated.  If there is no "native" flag setting, all those updates must include finding out the native byte order somehow.</li>
+</ul>
+<p>B) Add an additional flag bit to the existing MemFlags<br>
+Advantages:</p>
+<ul>
+<li>no new IR (should be covered by existing serialization ...)</li>
+<li>can be ignored by existing back-ends</li>
+<li>no change to (most) creators of loads/stores necessary</li>
+</ul>
+<p>Disadvantages:</p>
+<ul>
+<li>MemFlags can no longer be dropped, it becomes required for correctness to always preserve in in the middle end</li>
+</ul>
+<p>C) Open-code the conversion in the WebAssembly translator<br>
+Only emit a plain "load" if the target is little-endian.  Otherwise emit a load followed by a byte-swap (possibly followed by an extension). Vice-versa for stores.  This would probably require addition of a new "bswap" Cranelift IR instruction, unless we want to open-code bswap itself as well (possible, but a bit tedious).</p>
+<p>Advantages:</p>
+<ul>
+<li>Only "bswap" as new IR element, can be ignored by back-ends for little-endian architectures and everywhere else.</li>
+</ul>
+<p>Disadvantages:</p>
+<ul>
+<li>No major ones  I can see - this would be my preferred approach.<br>
+</li>
+</ul>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

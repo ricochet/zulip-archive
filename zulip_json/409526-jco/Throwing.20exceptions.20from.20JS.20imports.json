@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>In jco transpiled components, when an imported function returns a result&lt;&gt; type, the generated trampoline function is wrapped in try/catch. This means if my import is filled with some js that throws an exception, it is caught:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kr\">try</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">ret</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">tag</span>: <span class=\"o\">'</span><span class=\"na\">ok</span><span class=\"o\">'</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">val</span>: <span class=\"nc\">importedFunc</span><span class=\"p\">(</span><span class=\"n\">result0</span><span class=\"p\">)};</span>\n<span class=\"p\">}</span><span class=\"w\"> </span><span class=\"n\">catch</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">e</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">ret</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">tag</span>: <span class=\"o\">'</span><span class=\"na\">err</span><span class=\"o\">'</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">val</span>: <span class=\"nc\">getErrorPayload</span><span class=\"p\">(</span><span class=\"n\">e</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\">  </span><span class=\"c1\">// &lt;--- Thrown exception caught. `Val` has useful information.</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>But if the shape of the thrown object is not of the expected Err variant type, then a new generic TypeError is rethrown after the deserialization fails, which makes sense, but it masks the information about what was actually thrown, and my catch handler outside the call to the wasm doesn't get the originally thrown payload.</p>\n<p>I think that the originally thrown object should be attached to the thrown TypeError object. This would allow external parsers to deal with the object that was actually thrown by the imported function.</p>",
+        "id": 427750855,
+        "sender_full_name": "James Mart",
+        "timestamp": 1710862276
+    },
+    {
+        "content": "<p>Some other return types do not have the generated exception handling code, and therefore anything thrown from the import is directly propagated to the caller. I'm not sure which other types besides Result&lt;ok, err&gt; result in automatic exception handling code being generated.</p>\n<p>I suppose the generic form of this request is: <br>\nAll exceptions thrown from an import function should be propagated to the caller, in some way, even if it looks different depending on the expected return type of the import. <br>\nTo my eye, the only exception to this should be when the thrown object exactly fits the shape of the expected Err variant of a result, in which case it can be internally handled by the wasm (which is already working).</p>",
+        "id": 427754907,
+        "sender_full_name": "James Mart",
+        "timestamp": 1710863297
+    },
+    {
+        "content": "<p>good point, I've posted <a href=\"https://github.com/bytecodealliance/jco/issues/405\">https://github.com/bytecodealliance/jco/issues/405</a> to track</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/jco/issues/405\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/54fae1802ea83a684d8065276e8f0be2efaaba13\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f363463356465343064376661613661633161316339306336363335353533303463633137643832613766313535306162313032336166646466643238343862632f62797465636f6465616c6c69616e63652f6a636f2f6973737565732f343035)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/jco/issues/405\" title=\"Non-conformant exceptions should unwrap as traps · Issue #405 · bytecodealliance/jco\">Non-conformant exceptions should unwrap as traps · Issue #405 · bytecodealliance/jco</a></div><div class=\"message_embed_description\">Rather than having a coercing getErrorPayload, if the error is a real JS error it should be rethrown.</div></div></div>",
+        "id": 427757636,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1710863964
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"553681\">@Guy Bedford</span>  It actually strikes me as slightly odd that returning the error variant from within a component causes JCO to throw a ComponentError. Shouldn't throw be for trapping? Returning an Err variant of the Result enum is a valid return value.</p>",
+        "id": 427799633,
+        "sender_full_name": "James Mart",
+        "timestamp": 1710877510
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"648387\">@James Mart</span> errors are part of the component model. So my thinking is that traps should be used whenever the incorrect types are used - for both errors and normal values. I believe that gets us to the right kind of consistent behaviour here? That is, the bug is that errors of the wrong type should become traps. It's only conformant errors that get coerced into component model result errors. Throwing non-errors in JS is generally an anti-pattern so that this gap is open to us to use here.</p>",
+        "id": 427799904,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1710877632
+    },
+    {
+        "content": "<p>I agree traps should be used when the incorrect types are used. But I'm no longer talking about the <code>TypeError</code>, I'm suggesting there's a <em>possible</em> second issue here. </p>\n<p>When I run a component, it returns an Err variant (conformant). But JCO throws to represent to the caller that the Err variant was returned.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">variant5</span><span class=\"p\">.</span><span class=\"n\">tag</span><span class=\"w\"> </span><span class=\"o\">===</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"na\">err</span><span class=\"o\">'</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">throw</span><span class=\"w\"> </span><span class=\"n\">new</span><span class=\"w\"> </span><span class=\"n\">ComponentError</span><span class=\"p\">(</span><span class=\"n\">variant5</span><span class=\"p\">.</span><span class=\"n\">val</span><span class=\"p\">);</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>I don't feel strongly about this, but it does strike me as somewhat odd to throw this, rather than simply returning an object with the shape of the Err variant, given that the wasm never trapped. It is simply a type of valid response. My discomfort may just be due to my lack of familiarity with idiomatic js.</p>",
+        "id": 427801542,
+        "sender_full_name": "James Mart",
+        "timestamp": 1710878261
+    },
+    {
+        "content": "<p>being able to throw errors to JavaScript callers is beneficial, and handled by this top-level error interpretation scheme</p>",
+        "id": 427802080,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1710878439
+    },
+    {
+        "content": "<p>since the goal for component model embeddings is to provide idiomatic usage in different language environments</p>",
+        "id": 427802131,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1710878459
+    },
+    {
+        "content": "<p>that is - traps are errors which are non-conformant with any possible top-level result error type</p>",
+        "id": 427802207,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1710878488
+    },
+    {
+        "content": "<p>this just describes the desired behaviour though - right now we are a bit too flexible in these cases per the previous issue you posted</p>",
+        "id": 427802282,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1710878514
+    },
+    {
+        "content": "<p>In my case, it now look like (in pseudocode):</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kr\">try</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">     </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">returnValue</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">execute</span><span class=\"p\">(</span><span class=\"n\">component</span><span class=\"p\">);</span>\n<span class=\"w\">     </span><span class=\"c1\">// process ok value</span>\n<span class=\"p\">}</span>\n<span class=\"n\">catch</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">e</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">e</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"n\">trap</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">         </span><span class=\"c1\">// trap! unrecoverable error</span>\n<span class=\"w\">    </span><span class=\"p\">}</span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">e</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"n\">normal</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">        </span><span class=\"c1\">// process error value</span>\n<span class=\"w\">    </span><span class=\"p\">}</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>Rather than</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kr\">try</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">     </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">returnValue</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">execute</span><span class=\"p\">(</span><span class=\"n\">component</span><span class=\"p\">);</span>\n<span class=\"w\">     </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"nb\">Ok</span><span class=\"p\">(</span><span class=\"n\">returnValue</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">          </span><span class=\"c1\">// process ok value</span>\n<span class=\"w\">     </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"nb\">Err</span><span class=\"p\">(</span><span class=\"n\">returnValue</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">         </span><span class=\"c1\">// process error value</span>\n<span class=\"w\">    </span><span class=\"p\">}</span>\n<span class=\"p\">}</span>\n<span class=\"n\">catch</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">e</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"c1\">// Trap! unrecoverable error</span>\n<span class=\"p\">}</span>\n</code></pre></div>",
+        "id": 427802539,
+        "sender_full_name": "James Mart",
+        "timestamp": 1710878609
+    },
+    {
+        "content": "<p>My initial preference was for handling that looked more like the second code block above, since an Err variant is a valid response in my case. But I've understood from your response that the first block is correct &amp; idiomatic.</p>",
+        "id": 427803285,
+        "sender_full_name": "James Mart",
+        "timestamp": 1710878944
+    },
+    {
+        "content": "<p>Yes, that is the current design for idiomatic JS bindgen. You could do the explicit normal error checks before the trap checks since they will have the known shapes?</p>",
+        "id": 427805064,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1710879666
+    }
+]

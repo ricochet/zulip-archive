@@ -1,0 +1,122 @@
+[
+    {
+        "content": "<p>I have noticed that currently Cranelift's AArch64 backend <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/cranelift/codegen/src/isa/aarch64/abi.rs#L1139\">stores all 128 bits</a> of each callee-saved SIMD &amp; FP register when generating a function prologue. However, the <em>Procedure Call Standard for the Arm 64-bit Architecture</em> requires that only the bottom 64 bits of a register are saved; if the whole SIMD register is live across a call, then it is the responsibility of the <strong>caller</strong> to preserve its value. Naturally, that suggests an optimization, but is there a deeper reason for the current behaviour? If the implementation is modified to save only 64 bits, will there be any correctness issues because someone else has different expectations?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/master/cranelift/codegen/src/isa/aarch64/abi.rs#L1139\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/cranelift/codegen/src/isa/aarch64/abi.rs#L1139\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 199821701,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591313597
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"300050\">@Anton Kirilov</span> nope, there's no deeper reason here; we just weren't aware that the upper 64 bits are always caller-save. That's good news as it's a perf improvement on the table! Happy to take a patch, or I can add it to The List and get to it at some point. Thanks!</p>",
+        "id": 199822495,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1591314276
+    },
+    {
+        "content": "<p>(Now that I've said that, though, one thing I should double-check is whether the calling convention in SpiderMonkey on aarch64 differs on this point; it's <em>mostly</em> the system calling convention, except when it's not)</p>",
+        "id": 199822538,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1591314335
+    },
+    {
+        "content": "<p>FYI here's <a href=\"https://github.com/ARM-software/abi-aa/blob/2019Q4/aapcs64/aapcs64.rst#simd-and-floating-point-registers\">the relevant quote</a> from the PCS:</p>\n<blockquote>\n<p>Registers v8-v15 must be preserved by a callee across subroutine calls; the remaining registers (v0-v7, v16-v31) do not need to be preserved (or should be preserved by the caller). Additionally, only the bottom 64 bits of each value stored in v8-v15 need to be preserved [7]; it is the responsibility of the caller to preserve larger values.</p>\n</blockquote>\n<p>Actually there's another possible improvement - we can use store pair instructions as in the GPR case; similarly for the epilogue code.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ARM-software/abi-aa/blob/2019Q4/aapcs64/aapcs64.rst#simd-and-floating-point-registers\" style=\"background-image: url(https://avatars2.githubusercontent.com/u/5690313?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ARM-software/abi-aa/blob/2019Q4/aapcs64/aapcs64.rst#simd-and-floating-point-registers\" title=\"ARM-software/abi-aa\">ARM-software/abi-aa</a></div><div class=\"message_embed_description\">Application Binary Interface for the Arm® Architecture - ARM-software/abi-aa</div></div></div>",
+        "id": 199823186,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591314914
+    },
+    {
+        "content": "<p>Yep, that would be an improvement as well</p>",
+        "id": 199823718,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1591315409
+    },
+    {
+        "content": "<p>Either <span class=\"user-mention\" data-user-id=\"265780\">@Joey Gouly</span> or I can handle it at some point, that's fine.</p>",
+        "id": 199860514,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591354445
+    },
+    {
+        "content": "<p>There's the question of whether saving/restoring 64 bits would actually make any difference in practice.  If the load/store units have a 128-bit wide path to/from D1 then I guess the answer would be \"no\".  If that path is only 64 bits wide and used twice for a 128-bit transaction, then \"yes\"; but that would seem to imply that all SIMD loads/stores on the machine would be similarly burdened.  Which strikes me as a bit unlikely, especially for any mid-range implementation or above.</p>",
+        "id": 199866007,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1591358429
+    },
+    {
+        "content": "<p>So I have to say .. I wouldn't be surprised if fixing this made no measurable difference.</p>",
+        "id": 199866063,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1591358470
+    },
+    {
+        "content": "<p>I am not sure I understand you - if the LSUs have a 128-bit wide path to the L1D$, then it means that after the fix they will be able to save 2 registers per cycle instead of 1, so they will need half the time (ignoring out-of-order execution).</p>",
+        "id": 199868410,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591360026
+    },
+    {
+        "content": "<p>Mhm, I hadn't thought of that.  Good point.</p>",
+        "id": 199868761,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1591360218
+    },
+    {
+        "content": "<p>Anyway, this change would probably be made simultaneously with switching to store pair instructions, the latter definitely reducing code size.</p>",
+        "id": 199869011,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591360357
+    },
+    {
+        "content": "<p>Some of the earlier AArch64 CPUs only have a 64-bit path to the L1D$: <a href=\"https://github.com/bytecodealliance/regalloc.rs/issues/14#issuecomment-575648053\">https://github.com/bytecodealliance/regalloc.rs/issues/14#issuecomment-575648053</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/regalloc.rs/issues/14#issuecomment-575648053\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/regalloc.rs/issues/14#issuecomment-575648053\" title=\"Value width tracking · Issue #14 · bytecodealliance/regalloc.rs\">Value width tracking · Issue #14 · bytecodealliance/regalloc.rs</a></div><div class=\"message_embed_description\">On many architectures (e.g x86 and ARM64), f32 and f64 values are located in the V128 register class. This means that any spills or moves will need to copy the entire 128 bits of the register. Howe...</div></div></div>",
+        "id": 199869997,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591360956
+    },
+    {
+        "content": "<p>Do you mean either Cortex-A55, Cortex-A57, or Cortex-A72?</p>",
+        "id": 199871208,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591361635
+    },
+    {
+        "content": "<p>Yes, all 3 of those only have 64-bit paths to the L1D$.</p>",
+        "id": 199871937,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591362012
+    },
+    {
+        "content": "<p>A55 has asymmetric load and store bandwidths - 64 bits/cycle for loads and 128 bits/cycle for stores. It is stated in the optimization guide and also in the <a href=\"https://developer.arm.com/docs/100442/0200/part-a-functional-description/level-1-memory-system/about-the-l1-memory-system\">Technical Reference Manual</a>.</p>",
+        "id": 199872020,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591362059
+    },
+    {
+        "content": "<p>The A57 and A72 optimization guides don't really say anything.</p>",
+        "id": 199873650,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591362826
+    },
+    {
+        "content": "<p>Neither do the TRMs (<a href=\"https://developer.arm.com/docs/ddi0488/h/level-1-memory-system/l1-data-memory-system\">A57</a>, <a href=\"https://developer.arm.com/docs/100095/0003/level-1-memory-system/data-memory-system\">A72</a>).</p>",
+        "id": 199874394,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591363169
+    },
+    {
+        "content": "<p>It's implied by the throughput numbers for \"Store    vector    reg,    unscaled    immed,    Q-­‐form\"</p>",
+        "id": 199890892,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591369985
+    },
+    {
+        "content": "<p>You can tell that it is splitting the store into 2 uops since it has a 2 cycle latency and 0.5 throughput.</p>",
+        "id": 199890970,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591370026
+    },
+    {
+        "content": "<p>Though it seems that only stores are limited to 64-bits, loads can do 128-bits in a single cycle.</p>",
+        "id": 199891189,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591370114
+    }
+]

@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>Hi! I've tried the jitdump support in our embedding today, and I can say that <em>something</em> works \\o/ I can profile with <code>perf record -k 1</code>, then see some guest symbols show up in hotspot caller/callee trees <span aria-label=\"partying face\" class=\"emoji emoji-1f973\" role=\"img\" title=\"partying face\">:partying_face:</span> </p>\n<p>However, I'm seeing <em>very little</em>, and most time is still spent under unknown symbols. Our embedding will load multiple wasm modules at the same time, and it seems that only one wasm module's symbols will be injected into the jitdump, as most of the information from other modules isn't available at all.</p>\n<p>Is that expected/known? (I will investigate a bit more tomorrow, if no one knows!)</p>",
+        "id": 341539787,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1678731176
+    },
+    {
+        "content": "<p>I know at least personally I've never exercised multiple modules, but otherwise with <code>perf</code> I rarely see unknown symbols</p>",
+        "id": 341545167,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1678732729
+    },
+    {
+        "content": "<p>so my guess is you're running into a bug with multiple modules somehow (not that I know how though)</p>",
+        "id": 341545213,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1678732744
+    },
+    {
+        "content": "<p>I've found the reason: we're building one <code>Engine</code> per wasm module, and each jitdump profiler instance will recreate (thus clobber) the jitdump file with the same id every time. I'll look into reusing the same <code>Engine</code> in our codebase, but wonder if we shouldn't still support having multiple jitdumps, or reuse the same jitdump profiler instance across all <code>Engine</code>s instances.</p>",
+        "id": 341676062,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1678789637
+    },
+    {
+        "content": "<p>Oh good point! I'd lean towards unique files for each engine if that works but one global file also seems reasonable</p>",
+        "id": 341797067,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1678801433
+    },
+    {
+        "content": "<p>Ok, i've tried suffixing the jitdump file name with a globally incremented atomic counter...  then perf doesn't pick it up anymore. I've tried looking into why, if it was related to the mmapping done so that perf detects those files, but with no success. So I've used a single jitdump file for the entire process, and it seems to work now!</p>",
+        "id": 341857819,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1678813785
+    },
+    {
+        "content": "<p>Ah looks like <a href=\"https://github.com/torvalds/linux/blob/fc89d7fb499b0162e081f434d45e8d1b47e82ece/tools/perf/util/jitdump.c#L729-L787\">this is required by <code>perf</code></a> to have only one file per process since given any one process it'll only recognize one filename</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/torvalds/linux/blob/fc89d7fb499b0162e081f434d45e8d1b47e82ece/tools/perf/util/jitdump.c#L729-L787\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/6368affbf38a2ad6179dfbe9933904bc714bd43d\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f333464343531643933313761313435313965303438393463626232656465313763366362393931373639366437303338656635656362616164363366343035642f746f7276616c64732f6c696e7578)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/torvalds/linux/blob/fc89d7fb499b0162e081f434d45e8d1b47e82ece/tools/perf/util/jitdump.c#L729-L787\" title=\"linux/jitdump.c at fc89d7fb499b0162e081f434d45e8d1b47e82ece · torvalds/linux\">linux/jitdump.c at fc89d7fb499b0162e081f434d45e8d1b47e82ece · torvalds/linux</a></div><div class=\"message_embed_description\">Linux kernel source tree. Contribute to torvalds/linux development by creating an account on GitHub.</div></div></div>",
+        "id": 341861202,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1678814627
+    },
+    {
+        "content": "<p>Ok, after running for 5 hours and not completing (at 15% utilization of a single core <span aria-label=\"pensive\" class=\"emoji emoji-1f614\" role=\"img\" title=\"pensive\">:pensive:</span>) the <code>perf inject</code> step is definitely taking too long, unfortunately. Either need to rewrite it in Rust and make it massively parallel, or I shall try vtune instead.</p>",
+        "id": 341918634,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1678833713
+    },
+    {
+        "content": "<p>It generated 179153 .so files lol</p>",
+        "id": 341918808,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1678833781
+    },
+    {
+        "content": "<p>Yeah it generates a <code>*.so</code> per-jit-function, not exactly efficient...</p>",
+        "id": 341919039,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1678833871
+    },
+    {
+        "content": "<p>Wasn't there another dumb way to map code regions to symbols? I do recall something like this for Spidermonkey, where we'd generate a very simplistic file. At the scale of our wasm module, having a dumb mode like this would be pretty sweet <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 341998961,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1678872394
+    },
+    {
+        "content": "<p>I'm not aware myself, but it there's an easier option than <code>perf</code> I think that'd be great to have implemented!</p>",
+        "id": 342066143,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1678888974
+    },
+    {
+        "content": "<p>Oh I was talking about the simpler <code>perf</code> support that just assigns symbol names to code regions, with little granularity. Basically a file that contains lines that are <code>{function start address} {code size} {symbol name}</code>. That was used in the past in <a href=\"https://searchfox.org/mozilla-central/rev/9c746b5c509304bc84b04f68ea893df31cf3425c/js/src/jit/PerfSpewer.cpp#194\">Spidermonkey</a> (now SM also uses jitdump!), and I recall it was pretty effective, especially when there are many functions, so I'm tempted to try to implement this, as an additional profiling agent impl.</p>",
+        "id": 342088701,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1678893642
+    },
+    {
+        "content": "<p>Cranelift-jit already supports it. This format doesn't handle reusing memory locations between functions though, so you did have to leak all modules.</p>",
+        "id": 342099946,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1678895904
+    },
+    {
+        "content": "<p>Interesting, thanks. Turns out wasmtime-jit doesn't use cranelift-jit, the format is simple enough that it might be fun trying it out separately.</p>",
+        "id": 342102364,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1678896388
+    }
+]

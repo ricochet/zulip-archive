@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>Hi! Looking into dominator tree computation, I've found out, that less than 0.5% of compilation time is spent there. Nevertheless, I've implemented semi-NCA algorithm and unsurprisingly, the changes didn't register in any of the sightglass benchmarks. Note, that I haven't compared old and new implementations in isolation.</p>\n<p>Given that it doesn't seem to bring noticeable performance benefits right now, would it be worth it to introduce to Cranelift?</p>\n<p>I feel like there is a couple of additional point to consider:</p>\n<ul>\n<li>It might become more beneficial in the future, when/if there are more modifications of control flow graph performed during optimizations.</li>\n<li>The size of a node in semi-NCA  and the fact that most of it's fields are temporaries might allow the same structure to be reused for <code>DominatorTreePreorder</code>. This would unify two dominator trees, which is mentioned in #7954. The optimized structure might then be computed in place and on demand.</li>\n</ul>\n<p>Unrelated, it seems like in the existing code all branch instructions are terminators now, which would allow for a nice little simplification of storing blocks instead of instructions in the existing DominatorTree implementation. This would allow to get rid of several awkward <code>layout.inst_block(..).expect(..)</code> uses. Is my understanding correct? Would such simplification be desirable?</p>",
+        "id": 481004271,
+        "sender_full_name": "amartosch",
+        "timestamp": 1730928725
+    },
+    {
+        "content": "<p>Hi <span class=\"user-mention\" data-user-id=\"776680\">@amartosch</span> -- thanks for working on this!</p>\n<blockquote>\n<p>Given that it doesn't seem to bring noticeable performance benefits right now, would it be worth it to introduce to Cranelift?</p>\n</blockquote>\n<p>In general I think we have a few possible reasons to accept new code into Cranelift. The first, most straightforward is that it improves performance by some metric (compile time, runtime, etc). Another is when it is simpler than the existing implementation, or more general, or easier to convince ourselves of correctness.</p>\n<p>How does the implementation compare to the existing one? Is it shorter, simpler, etc.? Can you show us a diff?</p>\n<p>IMHO if the code is <em>not</em> simpler, and has no other quantitative changes, then probably the best engineering verdict is to leave the existing implementation as-is -- the reason being that new code carries risk as well, and so there has to be something that outweighs that. (Again, many reasons will do!)</p>\n<p>There are two other questions in your message that I want to separate out: (i) unifying implementations, and (ii) reasoning in terms of blocks rather than instructions. Both of these are good refactors that I think would be worthwhile to pursue regardless of which algorithm we end up using.</p>",
+        "id": 481005419,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1730929286
+    },
+    {
+        "content": "<p>Dominator tree computation actually came up as an issue in SpiderMonkey (<a href=\"https://spidermonkey.dev/blog/2024/10/16/75x-faster-optimizing-the-ion-compiler-backend.html\">https://spidermonkey.dev/blog/2024/10/16/75x-faster-optimizing-the-ion-compiler-backend.html</a>) which used the same algorithm as Cranelift currently does. The old algorithm had trouble with a function that had 132856 basic blocks, but the perf issues were solved by switching to semi-NCA for computing dominator trees.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://spidermonkey.dev/blog/2024/10/16/75x-faster-optimizing-the-ion-compiler-backend.html\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/dfae54dddc269c2b4ef22c8b8ff9eabf0d169165/68747470733a2f2f7370696465726d6f6e6b65792e6465762f6173736574732f696d672f747769747465722d6461726b2d6c617267652e706e673f31&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://spidermonkey.dev/blog/2024/10/16/75x-faster-optimizing-the-ion-compiler-backend.html\" title=\"75x faster: optimizing the Ion compiler backend\">75x faster: optimizing the Ion compiler backend</a></div><div class=\"message_embed_description\">In September, machine learning engineers at Mozilla filed a bug report indicating that Firefox was consuming excessive memory and CPU resources while running Microsoft’s ONNX Runtime (a machine learning library) compiled to WebAssembly.</div></div></div>",
+        "id": 481015523,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1730934534
+    },
+    {
+        "content": "<p>Right, I'm aware of that as well; I'm going off of <span class=\"user-mention\" data-user-id=\"776680\">@amartosch</span> 's claim that there aren't noticeable performance benefits, but <span class=\"user-mention\" data-user-id=\"776680\">@amartosch</span> , were you able to test with very large function inputs?</p>",
+        "id": 481016881,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1730935380
+    },
+    {
+        "content": "<p>Here's the wasm file with the massive function: <a href=\"https://bugzilla.mozilla.org/attachment.cgi?id=9426114\">https://bugzilla.mozilla.org/attachment.cgi?id=9426114</a></p>",
+        "id": 481018186,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1730936263
+    },
+    {
+        "content": "<p>I think such a thing is at least <em>interesting</em> at any rate :)</p>",
+        "id": 481144110,
+        "sender_full_name": "David Lloyd",
+        "timestamp": 1730993039
+    },
+    {
+        "content": "<p>definitely worth testing compilation on the massive wasm file from that bug</p>",
+        "id": 481184738,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1731007048
+    },
+    {
+        "content": "<p>using hyperfine or something</p>",
+        "id": 481184781,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1731007066
+    },
+    {
+        "content": "<p>I've tried to run hyperfine on the file linked by <span class=\"user-mention\" data-user-id=\"301625\">@Amanieu</span>, it didn't show time difference above noise. <br>\nThe command line used was <code>wasmtime compile -C compiler=cranelift -C parallel-compilation=n ort-wasm-simd-threaded.jsep.wasm</code>.<br>\nHowever, perf consistently shows ~4.2% of samples in <code>DominatorTree::compute</code>and only 0.2% for semi-NCA version. This suggests that I might be doing something very wrong. In order not to waste everybody's time I'd like to clean up the implementation and post it as draft for others to discuss and/or measure themselves.</p>",
+        "id": 481202046,
+        "sender_full_name": "amartosch",
+        "timestamp": 1731014509
+    },
+    {
+        "content": "<p>just to be sure, can you try running again and also passing <code>-C cache=n</code>?</p>",
+        "id": 481202469,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1731014726
+    },
+    {
+        "content": "<p>4.2% -&gt; 0.2% for domtree computation is a great speedup, that's more than enough to justify this -- let's see a draft PR and we can go from there. Thanks for working on this!</p>",
+        "id": 481203752,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1731015314
+    },
+    {
+        "content": "<p>(we've done a lot of work shaving off the obvious low-hanging fruit to speed things up, so even 1-2% improvements are exciting now)</p>",
+        "id": 481203854,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1731015361
+    },
+    {
+        "content": "<p>Locally I can confirm that DominatorTree::compute takes awhile. On the wasm here I get <a href=\"https://share.firefox.dev/40CsLc1\">this profile</a> where I removed regalloc from the profile (which was 80% of the time) and 20% of the remaining time (4% total) it's DominatorTree::compute</p>",
+        "id": 481204947,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1731015848
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253990\">fitzgen (he/him)</span> <a href=\"#narrow/channel/217117-cranelift/topic/Dominator.20trees/near/481202469\">said</a>:</p>\n<blockquote>\n<p>just to be sure, can you try running again and also passing <code>-C cache=n</code>?</p>\n</blockquote>\n<p>Tried, it didn't seem to change anything.</p>",
+        "id": 481208091,
+        "sender_full_name": "amartosch",
+        "timestamp": 1731017422
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span>'s results seem to coincide with mine. Thanks for directions, will post PR as soon as it's ready!</p>",
+        "id": 481208207,
+        "sender_full_name": "amartosch",
+        "timestamp": 1731017502
+    }
+]

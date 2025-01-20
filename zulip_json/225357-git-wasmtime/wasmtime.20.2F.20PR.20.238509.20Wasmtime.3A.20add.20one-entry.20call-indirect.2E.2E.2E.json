@@ -1,0 +1,458 @@
+[
+    {
+        "content": "<p>cfallin opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a> from <code>cfallin:call-indirect-caching</code> to <code>bytecodealliance:main</code>:</p>\n<blockquote>\n<p>In WebAssembly, an indirect call is somewhat slow, because of the indirection required by CFI (control-flow integrity) sandboxing. In particular, a \"function pointer\" in most source languages compiled to Wasm is represented by an index into a table of funcrefs. The <code>call_indirect</code> instruction then has to do the following steps to invoke a function pointer:</p>\n<ul>\n<li>Load the funcref table's base and length values from the vmctx.</li>\n<li>Bounds-check the invoked index against the actual table size; trap if out-of-bounds.</li>\n<li>Spectre mitigation (cmove) on that bounds-check.</li>\n<li>Load the <code>vmfuncref</code> from the table given base and index.<ul>\n<li>For lazy table init, check if this is a non-initialized funcref pointer, and initialize the entry.</li>\n</ul>\n</li>\n<li>Load the signature from the funcref struct and compare it against the <code>call_indirect</code>'s expected signature; trap if wrong.</li>\n<li>Load the actual code pointer for the callee's Wasm-ABI entry point.</li>\n<li>Load the callee vmctx (which may be different for a cross-module call).</li>\n<li>Put that vmctx in arg 0, our vmctx in arg 1, and invoke the loaded code pointer with an indirect call instruction.</li>\n</ul>\n<p>Compare and contrast to the process involved in invoking a native function pointer:</p>\n<ul>\n<li>Invoke the code pointer with an indirect call instruction.</li>\n</ul>\n<p>This overhead buys us something -- it is part of the SFI sandbox boundary -- but it is very repetitive and unnecessary work in <em>most</em> cases when indirect function calls are performed repeatedly (such as within an inner loop).</p>\n<p>This PR introduces the idea of <em>caching</em>: if we know that the result of all the above checks won't change, then if we use the same index as \"the last time\" (for some definition), we can skip straight to the \"invoke the code pointer\" step, with a cached code pointer from that last time.</p>\n<p>Concretely, it introduces a two-word struct inlined into the vmctx for each <code>call_indirect</code> instruction in the module (up to a limit):</p>\n<ul>\n<li>The last invoked index;</li>\n<li>The code pointer that index corresponded to.</li>\n</ul>\n<p>When compiling the module, we check whether the table could possibly be mutable at a given index once read: any instructions like <code>table.set</code>, or the whole table exported thus writable from the outside. We also check whether index 0 is a non-null funcref. If neither of these things are true, then we know we can cache an index-to-code-pointer mapping, and we know we can use index 0 as a sentinel for \"no cached value\".</p>\n<p>We then make use of the struct for each indirect call site and generate code to check if the index matches; if so, call cached pointer; if not, load the vmfuncref, check the signature, check that the callee vmctx is the same as caller (intra-module case), and stash the code pointer and index away (fill the cache), then make the call.</p>\n<p>On an in-development branch of SpiderMonkey-in-Wasm with ICs (using indirect calls), this is about a 20% speedup; I haven't yet measured on other benchmarks. It is expected that this might be an instantiation-time slowdown due to a larger vmctx (but we could use madvise to zero if needed).</p>\n<p>This feature is off by default right now.</p>\n<p>&lt;!--<br>\nPlease make sure you include the following information:</p>\n<ul>\n<li>\n<p>If this work has been discussed elsewhere, please include a link to that<br>\n  conversation. If it was discussed in an issue, just mention \"issue #...\".</p>\n</li>\n<li>\n<p>Explain why this change is needed. If the details are in an issue already,<br>\n  this can be brief.</p>\n</li>\n</ul>\n<p>Our development process is documented in the Wasmtime book:<br>\n<a href=\"https://docs.wasmtime.dev/contributing-development-process.html\">https://docs.wasmtime.dev/contributing-development-process.html</a></p>\n<p>Please ensure all communication follows the code of conduct:<br>\n<a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md\">https://github.com/bytecodealliance/wasmtime/blob/main/CODE_OF_CONDUCT.md</a><br>\n--&gt;</p>\n</blockquote>",
+        "id": 436153650,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714430683
+    },
+    {
+        "content": "<p><strong>cfallin</strong> requested <a href=\"https://github.com/fitzgen\">fitzgen</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436153652,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714430683
+    },
+    {
+        "content": "<p><strong>cfallin</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers\">wasmtime-core-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436153653,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714430684
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2083815498\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>(I'll run some benchmarks to see what the compile-time impact is like, and how this benefits non-SpiderMonkey workloads; TBD.)</p>\n</blockquote>",
+        "id": 436154118,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714430824
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436155678,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714431412
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2083878567\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>Benchmarks:</p>\n<ul>\n<li>Sightglass measures the following for <code>spidermonkey.wasm</code>:</li>\n</ul>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">compilation</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">spidermonkey</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"err\">Δ</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">1456249767.40</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">1315409020.02</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">confidence</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">99</span><span class=\"o\">%</span><span class=\"p\">)</span>\n\n<span class=\"w\">  </span><span class=\"n\">original</span><span class=\"p\">.</span><span class=\"n\">so</span><span class=\"w\"> </span><span class=\"n\">is</span><span class=\"w\"> </span><span class=\"mf\">1.01</span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"mf\">1.17</span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"o\">-</span><span class=\"n\">indirect</span><span class=\"o\">-</span><span class=\"n\">calls</span><span class=\"p\">.</span><span class=\"n\">so</span><span class=\"o\">!</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">17934023164</span><span class=\"w\"> </span><span class=\"mf\">18070879867.60</span><span class=\"w\"> </span><span class=\"mi\">18215783322</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"o\">-</span><span class=\"n\">indirect</span><span class=\"o\">-</span><span class=\"n\">calls</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">15377276916</span><span class=\"w\"> </span><span class=\"mf\">16614630100.20</span><span class=\"w\"> </span><span class=\"mi\">17840489432</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">original</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">execution</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">spidermonkey</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"err\">Δ</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mf\">27069455.80</span><span class=\"w\"> </span><span class=\"err\">±</span><span class=\"w\"> </span><span class=\"mf\">22219096.46</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">confidence</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">99</span><span class=\"o\">%</span><span class=\"p\">)</span>\n\n<span class=\"w\">  </span><span class=\"n\">original</span><span class=\"p\">.</span><span class=\"n\">so</span><span class=\"w\"> </span><span class=\"n\">is</span><span class=\"w\"> </span><span class=\"mf\">1.00</span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"n\">to</span><span class=\"w\"> </span><span class=\"mf\">1.05</span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"n\">faster</span><span class=\"w\"> </span><span class=\"n\">than</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"o\">-</span><span class=\"n\">indirect</span><span class=\"o\">-</span><span class=\"n\">calls</span><span class=\"p\">.</span><span class=\"n\">so</span><span class=\"o\">!</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">1079208474</span><span class=\"w\"> </span><span class=\"mf\">1095097604.00</span><span class=\"w\"> </span><span class=\"mi\">1142114396</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"o\">-</span><span class=\"n\">indirect</span><span class=\"o\">-</span><span class=\"n\">calls</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">1035034082</span><span class=\"w\"> </span><span class=\"mf\">1068028148.20</span><span class=\"w\"> </span><span class=\"mi\">1094035960</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">original</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">instantiation</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">spidermonkey</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">834480</span><span class=\"w\"> </span><span class=\"mf\">856949.40</span><span class=\"w\"> </span><span class=\"mi\">902120</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"o\">-</span><span class=\"n\">indirect</span><span class=\"o\">-</span><span class=\"n\">calls</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">831744</span><span class=\"w\"> </span><span class=\"mf\">860156.60</span><span class=\"w\"> </span><span class=\"mi\">978994</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">original</span><span class=\"p\">.</span><span class=\"n\">so</span>\n</code></pre></div>\n<p>so compilation time does take a little hit but my system is noisy; somewhere between 1% and 17%, the mean looks to be around 8.7%. Instantiation apparently unaffected. And execution time... slightly slower? (But again, noisy system.)</p>\n<p>I tried running the next benchmark in the list (pulldown-cmark) and Sightglass crashed mysteriously, so on to trusty <code>hyperfine</code>: no deltas in runtime on spidermonkey or bz2, my two usual suspects.</p>\n<p>I suspect that mostly we'll see mostly in-the-noise results for most benchmarks because indirect calls are somewhat rare in C-ish code; it will matter mostly when compiling dynamic languages, or something like Java with a lot of virtual calls. The speedup on weval'd SpiderMonkey is real though so I'd like to at least have this in tree as an option :-) </p>\n</blockquote>",
+        "id": 436161500,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714434325
+    },
+    {
+        "content": "<p>github-actions[bot] <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2084268226\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<h4>Subscribe to Label Action</h4>\n<p>cc @saulecabrera</p>\n<p>&lt;details&gt;<br>\nThis issue or pull request has been labeled: \"wasmtime:api\", \"wasmtime:config\", \"winch\"</p>\n<p>Thus the following users have been cc'd because of the following labels:</p>\n<ul>\n<li>saulecabrera: winch</li>\n</ul>\n<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>\n<p><a href=\"https://github.com/bytecodealliance/subscribe-to-label-action\">Learn more.</a><br>\n&lt;/details&gt;</p>\n</blockquote>",
+        "id": 436180087,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714445071
+    },
+    {
+        "content": "<p>github-actions[bot] <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2084268706\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<h4>Label Messager: wasmtime:config</h4>\n<p>It looks like you are changing Wasmtime's configuration options. Make sure to<br>\ncomplete this check list:</p>\n<ul>\n<li>\n<p>[ ] If you added a new <code>Config</code> method, you wrote extensive documentation for<br>\n      it.</p>\n<p>&lt;details&gt;</p>\n<p>Our documentation should be of the following form:</p>\n<p>```text<br>\nShort, simple summary sentence.</p>\n<p>More details. These details can be multiple paragraphs. There should be<br>\ninformation about not just the method, but its parameters and results as<br>\nwell.</p>\n<p>Is this method fallible? If so, when can it return an error?</p>\n<p>Can this method panic? If so, when does it panic?</p>\n<h1>Example</h1>\n<p>Optional example here.<br>\n```</p>\n<p>&lt;/details&gt;</p>\n</li>\n<li>\n<p>[ ] If you added a new <code>Config</code> method, or modified an existing one, you<br>\n  ensured that this configuration is exercised by the fuzz targets.</p>\n<p>&lt;details&gt;</p>\n<p>For example, if you expose a new strategy for allocating the next instance<br>\nslot inside the pooling allocator, you should ensure that at least one of our<br>\nfuzz targets exercises that new strategy.</p>\n<p>Often, all that is required of you is to ensure that there is a knob for this<br>\nconfiguration option in [<code>wasmtime_fuzzing::Config</code>][fuzzing-config] (or one<br>\nof its nested <code>struct</code>s).</p>\n<p>Rarely, this may require authoring a new fuzz target to specifically test this<br>\nconfiguration. See [our docs on fuzzing][fuzzing-docs] for more details.</p>\n<p>&lt;/details&gt;</p>\n</li>\n<li>\n<p>[ ] If you are enabling a configuration option by default, make sure that it<br>\n  has been fuzzed for at least two weeks before turning it on by default.</p>\n</li>\n</ul>\n<p>[fuzzing-config]: <a href=\"https://github.com/bytecodealliance/wasmtime/blob/ca0e8d0a1d8cefc0496dba2f77a670571d8fdcab/crates/fuzzing/src/generators.rs#L182-L194\">https://github.com/bytecodealliance/wasmtime/blob/ca0e8d0a1d8cefc0496dba2f77a670571d8fdcab/crates/fuzzing/src/generators.rs#L182-L194</a><br>\n[fuzzing-docs]: <a href=\"https://docs.wasmtime.dev/contributing-fuzzing.html\">https://docs.wasmtime.dev/contributing-fuzzing.html</a></p>\n<hr>\n<p>&lt;details&gt;</p>\n<p>To modify this label's message, edit the &lt;code&gt;.github/label-messager/wasmtime-config.md&lt;/code&gt; file.</p>\n<p>To add new label messages or remove existing label messages, edit the<br>\n&lt;code&gt;.github/label-messager.json&lt;/code&gt; configuration file.</p>\n<p><a href=\"https://github.com/bytecodealliance/label-messager-action\">Learn more.</a></p>\n<p>&lt;/details&gt;</p>\n</blockquote>",
+        "id": 436180110,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714445083
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2085668749\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>FWIW, I did a 100-iteration sightglass run of the default suite and got these results:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">instantiation</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">spidermonkey</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">472878</span><span class=\"w\"> </span><span class=\"mf\">584750.13</span><span class=\"w\"> </span><span class=\"mi\">1435913</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">471975</span><span class=\"w\"> </span><span class=\"mf\">647599.28</span><span class=\"w\"> </span><span class=\"mi\">1762837</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">execution</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">7422842</span><span class=\"w\"> </span><span class=\"mf\">8744920.24</span><span class=\"w\"> </span><span class=\"mi\">28196476</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">7439782</span><span class=\"w\"> </span><span class=\"mf\">9281270.19</span><span class=\"w\"> </span><span class=\"mi\">32569639</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">instantiation</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">bz2</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">165456</span><span class=\"w\"> </span><span class=\"mf\">245749.33</span><span class=\"w\"> </span><span class=\"mi\">728069</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">161764</span><span class=\"w\"> </span><span class=\"mf\">251740.72</span><span class=\"w\"> </span><span class=\"mi\">723740</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">execution</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">bz2</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">95484875</span><span class=\"w\"> </span><span class=\"mf\">104221743.11</span><span class=\"w\"> </span><span class=\"mi\">196171026</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">95454637</span><span class=\"w\"> </span><span class=\"mf\">105918836.28</span><span class=\"w\"> </span><span class=\"mi\">208434699</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">compilation</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">358282063</span><span class=\"w\"> </span><span class=\"mf\">404458268.52</span><span class=\"w\"> </span><span class=\"mi\">568579026</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">367557812</span><span class=\"w\"> </span><span class=\"mf\">399158971.64</span><span class=\"w\"> </span><span class=\"mi\">551388853</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">compilation</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">bz2</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">194765165</span><span class=\"w\"> </span><span class=\"mf\">225581880.12</span><span class=\"w\"> </span><span class=\"mi\">437412507</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">197703277</span><span class=\"w\"> </span><span class=\"mf\">222917937.46</span><span class=\"w\"> </span><span class=\"mi\">281571195</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">execution</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">spidermonkey</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">895587497</span><span class=\"w\"> </span><span class=\"mf\">923280792.22</span><span class=\"w\"> </span><span class=\"mi\">972838288</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">891917856</span><span class=\"w\"> </span><span class=\"mf\">927697965.55</span><span class=\"w\"> </span><span class=\"mi\">1121115203</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">compilation</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">spidermonkey</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">8325711261</span><span class=\"w\"> </span><span class=\"mf\">8502522129.94</span><span class=\"w\"> </span><span class=\"mi\">8732981273</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">8370183347</span><span class=\"w\"> </span><span class=\"mf\">8530524550.49</span><span class=\"w\"> </span><span class=\"mi\">9984684780</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n\n<span class=\"n\">instantiation</span><span class=\"w\"> </span>:: <span class=\"nc\">cycles</span><span class=\"w\"> </span>:: <span class=\"nc\">benchmarks</span><span class=\"o\">/</span><span class=\"n\">pulldown</span><span class=\"o\">-</span><span class=\"n\">cmark</span><span class=\"o\">/</span><span class=\"n\">benchmark</span><span class=\"p\">.</span><span class=\"n\">wasm</span>\n\n<span class=\"w\">  </span><span class=\"n\">No</span><span class=\"w\"> </span><span class=\"n\">difference</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">performance</span><span class=\"p\">.</span>\n\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">214742</span><span class=\"w\"> </span><span class=\"mf\">289658.22</span><span class=\"w\"> </span><span class=\"mi\">800685</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">so</span>\n<span class=\"w\">  </span><span class=\"p\">[</span><span class=\"mi\">204642</span><span class=\"w\"> </span><span class=\"mf\">290351.57</span><span class=\"w\"> </span><span class=\"mi\">854625</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"n\">main</span><span class=\"p\">.</span><span class=\"n\">so</span>\n</code></pre></div>\n<p>I think it is safe to say that this doesn't have an affect on our regular suite, and I expect that the JS speed ups you are reporting rely on weval'ing first.</p>\n</blockquote>",
+        "id": 436297757,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714490801
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2031826325\">PR review</a>:</p>\n<blockquote>\n<p>Overall looks great, but I have a few nitpicks, mostly related to improving things for future code readers. Thanks!</p>\n</blockquote>",
+        "id": 436309118,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2031826325\">PR review</a>:</p>\n<blockquote>\n<p>Overall looks great, but I have a few nitpicks, mostly related to improving things for future code readers. Thanks!</p>\n</blockquote>",
+        "id": 436309120,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585111382\">PR review comment</a>:</p>\n<blockquote>\n<p>Care to add a brief comment to this test file about what we are aiming to exercise here, so that future changes that happen to tweak this disassembly know what property to check is preserved in their changes?</p>\n</blockquote>",
+        "id": 436309124,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585101299\">PR review comment</a>:</p>\n<blockquote>\n<p>All the rest of our offset getters are using typed indices; can we define a <code>CallIndirectSiteIndex</code> (feel free to word smith) type for these? It just takes three lines in <code>crates/types/src/lib.rs</code>:</p>\n<p><a href=\"https://github.com/bytecodealliance/wasmtime/blob/0f4c0d4a358187f99f23897d306c8b2a3c94287e/crates/types/src/lib.rs#L833-L846\">https://github.com/bytecodealliance/wasmtime/blob/0f4c0d4a358187f99f23897d306c8b2a3c94287e/crates/types/src/lib.rs#L833-L846</a></p>\n</blockquote>",
+        "id": 436309125,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585095494\">PR review comment</a>:</p>\n<blockquote>\n<p>That's a lot of \"index\", perhaps we could reword this a little and rename the <code>index</code> parameter to <code>call_site</code>? I think this is a little more clear:</p>\n<div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>    /// Return the offset from `self` of `self.call_indirect_caches[call_site].index`.\n</code></pre></div>\n<p>(And similar above)</p>\n</blockquote>",
+        "id": 436309127,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585112652\">PR review comment</a>:</p>\n<blockquote>\n<p>(ditto for all these tests)</p>\n</blockquote>",
+        "id": 436309128,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585084044\">PR review comment</a>:</p>\n<blockquote>\n<p>Could you add some comments here for future readers and possibly factor this scan out into a helper method to help prevent this function from getting even more gigantic?</p>\n</blockquote>",
+        "id": 436309129,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585108377\">PR review comment</a>:</p>\n<blockquote>\n<p>This could really use some more detail. As a user, why shouldn't I just enable this all the time? What are the trade offs? What is the default? What does it do? When does it apply? How does it affect memory footprint and pooling allocator integration? Etc...</p>\n<p>The automatic github actions comment has a good template in the first check box: <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2084268706\">https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2084268706</a></p>\n</blockquote>",
+        "id": 436309130,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585139872\">PR review comment</a>:</p>\n<blockquote>\n<p>indireaching? This is a typo and not an intentional contraction, right?</p>\n</blockquote>",
+        "id": 436309131,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585111686\">PR review comment</a>:</p>\n<blockquote>\n<p>Ditto</p>\n</blockquote>",
+        "id": 436309132,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585155021\">PR review comment</a>:</p>\n<blockquote>\n<p>Could we factor this one out into smaller helpers and add comments describing the code and blocks we are emitting as well? I'm finding it really hard to read this giant block of clif-building code directly. See for example the overview comment and comments for each block we generate here:</p>\n<p><a href=\"https://github.com/bytecodealliance/wasmtime/blob/0f4c0d4a358187f99f23897d306c8b2a3c94287e/crates/cranelift/src/gc/enabled.rs#L341-L449\">https://github.com/bytecodealliance/wasmtime/blob/0f4c0d4a358187f99f23897d306c8b2a3c94287e/crates/cranelift/src/gc/enabled.rs#L341-L449</a></p>\n</blockquote>",
+        "id": 436309133,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585126320\">PR review comment</a>:</p>\n<blockquote>\n<p>Speaking of that comment, the second item doesn't seem to be satisfied in this PR either: adding support for fuzzing this option. It should be just a couple-line change in these places:</p>\n<ul>\n<li><a href=\"https://github.com/bytecodealliance/wasmtime/blob/0f4c0d4a358187f99f23897d306c8b2a3c94287e/crates/fuzzing/src/generators/config.rs#L458\">https://github.com/bytecodealliance/wasmtime/blob/0f4c0d4a358187f99f23897d306c8b2a3c94287e/crates/fuzzing/src/generators/config.rs#L458</a></li>\n<li><a href=\"https://github.com/bytecodealliance/wasmtime/blob/0f4c0d4a358187f99f23897d306c8b2a3c94287e/crates/fuzzing/src/generators/config.rs#L150\">https://github.com/bytecodealliance/wasmtime/blob/0f4c0d4a358187f99f23897d306c8b2a3c94287e/crates/fuzzing/src/generators/config.rs#L150</a></li>\n</ul>\n</blockquote>",
+        "id": 436309134,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714494038
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436346364,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714507906
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436346835,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508141
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032443825\">PR review</a>.</p>",
+        "id": 436346851,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508145
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585477877\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 436346852,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508145
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032443929\">PR review</a>.</p>",
+        "id": 436346859,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508149
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585477935\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 436346860,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508149
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032444039\">PR review</a>.</p>",
+        "id": 436346872,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508153
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585477996\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 436346873,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508153
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032444093\">PR review</a>.</p>",
+        "id": 436346877,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508155
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585478024\">PR review comment</a>:</p>\n<blockquote>\n<p>Done!</p>\n</blockquote>",
+        "id": 436346878,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508155
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032444156\">PR review</a>.</p>",
+        "id": 436346883,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508157
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585478070\">PR review comment</a>:</p>\n<blockquote>\n<p>For sure, added explanations here and below giving the reasons for expecting/not expecting the opt, and the key bits of IR we're asserting.</p>\n</blockquote>",
+        "id": 436346884,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508157
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032444198\">PR review</a>.</p>",
+        "id": 436346891,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508159
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585478099\">PR review comment</a>:</p>\n<blockquote>\n<p>Updated!</p>\n</blockquote>",
+        "id": 436346892,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508159
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032444228\">PR review</a>.</p>",
+        "id": 436346894,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508160
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585478118\">PR review comment</a>:</p>\n<blockquote>\n<p>Updated!</p>\n</blockquote>",
+        "id": 436346896,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508161
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032444300\">PR review</a>.</p>",
+        "id": 436346906,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508163
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585478152\">PR review comment</a>:</p>\n<blockquote>\n<p>Huh, should be \"indirect call caching\"; somehow my fingers or a misplaced editor command swallowed the middle bits of that, sorry!</p>\n</blockquote>",
+        "id": 436346909,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508163
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2032444354\">PR review</a>.</p>",
+        "id": 436346941,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508165
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1585478188\">PR review comment</a>:</p>\n<blockquote>\n<p>Added a similar comment and factored out a little bit of the logic (and reduced the CFG by one block while I was at it) -- hopefully clearer now!</p>\n</blockquote>",
+        "id": 436346942,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714508166
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436348841,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714509007
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2087138489\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>Updated, let me know what you think!</p>\n</blockquote>",
+        "id": 436348949,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714509062
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2087151873\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>(Oh, and forgot to mention: thanks for the thorough benchmarks on this! I've gotta dig into why Sightglass is so finicky for me...)</p>\n</blockquote>",
+        "id": 436349317,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714509219
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436349740,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714509386
+    },
+    {
+        "content": "<p>github-actions[bot] <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2087639404\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<h4>Subscribe to Label Action</h4>\n<p>cc @fitzgen</p>\n<p>&lt;details&gt;<br>\nThis issue or pull request has been labeled: \"fuzzing\", \"wasmtime:ref-types\"</p>\n<p>Thus the following users have been cc'd because of the following labels:</p>\n<ul>\n<li>fitzgen: fuzzing, wasmtime:ref-types</li>\n</ul>\n<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>\n<p><a href=\"https://github.com/bytecodealliance/subscribe-to-label-action\">Learn more.</a><br>\n&lt;/details&gt;</p>\n</blockquote>",
+        "id": 436365603,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714517066
+    },
+    {
+        "content": "<p>fitzgen <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2088700899\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>Oh also, I mentioned this in the Cranelift meeting, but wanted to put it down here for posterity too: it seems like the limit on the number of caches isn't actually implemented.</p>\n</blockquote>",
+        "id": 436530029,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714580092
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436536412,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714582397
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2088759959\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>Yep, I missed that entirely in this iteration of the patch -- sorry about that! Just updated. I ended up wiring the limit through to a new config option (with docs, CLI flag, fuzzing) so that I could easily test it without a huge test input.</p>\n</blockquote>",
+        "id": 436536486,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714582429
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436536747,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714582521
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2034462912\">PR review</a>:</p>\n<blockquote>\n<p><span aria-label=\"rocket\" class=\"emoji emoji-1f680\" role=\"img\" title=\"rocket\">:rocket:</span> </p>\n</blockquote>",
+        "id": 436574765,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714598415
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2034462912\">PR review</a>:</p>\n<blockquote>\n<p><span aria-label=\"rocket\" class=\"emoji emoji-1f680\" role=\"img\" title=\"rocket\">:rocket:</span> </p>\n</blockquote>",
+        "id": 436574766,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714598415
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1586827712\">PR review comment</a>:</p>\n<blockquote>\n<p>This is great, thank you. I really appreciate having this stuff factored out into bite-sized chunks.</p>\n</blockquote>",
+        "id": 436574767,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714598416
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436587878,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714605322
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2089277076\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>The merge queue did its job (nice!) and found a conflict with #8515 which merged after this PR's CI ran. I pushed a fix which is fairly small but @fitzgen maybe PTAL at least commit just to be sure?</p>\n</blockquote>",
+        "id": 436588169,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714605475
+    },
+    {
+        "content": "<p>cfallin edited a <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2089277076\">comment</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>The merge queue did its job (nice!) and found a conflict with #8515 which merged after this PR's CI ran. I pushed a fix which is fairly small but @fitzgen maybe PTAL at least the last commit just to be sure?</p>\n</blockquote>",
+        "id": 436588326,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714605574
+    },
+    {
+        "content": "<p>cfallin <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#issuecomment-2089280124\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>:</p>\n<blockquote>\n<p>(or @jameysharp feel free to review last commit too as it interacts with your change in #8515!)</p>\n</blockquote>",
+        "id": 436588573,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714605700
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2034753644\">PR review</a>.</p>",
+        "id": 436611431,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714621630
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1587022341\">PR review comment</a>:</p>\n<blockquote>\n<p>Oh I just noticed this new index type is in between the definition of VMSharedTypeIndex and the impl block defining methods for it. Can we move it before or after so that those two are together?</p>\n</blockquote>",
+        "id": 436611432,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714621630
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2034753644\">PR review</a>.</p>",
+        "id": 436611433,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714621630
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1587027065\">PR review comment</a>:</p>\n<blockquote>\n<p>Is this allowed to return false even when the value is actually zero? Jamey is adding support for the extended const proposal and it extends const expressions with addition, subtraction, and multiplication, so there will soon be many ways to evaluate to zero. Doesn’t mean we can’t land this PR now but we should be clear about the semantics of this method</p>\n</blockquote>",
+        "id": 436611434,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714621630
+    },
+    {
+        "content": "<p>cfallin updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436622923,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630303
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2034901118\">PR review</a>.</p>",
+        "id": 436622935,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630315
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1587110952\">PR review comment</a>:</p>\n<blockquote>\n<p>Clarified a bit -- renamed to <code>provably_nonzero_i32</code> (inverted from is-possibly-nonzero -- clearer this way IMHO) and commented more. It's always allowed to return <code>false</code> (can't prove anything), but if <code>true</code>, must actually be a case we know is always nonzero (currently only an i32.const with nonzero constant).</p>\n</blockquote>",
+        "id": 436622937,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630315
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2034901162\">PR review</a>.</p>",
+        "id": 436622938,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630317
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1587110982\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah, yeah, didn't notice that; moved down a bit.</p>\n</blockquote>",
+        "id": 436622939,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630317
+    },
+    {
+        "content": "<p>cfallin has enabled auto merge for <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436622995,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630330
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2034907878\">PR review</a>.</p>",
+        "id": 436623502,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630676
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1587115123\">PR review comment</a>:</p>\n<blockquote>\n<p>I would suggest naming this with the opposite sense, like: <code>is_definitely_nonzero</code>, which returns true for <code>I32Const(x) if x != 0</code>, and may also return true if there are any other circumstances where it can prove this, but otherwise returns false. Then, extended constants or any other strange things will safely return false, meaning that you can't be sure your optimization is valid, and you'll only apply the optimization when it's definitely okay.</p>\n<p>Further, when we follow Nick's suggestion for making the <code>ConstExpr</code> evaluator try to run even before an <code>Instance</code> is available, it will be clear how to invoke that to implement this. If it fails because it needs inputs which aren't known until instantiation, or it succeeds but returns 0, then we should return that the expression is not \"definitely nonzero\".</p>\n</blockquote>",
+        "id": 436623503,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630676
+    },
+    {
+        "content": "<p>jameysharp submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2034909803\">PR review</a>.</p>",
+        "id": 436623660,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630772
+    },
+    {
+        "content": "<p>jameysharp created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1587116301\">PR review comment</a>:</p>\n<blockquote>\n<p>Hah, raced; I'm glad we're on the same page.</p>\n</blockquote>",
+        "id": 436623661,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714630772
+    },
+    {
+        "content": "<p>cfallin merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509\">PR #8509</a>.</p>",
+        "id": 436627268,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714632588
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2038788785\">PR review</a>.</p>",
+        "id": 436937653,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714760959
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1589594152\">PR review comment</a>:</p>\n<blockquote>\n<p>Could these be moved to <code>-O</code> options as \"tuning\" or \"optimizaion\" options?</p>\n<p>The <code>WasmOptions</code> group here is intended for semantic differences in the generated code and these options shouldn't affect any generated code.</p>\n<p>(thanks for adding cli flags though!)</p>\n</blockquote>",
+        "id": 436937654,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714760959
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#discussion_r1589598953\">PR review comment</a>:</p>\n<blockquote>\n<p>Ah, yeah, for sure -- will do in a followup PR.</p>\n</blockquote>",
+        "id": 436938189,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714761160
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8509#pullrequestreview-2038794362\">PR review</a>.</p>",
+        "id": 436938190,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1714761160
+    }
+]

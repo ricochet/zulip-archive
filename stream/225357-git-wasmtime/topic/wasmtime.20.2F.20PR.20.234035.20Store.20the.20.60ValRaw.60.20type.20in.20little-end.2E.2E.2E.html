@@ -1,0 +1,182 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #4035 Store the `ValRaw` type in little-end... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html">wasmtime / PR #4035 Store the `ValRaw` type in little-end...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="278981364"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/278981364" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#278981364">(Apr 14 2022 at 15:35)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/4035">PR #4035</a> from <code>val-raw-little-endian</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit changes the internal representation of the <code>ValRaw</code> type to<br>
+an unconditionally little-endian format instead of its current<br>
+native-endian format. The documentation and various accessors here have<br>
+been updated as well as the associated trampolines that read <code>ValRaw</code><br>
+to always work with little-endian values, converting to the host<br>
+endianness as necessary.</p>
+<p>The motivation for this change originally comes from the implementation<br>
+of the component model that I'm working on. One aspect of the component<br>
+model's canonical ABI is how variants are passed to functions as<br>
+immediate arguments. For example for a component model function:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">foo</span>: <span class="nc">function</span><span class="p">(</span><span class="n">x</span>: <span class="nc">expected</span><span class="o">&lt;</span><span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="kt">f64</span><span class="o">&gt;</span><span class="p">)</span><span class="w"></span>
+</code></pre></div>
+<p>This translates to a core wasm function:</p>
+<div class="codehilite" data-code-language="wasm"><pre><span></span><code>(module
+  (func (export "foo") (param i32 i64)
+    ;; ...
+  )
+)
+</code></pre></div>
+<p>The first <code>i32</code> parameter to the core wasm function is the discriminant<br>
+of whether the result is an "ok" or an "err". The second <code>i64</code>, however,<br>
+is the "join" operation on the <code>i32</code> and <code>f64</code> payloads. Essentially<br>
+these two types are unioned into one type to get passed into the function.</p>
+<p>Currently in the implementation of the component model my plan is to<br>
+construct a <code>*mut [ValRaw]</code> to pass through to WebAssembly, always<br>
+invoking component exports through host trampolines. This means that the<br>
+implementation for <code>Result&lt;T, E&gt;</code> needs to do the correct "join"<br>
+operation here when encoding a particular case into the corresponding<br>
+<code>ValRaw</code>.</p>
+<p>I personally found this particularly tricky to do structurally. The<br>
+solution that I settled on with fitzgen was that if <code>ValRaw</code> was always<br>
+stored in a little endian format then we could employ a trick where when<br>
+encoding a variant we first set all the <code>ValRaw</code> slots to zero, then the<br>
+associated case we have is encoding. Afterwards the <code>ValRaw</code> values are<br>
+already encoded into the correct format as if they'd been "join"ed.</p>
+<p>For example if we were to encode <code>Ok(1i32)</code> then this would produce<br>
+<code>ValRaw { i32: 1 }</code>, which memory-wise is equivalent to <code>ValRaw { i64: 1 }</code><br>
+if the other bytes in the <code>ValRaw</code> are guaranteed to be zero. Similarly<br>
+storing <code>ValRaw { f64 }</code> is equivalent to the storage required for<br>
+<code>ValRaw { i64 }</code> here in the join operation.</p>
+<p>Note, though, that this equivalence relies on everything being<br>
+little-endian. Otherwise the in-memory representations of <code>ValRaw { i32: 1 }</code><br>
+and <code>ValRaw { i64: 1 }</code> are different.</p>
+<p>That motivation is what leads to this change. It's expected that this is<br>
+a low-to-zero cost change in the sense that little-endian platforms will<br>
+see no change and big-endian platforms are already required to<br>
+efficiently byte-swap loads/stores as WebAssembly requires that.<br>
+Additionally the <code>ValRaw</code> type is an esoteric niche use case primarily<br>
+used for accelerating the C API right now, so it's expected that not<br>
+many users will have to update for this change.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</li>
+<li>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</li>
+<li>[ ] This PR contains test cases, if meaningful.</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="278989617"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/278989617" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#278989617">(Apr 14 2022 at 16:38)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942533711">PR review</a>.</p>
+
+
+
+<a name="278991270"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/278991270" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#278991270">(Apr 14 2022 at 16:52)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4035">PR #4035</a> from <code>val-raw-little-endian</code> to <code>main</code>.</p>
+
+
+
+<a name="278994390"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/278994390" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#278994390">(Apr 14 2022 at 17:15)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942571259">PR review</a>.</p>
+
+
+
+<a name="278994391"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/278994391" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#278994391">(Apr 14 2022 at 17:15)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r850647439">PR review comment</a>:</p>
+<blockquote>
+<p>Maybe store <code>char[4]</code>, <code>char[8]</code>, ... instead? Otherwise people will likely forget to do the endianness transform. Especially as all common architectures are little endian too.</p>
+</blockquote>
+
+
+
+<a name="278994480"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/278994480" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#278994480">(Apr 14 2022 at 17:15)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942571941">PR review</a>.</p>
+
+
+
+<a name="278994482"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/278994482" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#278994482">(Apr 14 2022 at 17:15)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r850647870">PR review comment</a>:</p>
+<blockquote>
+<p>*ValRaw</p>
+</blockquote>
+
+
+
+<a name="279001201"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/279001201" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#279001201">(Apr 14 2022 at 18:08)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942627976">PR review</a>.</p>
+
+
+
+<a name="279001202"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/279001202" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#279001202">(Apr 14 2022 at 18:08)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r850686504">PR review comment</a>:</p>
+<blockquote>
+<p>I would prefer to leave this in to avoid the need for funky casts and such in C. This is not intended to be super heavily used either and other language bindings will have to deal with this anyway.</p>
+</blockquote>
+
+
+
+<a name="279001249"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/279001249" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#279001249">(Apr 14 2022 at 18:09)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-942629041">PR review</a>.</p>
+
+
+
+<a name="279001250"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/279001250" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#279001250">(Apr 14 2022 at 18:09)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r850686937">PR review comment</a>:</p>
+<blockquote>
+<p>The comment here is actually intended to point to <code>Val</code> in that <code>ValRaw</code> is the unsafe way of working with what is otherwise a wasm <code>Val</code> value.</p>
+</blockquote>
+
+
+
+<a name="279001263"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/279001263" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#279001263">(Apr 14 2022 at 18:09)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/4035">PR #4035</a>.</p>
+
+
+
+<a name="279060311"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/279060311" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#279060311">(Apr 15 2022 at 08:31)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#pullrequestreview-943257378">PR review</a>.</p>
+
+
+
+<a name="279060314"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234035%20Store%20the%20%60ValRaw%60%20type%20in%20little-end.../near/279060314" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234035.20Store.20the.20.60ValRaw.60.20type.20in.20little-end.2E.2E.2E.html#279060314">(Apr 15 2022 at 08:31)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/4035#discussion_r851145625">PR review comment</a>:</p>
+<blockquote>
+<p>You need funky casts either way to support big endian systems.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

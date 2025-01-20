@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>a general architecture question i've had about Cranelift: why <em>does</em> Cranelift have embedded assemblers for its architectures, rather than using assemblers maintained elsewhere (like XED, for x86/x86-64)?</p>\n<p>my assumption is \"assemblers as part of <code>gas</code> or <code>xed</code> are slower than we'd want\", but i've never seen that actually stated. i'm sure there are good reasons, i'm just not sure what they are :D</p>\n<p>the followup then is: does it make sense to parcel out the assemblers in Cranelift as their own crates? i'm sure there are other projects that would like high-performance assemblers, like dynasm-rs (which itself has an x86 assembler embedded in it!)</p>",
+        "id": 200126172,
+        "sender_full_name": "iximeow",
+        "timestamp": 1591635309
+    },
+    {
+        "content": "<blockquote>\n<p>why does Cranelift have embedded assemblers for its architectures</p>\n</blockquote>\n<p>External assemblers need to be installed independently, which is hard on for example Windows. External assemblers also often don't support cross-compilation. They also emit object files, rather than machine code + relocations, which makes them pretty much useless for JIT compilation. Finally we have to model all instructions anyway to correctly perform regalloc. Doing the final assembly step is relatively easy once you have modelled all instructions you want to emit.</p>",
+        "id": 200126951,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1591635638
+    },
+    {
+        "content": "<p>One other really important consideration is latency -- we really wouldn't want to shell out to <code>as</code> (or even use a library in-process that parses text) when JIT'ing small Wasm modules in a browser, for example</p>",
+        "id": 200127435,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1591635877
+    },
+    {
+        "content": "<p>i don't mean \"external\" in the \"shell out to <code>gas</code>\" sense - i mean a library or crate we could depend on, so that we don't need to spell out how to encode simd instructions and prefix emission for the dozen'th time. even so, exposing an API to emit machine code and relocations is an interesting point, and exposing instruction constraints in a library-friendly way doesn't seem straightforward</p>",
+        "id": 200127483,
+        "sender_full_name": "iximeow",
+        "timestamp": 1591635906
+    },
+    {
+        "content": "<p>(another assumption i'm making here: an in-process library to assemble instructions ought to have an interface that lets you bypass parsing a string of text. but then you'd have to translate the in-compiler instruction representation to whatever the assembler expects, and that <em>does</em> add latency either way)</p>",
+        "id": 200127627,
+        "sender_full_name": "iximeow",
+        "timestamp": 1591635971
+    },
+    {
+        "content": "<p>Another part of the answer is that Cranelift needs to know a lot about ISAs, the opcodes and their operands, how many bytes of encoding they take, including things like x86 encodings where the size depends on which registers you choose anyway, and once it has all that, additionally adding the information and logic to actually encode the instructions is, relatively speaking, not that much more work.</p>",
+        "id": 200127727,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1591636035
+    },
+    {
+        "content": "<p>Also a built-in assembler only needs to handle the usually relatively small subset of the machine's insns that the insn selector can actually produce.  Generalizing it would mean you'd have to have more complete coverage, but that doesn't benefit any single user.</p>",
+        "id": 200134176,
+        "sender_full_name": "Julian Seward",
+        "timestamp": 1591639287
+    },
+    {
+        "content": "<p>FYI there is already an assembler and disassembler library for the Arm architecture (A-profile, both 32- and 64-bit) that provides most (if not all) of the features discussed here - VIXL:<br>\n<a href=\"https://git.linaro.org/arm/vixl.git\">https://git.linaro.org/arm/vixl.git</a><br>\nSince it has been developed precisely with the JIT use case in mind, it doesn't generate object files, but operates on memory buffers that contain machine code; there's also no text parsing involved. It is actively maintained by Arm (currently there is ongoing work on the Scalable Vector Extension support, for instance) and is used by other open source projects, the most high profile of which being the Android Runtime (ART) probably. Since cross-compilation was mentioned - VIXL also includes an AArch64 simulator, so machine code could be emitted and tested in an x86 environment, for example.</p>",
+        "id": 200172530,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591663458
+    },
+    {
+        "content": "<p>VIXL is a C++ library. It doesn't export a C api, which means that it can't be used directly from Rust. Also I can't find any API to query the size of an instruction.</p>",
+        "id": 200201674,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1591696033
+    },
+    {
+        "content": "<blockquote>\n<p>VIXL also includes an AArch64 simulator</p>\n</blockquote>\n<p>From the README:</p>\n<blockquote>\n<p>The VIXL simulator supports only those instructions that the VIXL assembler can<br>\ngenerate.</p>\n</blockquote>\n<p>This means that it will likely not be able to emulate Wasmtime. Also <code>qemu-aarch64</code> works fine already.</p>\n<p>Also from the README:</p>\n<blockquote>\n<p>Limited support for synchronisation instructions.</p>\n</blockquote>\n<p>This will make multithreading support harder.</p>",
+        "id": 200202266,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1591696409
+    },
+    {
+        "content": "<p>I don't think Anton was suggesting Cranelift use it, just that such a library exists.</p>",
+        "id": 200203391,
+        "sender_full_name": "Joey Gouly",
+        "timestamp": 1591697068
+    },
+    {
+        "content": "<p>Yes, exactly - just thought that it was worth mentioning.<br>\nThe simulator does not serve the same purpose as the QEMU userspace emulation - the idea is that you generate a code buffer and then use the simulator to execute the generated code, not that you take an arbitrary executable and run it. Arguably that's more suited to the JIT use case and has considerably less overhead. As for an API to query the size of an instruction - that's not necessary for AArch64 because the architecture has fixed-size instructions. However, there's a constant that defines the size.</p>",
+        "id": 200220791,
+        "sender_full_name": "Anton Kirilov",
+        "timestamp": 1591706409
+    },
+    {
+        "content": "<p>To wit, VIXL is what we use in Spidermonkey to run most of our aarch64 tests, it has been quite useful and helped not requiring aarch64 hardware in the past. Knowing that it doesn't well support synchronization instructions might be helpful when we want to implement wasm SIMD in the new backend.</p>",
+        "id": 200223481,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1591707848
+    }
+]

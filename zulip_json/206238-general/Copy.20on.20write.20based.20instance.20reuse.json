@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>Hi. So we're quite heavily using wasmtime in <a href=\"https://github.com/paritytech/substrate\">substrate</a> and we're looking to reduce the overhead/latency of instantiating new instances of WASM modules. Our usecase is basically this:</p>\n<p>1) we compile a single WASM module once at the start (and maybe update it every few weeks),<br>\n2) from a single thread we instantiate a fresh module instance, call into it once, and throw the instance away,<br>\n3) we repeat (2) many times per second.</p>\n<p>So I've done some experiments, and here's roughly the performance we're getting on a benchmark where we instantiate a module (using our production WASM blob) and call an empty function:</p>\n<ul>\n<li>On demand allocation strategy: ~83us</li>\n<li>Pooling allocation strategy: ~83us</li>\n<li>Pooling allocation strategy with uffd enabled: ~48us</li>\n<li>Copy on write-based allocation strategy that I quickly hacked together: ~20us</li>\n</ul>\n<p>Of course a proper production-quality implementation might benchmark slightly differently, but as you can see the numbers here are pretty promising. (And it doesn't even require a recent Linux kernel like uffd does, nor it does require you to manually estimate the module/instance limits like with the polling allocation strategy.)</p>\n<p>So my question here is twofold:</p>\n<p>1) Did anyone ever previously investigate introducing a COW-based instance allocation scheme to wasmtime?<br>\n2) Would there be interest in adding a COW-based instance instantiation to wasmtime? If so I would be happy to work on it and put up a PR.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/paritytech/substrate\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/9619982d2397b0232622ea61f7455d81ed7e5d94\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f306137303032323630386637623539613435616238653039386336373166323865666161343832356166613061313364396261333134633461336133326664312f706172697479746563682f737562737472617465)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/paritytech/substrate\" title=\"GitHub - paritytech/substrate: Substrate: The platform for blockchain innovators\">GitHub - paritytech/substrate: Substrate: The platform for blockchain innovators</a></div><div class=\"message_embed_description\">Substrate: The platform for blockchain innovators. Contribute to paritytech/substrate development by creating an account on GitHub.</div></div></div>",
+        "id": 266657772,
+        "sender_full_name": "Jan",
+        "timestamp": 1641194933
+    },
+    {
+        "content": "<p>i have a similar issue for a game I'm planning on eventually finishing writing -- it would call 1 wasm function perhaps millions of times per second and from multiple threads, I'd like the wasm memory to be copy on write because it's a strict requirement that the function be completely deterministic such that running it twice with the same inputs always gives the exact same result -- even if the wasm is malicious and/or poorly designed to try to detect previous invocations and do something different.</p>",
+        "id": 266709559,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1641229453
+    },
+    {
+        "content": "<p>@Jan can you say more about how your CoW scheme works? In particular, do you instrument loads and stores to access an overlay and fall back to the image (i.e., a \"software mapping\" scheme), or are you altering page mappings (mmap or similar)?</p>",
+        "id": 266713050,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1641231000
+    },
+    {
+        "content": "<blockquote>\n<p>can you say more about how your CoW scheme works?</p>\n</blockquote>\n<p>Sure. It's pretty simple. It roughly goes like this:</p>\n<p>1) Map the memory through <code>mmap</code> with an memfd handle as the file descriptor.<br>\n2) Instantiate the WASM module once.<br>\n3) Fossilize the contents of the memfd by remapping the memory pages inplace (using <code>MAP_PRIVATE</code> + <code>MAP_FIXED</code> flags). Now the instantiated instance can be normally used without modifying the original memory contents.<br>\n4) When we're done with the instance reset it by madvise'ing the memory with a <code>MADV_DONTNEED</code>. The memory is reset to its initial state just after it was instantiated and the instance can be reused again.</p>",
+        "id": 266771340,
+        "sender_full_name": "Jan",
+        "timestamp": 1641274443
+    },
+    {
+        "content": "<p>Ah, OK, so I would be interested if you had any throughput tests of this, not just latency; I suspect the remap (step 3) on instantiation will become a bottleneck, as it will (I think) need to take a one-per-address-space lock on the memory mapping data-structures. This bottleneck was, afaik, the original motivation behind the uffd-based implementation, most relevant in high-concurrency settings</p>",
+        "id": 266772374,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1641275742
+    },
+    {
+        "content": "<p>Actually, after reading again: the hotpath (instantiation once everything is ready) is <em>just</em> step 4, is that right? So just the <code>madvise()</code> and nothing else resets the already-existing mapping? Hmm, that's interesting</p>",
+        "id": 266772461,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1641275849
+    },
+    {
+        "content": "<p>Yes, the <code>madvise</code> does all of the work to reset the memory; you only run steps 1 to 3 once.</p>\n<p>I haven't really done any more thorough throughput tests for this, but I can't imagine it's going to be slower than initializing everything from scratch again on every instantiation in real word scenarios, although I guess there are probably some scenarios where the <code>uffd</code>-based approach might still be better.</p>\n<p>If you have any benchmarks you'd like me to run I'd be happy to oblige. (I'm currently in the process of getting a less hacky implementation put together which I should be able to eventually put up as a PR.)</p>",
+        "id": 266774069,
+        "sender_full_name": "Jan",
+        "timestamp": 1641277900
+    },
+    {
+        "content": "<p>i'd expect you to need a mmap to reset the mapping to a non-zero initial state. madvise will just tell the kernel it can replace whatever's in that address range with zeros whenever it feels like it, otherwise it's unmodified -- neither of those are resetting it to the initial memfd contents.</p>",
+        "id": 266777524,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1641281694
+    },
+    {
+        "content": "<p>Actually, no, <code>madvise</code> will automatically repopulate the pages with the memfd contents (because it's a shared anonymous mapping), so the memory doesn't need to be manually restored. The kernel does it all for you.</p>",
+        "id": 266778342,
+        "sender_full_name": "Jan",
+        "timestamp": 1641282684
+    },
+    {
+        "content": "<p>FWIW you're definitely not the only one interested in making instantiation blazingly fast, Fastly's primary use case of making an instance-per-request also motivates a lot of our work to make instantiation fast. If you've got ideas of how to make it faster we're always open to exploring things!</p>",
+        "id": 266836184,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1641316323
+    },
+    {
+        "content": "<p>One thing that may also be helpful is to share the benchmark you're using to analyze that as well. One thing Fastly is concerned about as well (which may be unique to Fastly and not your use case) is concurrent instantiations on many threads which originally motivated uffd because it was much faster than using <code>mmap</code>/<code>madvise</code>  due to those syscalls requiring a global process vm lock in the kernel</p>",
+        "id": 266836339,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1641316382
+    },
+    {
+        "content": "<p>I see, thanks for explaining in more detail the motivation behind picking the uffd approach!</p>\n<p>Once I get a proof-of-concept PR of my approach into an usable state I'll port our benchmark to use it (my hack with which I initially tested this isn't really something that anyone should see, for their own sanity's sake <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span> ), and I'll also add extra benchmarks to see how it scales per-thread and share the benchmarks + results.</p>",
+        "id": 266912428,
+        "sender_full_name": "Jan",
+        "timestamp": 1641374023
+    },
+    {
+        "content": "<p>Ok nice! We are happy to dig into and help with implementation or prototyping as well, so holler if you need help!</p>",
+        "id": 266941586,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1641392956
+    },
+    {
+        "content": "<p>I've made a PR with my implementation here; any comments would be highly appreciated!</p>\n<p><a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\">https://github.com/bytecodealliance/wasmtime/pull/3691</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/a4c58f70b72aa1f34feb43ab3a9d282fbed0b697\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f663365353436376236323030356661666134343337333438326261323932356161393930336362346137623861663930393036346165363364393332663533362f62797465636f6465616c6c69616e63652f7761736d74696d652f70756c6c2f33363931)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/3691\" title=\"Add copy-on-write based instance reuse mechanism by koute · Pull Request #3691 · bytecodealliance/wasmtime\">Add copy-on-write based instance reuse mechanism by koute · Pull Request #3691 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">This PR adds a new copy-on-write based instance reuse mechanism on Linux.\nUsage\nThe general idea is - you instantiate your instance once, and then you can reset its state back to how it was when it...</div></div></div>",
+        "id": 268000001,
+        "sender_full_name": "Jan",
+        "timestamp": 1642158794
+    },
+    {
+        "content": "<p>Awesome thanks for the pr <span class=\"user-mention\" data-user-id=\"467523\">@Jan</span> ! As a heads up Fastly folks have today and this coming Monday off, but we will be sure to look at this at most by Tuesday</p>",
+        "id": 268044276,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1642180767
+    }
+]

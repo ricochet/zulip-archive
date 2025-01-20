@@ -1,0 +1,116 @@
+[
+    {
+        "content": "<p>Was looking at fixing <a href=\"https://github.com/bytecodealliance/wasmtime/blob/5c8bce70a11657ad6740f56a852f64d147f93494/crates/wasi/src/preview2/host/udp.rs#L347\">the TODO</a> left by <span class=\"user-mention\" data-user-id=\"378155\">@Badeend</span> in the UDP implementation for checking permissions that datagram streams are actually allowed to connect to the remote address. However, to know which addresses we're allowed to connect with we need access to the <code>network</code> resource, but I don't believe we every have access to <code>network</code> at any point in creating datagram streams. Am I missing something or is this a bug in the udp wit interface?</p>",
+        "id": 406329447,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701876389
+    },
+    {
+        "content": "<p>Unless I'm missing something, that appears to be a bug. Each outgoing-datagram can have an ip-socket-address to be sent to, but there's no network argument on the <code>send</code>.</p>",
+        "id": 406330955,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1701876787
+    },
+    {
+        "content": "<p>Every UDP socket need to be bound to a network+local address using <code>bind</code> before you can call any stream-related method.</p>",
+        "id": 406331032,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1701876812
+    },
+    {
+        "content": "<p>Ah, and then all outgoing-datagrams are associated with that network? That makes sense.</p>",
+        "id": 406331199,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1701876850
+    },
+    {
+        "content": "<p>Yup</p>",
+        "id": 406331241,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1701876863
+    },
+    {
+        "content": "<p>But can't you change the upstream address?</p>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>stream: func(remote-address: option&lt;ip-socket-address&gt;)-&gt; result&lt;tuple&lt;incoming-datagram-stream, outgoing-datagram-stream&gt;, error-code&gt;;\n</code></pre></div>",
+        "id": 406331269,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701876875
+    },
+    {
+        "content": "<p>The local address is bound exactly once, indeed. But the socket can be used to send&amp;receive to/from many remote addresses</p>",
+        "id": 406331704,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1701877014
+    },
+    {
+        "content": "<p>And wouldn't those remote addresses need to be validated against the network?</p>",
+        "id": 406331770,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701877038
+    },
+    {
+        "content": "<p>Yes. That's what the TODO comments are for</p>",
+        "id": 406331809,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1701877055
+    },
+    {
+        "content": "<p>So I guess you need to find a way to smuggle the network reference into the datagram streams</p>",
+        "id": 406332323,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1701877196
+    },
+    {
+        "content": "<p>Ok :-) so we're back to my original question. In order to check against the network, we need a handle to the <code>network</code> resource which we never have when creating a stream.</p>",
+        "id": 406332327,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701877197
+    },
+    {
+        "content": "<p>Ok so it's not a bug in the wit - we should be able to do the smuggling. The issue is that we're implementing <code>HostUdpSocket</code> on <code>T: WasiView</code> so there's not really any place for us to stick that reference currently.</p>",
+        "id": 406332634,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701877268
+    },
+    {
+        "content": "<p>Not directly at the moment, no. So the <code>bind</code> implementation needs to be altered to that it remembers the network reference the socket was bound to</p>",
+        "id": 406332636,
+        "sender_full_name": "Dave Bakker (badeend)",
+        "timestamp": 1701877269
+    },
+    {
+        "content": "<p>I'm not sure what the right solution could be since it seems like we want <code>HostUdpSocket</code> to be implemented on anything that implements <code>WasiView</code>, and it doesn't seem like we want to alter <code>WasiView</code> to learn how to store <code>network</code> resource handles.</p>",
+        "id": 406333162,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701877433
+    },
+    {
+        "content": "<p>Could (should) you store it using <code>WasiView::table_mut()</code>?</p>",
+        "id": 406333271,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701877458
+    },
+    {
+        "content": "<p>(not sure how that would work; just a drive-by comment :)</p>",
+        "id": 406333538,
+        "sender_full_name": "Joel Dice",
+        "timestamp": 1701877547
+    },
+    {
+        "content": "<p>Well the handle is in the table already, but we don't have a handle to it .</p>",
+        "id": 406333652,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701877572
+    },
+    {
+        "content": "<p>There's two options for this I think, one is to make a udp socket a \"child\" resource of the network which means you couldn't destroy the network until after you destroyed the udp socket. Then you'd be able to store <code>Resource&lt;Network&gt;</code> in the UDP socket representation. I wouldn't advise this due to the runtime semantics of child handles.</p>\n<p>Alternatively the <code>Network</code> structure could have an <code>Arc</code> internally and when the UDP socket is bound/created it clones that <code>Arc</code> and then stores it internally</p>",
+        "id": 406337750,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1701878717
+    },
+    {
+        "content": "<p>FYI: <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7648\">https://github.com/bytecodealliance/wasmtime/pull/7648</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/pull/7648\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/357be6b9f10c65e5b80f9c70885322ccce396083\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f363238343532396132306563393933633133346339616138633032316438326335633232623163316130353139633233336437336136636161613234373863302f62797465636f6465616c6c69616e63652f7761736d74696d652f70756c6c2f37363438)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/pull/7648\" title=\"Ensure `remote-address` is allowed when creating UDP stream by rylev · Pull Request #7648 · bytecodealliance/wasmtime\">Ensure `remote-address` is allowed when creating UDP stream by rylev · Pull Request #7648 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Until now, the remote-address argument to wasi:sockets/udp-socket#stream was not checked against the Pool of allowed IP addresses. Now, we store the Pool from network into the socket object in wasi...</div></div></div>",
+        "id": 406350778,
+        "sender_full_name": "Ryan Levick (rylev)",
+        "timestamp": 1701882894
+    }
+]

@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>I've been reading up on <span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span>'s very impressive work on using an egraph for optimizations. One part specifically caught my eye:</p>\n<blockquote>\n<p>Finally, by having as a first-class notion the ability to regenerate nodes at multiple locations, we can do rematerialization by writing \"policy\" code only: we can override a \"hit\" in the value-to-ID scoped hash map and pretend that a value does not yet exist, regenerating a pure node arbitrarily many times. We have found that remateralization is beneficial in at least two situations: immediate constants (we previously special-cased this in the backend lowering driver, but once per use rather than once per block) and binary operators with one immediate operand. (Why the latter but not e.g. all binary operators? Because they do not increase register pressure. Sinking an add will cause longer liveranges for two operands in exchange for a shorter one for the result; sinking an add-with-imm will be at worse liverange-neutral, and often better if many variants like x+4, x+8, x+12 are all generated and otherwise hoisted by LICM.)</p>\n</blockquote>\n<p>While I can see some value in sinking unary and nullary operations down to their first use to shrink their live range. I think that unconditionally re-emitting them in each block that uses them might be both overly pessimistic (can't re-use a value across blocks) and overly pessimistic (there might still be unnecessary spills within the block).</p>\n<p>I believe that regalloc2 might be the best place to perform remateralization since that's the point where we can reliably determine whether it is needed due to register pressure. However it can also be pretty complicated to implement: <a href=\"https://github.com/bytecodealliance/regalloc2/issues/8\">https://github.com/bytecodealliance/regalloc2/issues/8</a>.</p>\n<p>What are your thoughts?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/regalloc2/issues/8\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/6a088130ab1b760788c3ad1a43b4e50a7a9f2fca\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f643338393330376138613463626430613034663037656432616561653135646533396430326138353335626165613762373163343833313464663739626338632f62797465636f6465616c6c69616e63652f726567616c6c6f63322f6973737565732f38)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/regalloc2/issues/8\" title=\"Rematerialization · Issue #8 · bytecodealliance/regalloc2\">Rematerialization · Issue #8 · bytecodealliance/regalloc2</a></div><div class=\"message_embed_description\">As an alternative to spilling and reloading, a vreg value can sometimes be recomputed from other available values. There are two ways this can be supported in regalloc2: Simple rematerialization Su...</div></div></div>",
+        "id": 300841245,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1664206522
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"301625\">@Amanieu</span> I've thought a lot about this as well and I agree that in a perfect world, the register allocator is the place to consider the actual register pressure against available rematerializations and their costs (and their implications on liverange extensions for their inputs).</p>\n<p>In the absence of some framework for that I opted for a simpler approach that \"should never lose\" at least wrt register pressure impact: we only remat ops with zero or one inputs, so we are at worst replacing one liverange (result of the remat'd op) with another (the one input to the remat'd op). The cost of the op itself is not taken into account here, but on this question I relied on the macro-level benchmark results: code got significantly faster when I applied this approach.</p>\n<p>So in summary, I agree with you on the long-term solution, and I think we'd want to represent this to RA2 in terms of \"rematerializable with X cost\" metadata on instructions: it's ok to duplicate an instruction and it carries X cost, in the same unit as spillcost maybe. But that needs a lot more thought and we get short-term benefit, as well as exercising the code-motion capabilities during egraph elaboration, with the current approach. The current approach may someday be superseded if we can build the proper RA-integrated approach. Does that seem reasonable to you?</p>",
+        "id": 300848757,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1664208494
+    },
+    {
+        "content": "<p>That sounds great! I just wanted to know what your future plans were regarding rematerialization because it is such a critical optimization. Unfortunately it will probably be a while until I get around to working on remat in regalloc2 since it is quite complex and I have many other things to work on in the meantime.</p>",
+        "id": 300850375,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1664208887
+    },
+    {
+        "content": "<p>Also, I would like to at least wait for non-SSA support to be removed from regalloc2, which would simplify the codebase significantly.</p>",
+        "id": 300850577,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1664208936
+    },
+    {
+        "content": "<p>Yes absolutely; a few of the recent fuzzbug fixes have convinced me further that we need to move away from the \"no overlap\" invariant and solve some of the constraint-fixup issues by allowing overlaps instead. That's only really reasonable to think about with one def per vreg; so we'll want the SSA transition for that reason as well</p>",
+        "id": 300850862,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1664208997
+    },
+    {
+        "content": "<p>(that also lets us get rid of the redundant-move eliminator, probably; it was an awkward hack to avoid thinking about whether spillslot values were up-to-date or not more explicitly)</p>",
+        "id": 300851024,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1664209048
+    },
+    {
+        "content": "<p>The \"no overlap\" invariant?</p>",
+        "id": 301277961,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1664383117
+    },
+    {
+        "content": "<p>in RA2, we currently have the invariant that liveranges for a single vreg or within an allocation bundle cannot overlap; in other words, a value lives in only one place at a time</p>",
+        "id": 301282726,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1664384531
+    },
+    {
+        "content": "<p>allowing overlap instead lets us solve some constraint-rewriting cases easier and more efficiently</p>",
+        "id": 301282830,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1664384563
+    },
+    {
+        "content": "<p>SSA is required for this to happen, because if you have a value in more than one place, you need to generate moves, and tracking which is the most up-to-date is far easier if there is only one def (hence SSA)</p>",
+        "id": 301282916,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1664384590
+    }
+]

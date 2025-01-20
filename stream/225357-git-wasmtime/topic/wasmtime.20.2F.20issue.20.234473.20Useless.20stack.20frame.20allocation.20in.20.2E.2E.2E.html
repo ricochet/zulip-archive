@@ -1,0 +1,429 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / issue #4473 Useless stack frame allocation in ... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html">wasmtime / issue #4473 Useless stack frame allocation in ...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="290217924"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290217924" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290217924">(Jul 20 2022 at 10:39)</a>:</h4>
+<p>s0me0ne-unkn0wn opened <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>Researching the stack frame allocation logic in Cranelift, I've came across a behavior I consider to be suboptimal, which I cannot explain.</p>
+<p>I generated void N-ary WASM functions with empty body for N=[1..99]. Arguments are <code>i64</code> for the matter of simplicity. Then I compiled them all for <code>x86_64-none-linux-gnu</code> target and explored the machine code generated.</p>
+<p>Functions with arity from 1 to 4 shows some minimal yet useless preamble/postamble code generated:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>Starting from arity 5, argument loading code is generated, although values loaded are never used (the example is 7-ary func):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rax</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x18</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x20</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r11</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>Starting from arity 8, stack frame is generated as a result of <code>num_spillslots</code> from regalloc2 growing lineary with the number of arguments:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">&lt;</span><span class="nf">_wasm_function_0</span><span class="err">&gt;</span><span class="p">:</span><span class="w"></span>
+<span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x8</span><span class="p">(</span><span class="nv">%rdi</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="p">(</span><span class="nv">%r10</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">add</span><span class="w">    </span><span class="no">$0x10</span><span class="p">,</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">cmp</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">jbe</span><span class="w">    </span><span class="err">&lt;</span><span class="no">_wasm_function_0</span><span class="err">+</span><span class="mi">0x1a</span><span class="err">&gt;</span><span class="w"></span>
+<span class="nf">ud2</span><span class="w"></span>
+<span class="nf">sub</span><span class="w">    </span><span class="no">$0x20</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%r15</span><span class="p">,</span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rsp</span><span class="p">)</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rax</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x18</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x20</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r11</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x28</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r15</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rsp</span><span class="p">),</span><span class="nv">%r15</span><span class="w"></span>
+<span class="nf">add</span><span class="w">    </span><span class="no">$0x20</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>The higher the arity, the higher the frame size. For 99-ary function, 784-byte frame is generated, although it obviously cannot be used for anything by an empty-body function, which looks like a problem to me.</p>
+<p>Besides that, higher arities produce really weird argument loading code which just load values to registers only to overwrite them with other values at once:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="na">...</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x60</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x68</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x70</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x78</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x80</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x88</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="na">...</span><span class="w"></span>
+</code></pre></div>
+<p>Tested with the tip of <code>master</code> branch of <code>wasmtime</code>, as of today.</p>
+</blockquote>
+
+
+
+<a name="290220269"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290220269" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290220269">(Jul 20 2022 at 11:08)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190140463">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>Duplicate of <a href="https://github.com/bytecodealliance/wasmtime/issues/1148">https://github.com/bytecodealliance/wasmtime/issues/1148</a>.</p>
+</blockquote>
+
+
+
+<a name="290220348"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290220348" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290220348">(Jul 20 2022 at 11:09)</a>:</h4>
+<p>bjorn3 edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190140463">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>Partially duplicate of <a href="https://github.com/bytecodealliance/wasmtime/issues/1148">https://github.com/bytecodealliance/wasmtime/issues/1148</a>.</p>
+</blockquote>
+
+
+
+<a name="290220483"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290220483" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290220483">(Jul 20 2022 at 11:11)</a>:</h4>
+<p>bjorn3 edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190140463">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>Partially duplicate of <a href="https://github.com/bytecodealliance/wasmtime/issues/1148">https://github.com/bytecodealliance/wasmtime/issues/1148</a> (for the stack frame setup)</p>
+</blockquote>
+
+
+
+<a name="290220525"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290220525" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290220525">(Jul 20 2022 at 11:11)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190143560">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<blockquote>
+<p>Besides that, higher arities produce really weird argument loading code which just load values to registers only to overwrite them with other values at once:</p>
+</blockquote>
+<p>I think regalloc is smart enough to collapse multiple unused virtual registers into the same register here. However I don't think regalloc is allowed to remove unused instructions entirely. I'm guessing there did need to be some extra code in the backend to avoid loading unused arguments.</p>
+</blockquote>
+
+
+
+<a name="290221121"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290221121" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290221121">(Jul 20 2022 at 11:18)</a>:</h4>
+<p>pepyakin <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190148608">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>(I started writing before your edits but figured it may still be relevant).</p>
+<p>I think we've spotted a similar behavior for aarch64, whereas the linked issue says it was fixed there. @s0me0ne-unkn0wn do you mind posting your finding for the aarch64?</p>
+</blockquote>
+
+
+
+<a name="290221151"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290221151" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290221151">(Jul 20 2022 at 11:18)</a>:</h4>
+<p>pepyakin labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>Researching the stack frame allocation logic in Cranelift, I've came across a behavior I consider to be suboptimal, which I cannot explain.</p>
+<p>I generated void N-ary WASM functions with empty body for N=[1..99]. Arguments are <code>i64</code> for the matter of simplicity. Then I compiled them all for <code>x86_64-none-linux-gnu</code> target and explored the machine code generated.</p>
+<p>Functions with arity from 1 to 4 shows some minimal yet useless preamble/postamble code generated:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>Starting from arity 5, argument loading code is generated, although values loaded are never used (the example is 7-ary func):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rax</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x18</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x20</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r11</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>Starting from arity 8, stack frame is generated as a result of <code>num_spillslots</code> from regalloc2 growing lineary with the number of arguments:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">&lt;</span><span class="nf">_wasm_function_0</span><span class="err">&gt;</span><span class="p">:</span><span class="w"></span>
+<span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x8</span><span class="p">(</span><span class="nv">%rdi</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="p">(</span><span class="nv">%r10</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">add</span><span class="w">    </span><span class="no">$0x10</span><span class="p">,</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">cmp</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">jbe</span><span class="w">    </span><span class="err">&lt;</span><span class="no">_wasm_function_0</span><span class="err">+</span><span class="mi">0x1a</span><span class="err">&gt;</span><span class="w"></span>
+<span class="nf">ud2</span><span class="w"></span>
+<span class="nf">sub</span><span class="w">    </span><span class="no">$0x20</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%r15</span><span class="p">,</span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rsp</span><span class="p">)</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rax</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x18</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x20</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r11</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x28</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r15</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rsp</span><span class="p">),</span><span class="nv">%r15</span><span class="w"></span>
+<span class="nf">add</span><span class="w">    </span><span class="no">$0x20</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>The higher the arity, the higher the frame size. For 99-ary function, 784-byte frame is generated, although it obviously cannot be used for anything by an empty-body function, which looks like a problem to me.</p>
+<p>Besides that, higher arities produce really weird argument loading code which just load values to registers only to overwrite them with other values at once:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="na">...</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x60</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x68</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x70</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x78</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x80</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x88</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="na">...</span><span class="w"></span>
+</code></pre></div>
+<p>Tested with the tip of <code>master</code> branch of <code>wasmtime</code>, as of today.</p>
+</blockquote>
+
+
+
+<a name="290221152"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290221152" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290221152">(Jul 20 2022 at 11:18)</a>:</h4>
+<p>pepyakin labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>Researching the stack frame allocation logic in Cranelift, I've came across a behavior I consider to be suboptimal, which I cannot explain.</p>
+<p>I generated void N-ary WASM functions with empty body for N=[1..99]. Arguments are <code>i64</code> for the matter of simplicity. Then I compiled them all for <code>x86_64-none-linux-gnu</code> target and explored the machine code generated.</p>
+<p>Functions with arity from 1 to 4 shows some minimal yet useless preamble/postamble code generated:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>Starting from arity 5, argument loading code is generated, although values loaded are never used (the example is 7-ary func):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rax</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x18</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x20</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r11</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>Starting from arity 8, stack frame is generated as a result of <code>num_spillslots</code> from regalloc2 growing lineary with the number of arguments:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">&lt;</span><span class="nf">_wasm_function_0</span><span class="err">&gt;</span><span class="p">:</span><span class="w"></span>
+<span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x8</span><span class="p">(</span><span class="nv">%rdi</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="p">(</span><span class="nv">%r10</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">add</span><span class="w">    </span><span class="no">$0x10</span><span class="p">,</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">cmp</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">jbe</span><span class="w">    </span><span class="err">&lt;</span><span class="no">_wasm_function_0</span><span class="err">+</span><span class="mi">0x1a</span><span class="err">&gt;</span><span class="w"></span>
+<span class="nf">ud2</span><span class="w"></span>
+<span class="nf">sub</span><span class="w">    </span><span class="no">$0x20</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%r15</span><span class="p">,</span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rsp</span><span class="p">)</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rax</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x18</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x20</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r11</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x28</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r15</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rsp</span><span class="p">),</span><span class="nv">%r15</span><span class="w"></span>
+<span class="nf">add</span><span class="w">    </span><span class="no">$0x20</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>The higher the arity, the higher the frame size. For 99-ary function, 784-byte frame is generated, although it obviously cannot be used for anything by an empty-body function, which looks like a problem to me.</p>
+<p>Besides that, higher arities produce really weird argument loading code which just load values to registers only to overwrite them with other values at once:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="na">...</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x60</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x68</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x70</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x78</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x80</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x88</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="na">...</span><span class="w"></span>
+</code></pre></div>
+<p>Tested with the tip of <code>master</code> branch of <code>wasmtime</code>, as of today.</p>
+</blockquote>
+
+
+
+<a name="290222037"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290222037" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290222037">(Jul 20 2022 at 11:27)</a>:</h4>
+<p>s0me0ne-unkn0wn <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190156644">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>@pepyakin I didn't do as much tests for aarch64 as for x64, but in principle it goes the same way there. Frame generated is a little smaller on ARM (656 bytes instead of 784 for 99-ary func) but is still linearly growing with the number of arguments. Argument loading code looks similar to x64 too:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="na">...</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#272</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#280</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#288</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#296</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#304</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#312</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#320</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#328</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#336</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#344</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x2</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#352</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x3</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#360</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x4</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#368</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x5</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#376</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x6</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#384</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x7</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#392</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#400</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#408</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#416</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#424</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#432</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#440</span><span class="p">]</span><span class="w"></span>
+<span class="nf">ldr</span><span class="w"> </span><span class="no">x1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="no">x29</span><span class="p">,</span><span class="w"> </span><span class="mi">#448</span><span class="p">]</span><span class="w"></span>
+<span class="na">...</span><span class="w"></span>
+</code></pre></div>
+</blockquote>
+
+
+
+<a name="290224062"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290224062" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290224062">(Jul 20 2022 at 11:48)</a>:</h4>
+<p>s0me0ne-unkn0wn <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190175936">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>I've just checked a useless preamble case on aarch64, and this one is fixed for ARM indeed. Function from unary to 6-ary are just like that:</p>
+<p><div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">&lt;</span><span class="nf">_wasm_function_0</span><span class="err">&gt;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="nf">ret</span><span class="w"></span>
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="290244397"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290244397" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290244397">(Jul 20 2022 at 14:42)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190375237">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>cc @cfallin this was something that Nick and I actually ran into when working on the stack unwinding PR that I forgot to open an issue for. I think that this is probably happening because ABI bits in Wasmtime are modeled as moving the argument register into a virtual register unconditionally. When this mov instruction is between two registers it's later deleted during register allocation (or around there I think). When arguments are moved from the stack frame into a register, though, that's not detected as a non-side-effectful move which means that the mov instruction is left.</p>
+<p>We were playing around with <a href="https://github.com/bytecodealliance/wasmtime/blob/main/tests/misc_testsuite/func-400-params.wast">https://github.com/bytecodealliance/wasmtime/blob/main/tests/misc_testsuite/func-400-params.wast</a> locally. One thing that we found which was odd was that each stack argument wasn't moved into exactly the same destination register. For example we saw:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">      </span><span class="mi">38</span>:       <span class="nc">b84103a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">16</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">3</span><span class="n">c</span>:       <span class="nc">b84183a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">24</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">40</span>:       <span class="nc">b84203a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">32</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">44</span>:       <span class="nc">b84283a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">40</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">48</span>:       <span class="nc">b84303a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">48</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">4</span><span class="n">c</span>:       <span class="nc">b84383a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">56</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">50</span>:       <span class="nc">b84403a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">64</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">54</span>:       <span class="nc">b84483a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">72</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">58</span>:       <span class="nc">b84503a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">80</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">5</span><span class="n">c</span>:       <span class="nc">b84583a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">88</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">60</span>:       <span class="nc">b84603af</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w15</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">96</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">64</span>:       <span class="nc">b84683a3</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w3</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">104</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">68</span>:       <span class="nc">b84703a4</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w4</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">112</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">6</span><span class="n">c</span>:       <span class="nc">b84783a5</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w5</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">120</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">70</span>:       <span class="nc">b84803a6</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w6</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">128</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">74</span>:       <span class="nc">b84883a7</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w7</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">136</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">78</span>:       <span class="nc">b84903a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">144</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">7</span><span class="n">c</span>:       <span class="nc">b84983a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">152</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">80</span>:       <span class="nc">b84a03a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">160</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">84</span>:       <span class="nc">b84a83a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">168</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">88</span>:       <span class="nc">b84b03a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">176</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">8</span><span class="n">c</span>:       <span class="nc">b84b83a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">184</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">90</span>:       <span class="nc">b84c03a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">192</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">94</span>:       <span class="nc">b84c83a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">200</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">98</span>:       <span class="nc">b84d03a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">208</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="mi">9</span><span class="n">c</span>:       <span class="nc">b84d83a1</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">216</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">a0</span>:       <span class="nc">b84e03af</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w15</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">224</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">a4</span>:       <span class="nc">b84e83a3</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w3</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">232</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">a8</span>:       <span class="nc">b84f03a4</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w4</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">240</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">ac</span>:       <span class="nc">b84f83a5</span><span class="w">        </span><span class="n">ldur</span><span class="w">    </span><span class="n">w5</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">248</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">b0</span>:       <span class="nc">b94103a6</span><span class="w">        </span><span class="n">ldr</span><span class="w">     </span><span class="n">w6</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">256</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">b4</span>:       <span class="nc">b9410ba7</span><span class="w">        </span><span class="n">ldr</span><span class="w">     </span><span class="n">w7</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">264</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">b8</span>:       <span class="nc">b94113a1</span><span class="w">        </span><span class="n">ldr</span><span class="w">     </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">272</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">bc</span>:       <span class="nc">b9411ba1</span><span class="w">        </span><span class="n">ldr</span><span class="w">     </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">280</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">c0</span>:       <span class="nc">b94123a1</span><span class="w">        </span><span class="n">ldr</span><span class="w">     </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">288</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">c4</span>:       <span class="nc">b9412ba1</span><span class="w">        </span><span class="n">ldr</span><span class="w">     </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">296</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="n">c8</span>:       <span class="nc">b94133a1</span><span class="w">        </span><span class="n">ldr</span><span class="w">     </span><span class="n">w1</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="n">x29</span><span class="p">,</span><span class="w"> </span>#<span class="mi">304</span><span class="p">]</span><span class="w"></span>
+</code></pre></div>
+<p>as a subset of the function which seemed odd that lots of different registers were being used when all the registers were dead anyway.</p>
+</blockquote>
+
+
+
+<a name="290249362"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290249362" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290249362">(Jul 20 2022 at 15:16)</a>:</h4>
+<p>bjorn3 <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190416785">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>Regalloc2 does some randomization of the order in which it selects registers. Could be related to this.</p>
+</blockquote>
+
+
+
+<a name="290266726"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/290266726" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#290266726">(Jul 20 2022 at 17:14)</a>:</h4>
+<p>cfallin <a href="https://github.com/bytecodealliance/wasmtime/issues/4473#issuecomment-1190542141">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>So I think there are two separable issues here: (i) use of the frame pointer, and (ii) loads of stack arguments.</p>
+<p>On (i) the frame pointer, we have ongoing discussions about this in #4431 and related issues but the main takeaway is that we will need an explicit frame pointer setup/teardown even in leaf functions in order to allow for stack walking / unwinding. There are other approaches one could take, and tradeoffs to make here; but, that's the reason. So I would quibble somewhat with the "useless" descriptor as this does have a use :-)</p>
+<p>On (ii) stack argument loads, these are indeed useless, and are an artifact of ABI approach as @alexcrichton notes above:</p>
+<blockquote>
+<p>I think that this is probably happening because ABI bits in Wasmtime are modeled as moving the argument register into a virtual register unconditionally.</p>
+</blockquote>
+<p>This is indeed the case; the proper fix is making regalloc aware of the initial location on the stack, so the same move-elision applies as for register arguments, but that requires more thinking around how exactly to expose the stack argument area as additional "spillslots".</p>
+<p>I will note that there are some subtle correctness issues around reftypes and stackmaps here: taking ownership of all args immediately (by copying into vregs) lets us then note locations of ref-typed args, whereas if they stay in stack-arg position, we need to reason about that as well when generating stackmaps.</p>
+<p>So all that to say: yes, should be improved; the generated code is correct now (not a bug) but suboptimal!</p>
+</blockquote>
+
+
+
+<a name="296846515"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20issue%20%234473%20Useless%20stack%20frame%20allocation%20in%20.../near/296846515" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20issue.20.234473.20Useless.20stack.20frame.20allocation.20in.20.2E.2E.2E.html#296846515">(Sep 02 2022 at 15:44)</a>:</h4>
+<p>akirilov-arm labeled <a href="https://github.com/bytecodealliance/wasmtime/issues/4473">issue #4473</a>:</p>
+<blockquote>
+<p>Researching the stack frame allocation logic in Cranelift, I've came across a behavior I consider to be suboptimal, which I cannot explain.</p>
+<p>I generated void N-ary WASM functions with empty body for N=[1..99]. Arguments are <code>i64</code> for the matter of simplicity. Then I compiled them all for <code>x86_64-none-linux-gnu</code> target and explored the machine code generated.</p>
+<p>Functions with arity from 1 to 4 shows some minimal yet useless preamble/postamble code generated:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>Starting from arity 5, argument loading code is generated, although values loaded are never used (the example is 7-ary func):</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rax</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x18</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x20</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r11</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>Starting from arity 8, stack frame is generated as a result of <code>num_spillslots</code> from regalloc2 growing lineary with the number of arguments:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="err">&lt;</span><span class="nf">_wasm_function_0</span><span class="err">&gt;</span><span class="p">:</span><span class="w"></span>
+<span class="nf">push</span><span class="w">   </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x8</span><span class="p">(</span><span class="nv">%rdi</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="p">(</span><span class="nv">%r10</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">add</span><span class="w">    </span><span class="no">$0x10</span><span class="p">,</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">cmp</span><span class="w">    </span><span class="nv">%rsp</span><span class="p">,</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">jbe</span><span class="w">    </span><span class="err">&lt;</span><span class="no">_wasm_function_0</span><span class="err">+</span><span class="mi">0x1a</span><span class="err">&gt;</span><span class="w"></span>
+<span class="nf">ud2</span><span class="w"></span>
+<span class="nf">sub</span><span class="w">    </span><span class="no">$0x20</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%r15</span><span class="p">,</span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rsp</span><span class="p">)</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rax</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x18</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r10</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x20</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r11</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x28</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%r15</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x10</span><span class="p">(</span><span class="nv">%rsp</span><span class="p">),</span><span class="nv">%r15</span><span class="w"></span>
+<span class="nf">add</span><span class="w">    </span><span class="no">$0x20</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="nv">%rbp</span><span class="p">,</span><span class="nv">%rsp</span><span class="w"></span>
+<span class="nf">pop</span><span class="w">    </span><span class="nv">%rbp</span><span class="w"></span>
+<span class="nf">ret</span><span class="w"></span>
+</code></pre></div>
+<p>The higher the arity, the higher the frame size. For 99-ary function, 784-byte frame is generated, although it obviously cannot be used for anything by an empty-body function, which looks like a problem to me.</p>
+<p>Besides that, higher arities produce really weird argument loading code which just load values to registers only to overwrite them with other values at once:</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code><span class="na">...</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x60</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x68</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x70</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rsi</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x78</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x80</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="nf">mov</span><span class="w">    </span><span class="mi">0x88</span><span class="p">(</span><span class="nv">%rbp</span><span class="p">),</span><span class="nv">%rcx</span><span class="w"></span>
+<span class="na">...</span><span class="w"></span>
+</code></pre></div>
+<p>Tested with the tip of <code>master</code> branch of <code>wasmtime</code>, as of today.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

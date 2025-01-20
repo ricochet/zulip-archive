@@ -1,0 +1,541 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #8196 Add `GcRuntime` and `GcCompiler` trai... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html">wasmtime / PR #8196 Add `GcRuntime` and `GcCompiler` trai...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="428014409"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428014409" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428014409">(Mar 20 2024 at 20:57)</a>:</h4>
+<p><strong>fitzgen</strong> requested <a href="https://github.com/dicej">dicej</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428014410"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428014410" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428014410">(Mar 20 2024 at 20:57)</a>:</h4>
+<p><strong>fitzgen</strong> requested <a href="https://github.com/alexcrichton">alexcrichton</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428014413"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428014413" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428014413">(Mar 20 2024 at 20:57)</a>:</h4>
+<p>fitzgen opened <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a> from <code>fitzgen:i31ref</code> to <code>bytecodealliance:main</code>:</p>
+<blockquote>
+<p>This is still a WIP. I think architecture and everything is there, although there are certain things to improve upon still, like the pooling allocator integration and the question of who allocates the memory used in a GC heap, but I think that can happen in follow up PRs. The big thing is that there are still some tests failing, a bunch new tests that need to be written, and at least one blocker (<a href="https://github.com/bytecodealliance/wasmtime/issues/8180">https://github.com/bytecodealliance/wasmtime/issues/8180</a>) to be fixed. Also I need to rebase, which will be fun given all the churn related to tables recently. However, this is big enough that I think those things can happen in parallel with review on the main bits and the architecture and all that.</p>
+<hr>
+<h3>The <code>GcRuntime</code> and <code>GcCompiler</code> Traits</h3>
+<p>This commit factors out the details of the garbage collector away from the rest of the runtime and the compiler. It does this by introducing two new traits, very similar to a subset of [those proposed in the Wasm GC RFC], although not all equivalent functionality has been added yet because Wasmtime doesn't support, for example, GC structs yet:</p>
+<p>[those proposed in the Wasm GC RFC]: <a href="https://github.com/bytecodealliance/rfcs/blob/main/accepted/wasm-gc.md#defining-the-pluggable-gc-interface">https://github.com/bytecodealliance/rfcs/blob/main/accepted/wasm-gc.md#defining-the-pluggable-gc-interface</a></p>
+<ol>
+<li>
+<p>The <code>GcRuntime</code> trait: This trait defines how to create new GC heaps, run collections within them, and execute the various GC barriers the collector requires.</p>
+<p>Rather than monomorphize all of Wasmtime on this trait, we use it as a dynamic trait object. This does imply some virtual call overhead and missing some inlining (and resulting post-inlining) optimization opportunities. However, it is <em>much</em> less disruptive to the existing embedder API, results in a cleaner embedder API anyways, and we don't believe that VM runtime/embedder code is on the hot path for working with the GC at this time anyways (that would be the actual Wasm code, which has inlined GC barriers and direct calls and all of that). In the future, once we have optimized enough of the GC that such code is ever hot, we have options we can investigate at that time to avoid these dynamic virtual calls, like only enabling one single collector at build time and then creating a static type alias like <code>type TheOneGcImpl = ...;</code> based on the compile time configuration, and using this type alias in the runtime rather than a dynamic trait object.</p>
+<p>The <code>GcRuntime</code> trait additionally defines a method to reset a GC heap, for use by the pooling allocator. This allows reuse of GC heaps across different stores. This integration is very rudimentary at the moment, and is missing all kinds of configuration knobs that we should have before deploying Wasm GC in production. This commit is large enough as it is already! Ideally, in the future, I'd like to make it so that GC heaps receive their memory region, rather than allocate/reserve it themselves, and let each slot in the pooling allocator's memory pool be <em>either</em> a linear memory or a GC heap. This would unask various capacity planning questions such as "what percent of memory capacity should we dedicate to linear memories vs GC heaps?". It also seems like basically all the same configuration knobs we have for linear memories apply equally to GC heaps (see also the "Indexed Heaps" section below).</p>
+</li>
+<li>
+<p>The <code>GcCompiler</code> trait: This trait defines how to emit CLIF that implements GC barriers for various operations on GC-managed references. The Rust code calls into this trait dynamically via a trait object, but since it is customizing the CLIF that is generated for Wasm code, the Wasm code itself is not making dynamic, indirect calls for GC barriers. The <code>GcCompiler</code> implementation can inline the parts of GC barrier that it believes should be inline, and leave out-of-line calls to rare slow paths.</p>
+</li>
+</ol>
+<p>All that said, there is still only a single implementation of each of these traits: the existing deferred reference-counting (DRC) collector. So there is a bunch of code motion in this commit as the DRC collector was further isolated from the rest of the runtime and moved to its own submodule. That said, this was not <em>purely</em> code motion (see "Indexed Heaps" below) so it is worth not simply skipping over the DRC collector's code in review.</p>
+<h3>Indexed Heaps</h3>
+<p>This commit does bake in a couple assumptions that must be shared across all collector implementations, such as a shared <code>VMGcHeader</code> that all objects allocated within a GC heap must begin with, but the most notable and far-reaching of these assumptions is that all collectors will use "indexed heaps".</p>
+<p>What we are calling indexed heaps are basically the three following invariants:</p>
+<ol>
+<li>
+<p>All GC heaps will be a single contiguous region of memory, and all GC objects will be allocated within this region of memory. The collector may ask the system allocator for additional memory, e.g. to maintain its free lists, but GC objects themselves will never be allocated via <code>malloc</code>.</p>
+</li>
+<li>
+<p>A pointer to a GC-managed object (i.e. a <code>VMGcRef</code>) is a 32-bit offset into the GC heap's contiguous region of memory. We never hold raw pointers to GC objects (although, of course, we have to compute them and use them temporarily when actually accessing objects). This means that deref'ing GC pointers is equivalent to deref'ing linear memory pointers: we need to add a base and we also check that the GC pointer/index is within the bounds of the GC heap. Furthermore, compressing 64-bit pointers into 32 bits is a fairly common technique among high-performance GC implementations[^compressed-oops][^v8-ptr-compression] so we are in good company.</p>
+</li>
+<li>
+<p>Anything stored inside the GC heap is untrusted. Even each GC reference that is an element of an <code>(array (ref any))</code> is untrusted, and bounds checked on access. This means that, for example, we do not store the raw pointer to an <code>externref</code>'s host object inside the GC heap. Instead an <code>externref</code> now stores an ID that can be used to index into a side table in the store that holds the actual <code>Box&lt;dyn Any&gt;</code> host object, and accessing that side table is always checked.</p>
+</li>
+</ol>
+<p>[^compressed-oops]: See <a href="https://wiki.openjdk.org/display/HotSpot/CompressedOops">"Compressed OOPs" in
+    OpenJDK.</a></p>
+<p>[^v8-ptr-compression]: See <a href="https://v8.dev/blog/pointer-compression">V8's pointer
+    compression</a>.</p>
+<p>The good news with regards to all the bounds checking that this scheme implies is that we can use all the same virtual memory tricks that linear memories use to omit explicit bounds checks. Additionally, (2) means that the sizes of GC objects is that much smaller (and therefore that much more cache friendly) because they are only holding onto 32-bit, rather than 64-bit, references to other GC objects. (We can, in the future, support GC heaps up to 16GiB in size without losing 32-bit GC pointers by taking advantage of <code>VMGcHeader</code> alignment and storing aligned indices rather than byte indices, while still leaving the bottom bit available for tagging as an <code>i31ref</code> discriminant. Should we ever need to support even larger GC heap capacities, we could go to full 64-bit references, but we would need explicit bounds checks.)</p>
+<p>The biggest benefit of indexed heaps is that, because we are (explicitly or implicitly) bounds checking GC heap accesses, and because we are not otherwise trusting any data from inside the GC heap, we greatly reduce how badly things can go wrong in the face of collector bugs and GC heap corruption. We are essentially sandboxing the GC heap region, the same way that linear memory is a sandbox. GC bugs could lead to the guest program accessing the wrong GC object, or getting garbage data from within the GC heap. But only garbage data from within the GC heap, never outside it. The worse that could happen would be if we decided not to zero out GC heaps between reuse across stores (which is a valid trade off to make, since zeroing a GC heap is a defense-in-depth technique similar to zeroing a Wasm stack and not semantically visible in the absence of GC bugs) and then a GC bug would allow the current Wasm guest to read old GC data from the old Wasm guest that previously used this GC heap. But again, it could never access host data.</p>
+<p>Taken altogether, this allows for collector implementations that are nearly free from <code>unsafe</code> code, and unsafety can otherwise be targeted and limited in scope, such as interactions with JIT code. Most importantly, we do not have to maintain critical invariants across the whole system -- invariants which can't be nicely encapsulated or abstracted -- to preserve memory safety. Such holistic invariants that refuse encapsulation are otherwise generally a huge safety problem with GC implementations.</p>
+<h3><code>VMGcRef</code> is <em>NOT</em> <code>Clone</code> or <code>Copy</code> Anymore</h3>
+<p><code>VMGcRef</code> used to be <code>Clone</code> and <code>Copy</code>. It is not anymore. The motivation here was to be sure that I was actually calling GC barriers at all the correct places. I couldn't be sure before. Now, you can still explicitly copy a raw GC reference without running GC barriers if you need to and understand why that's okay (aka you are implementing the collector), but that is something you have to opt into explicitly by calling <code>unchecked_copy</code>. The default now is that you can't just copy the reference, and instead call an explicit <code>clone</code> method (not <em>the</em> <code>Clone</code> trait, because we need to pass in the GC heap context to run the GC barriers) and it is hard to forget to do that accidentally. This resulted in a pretty big amount of churn, but I am wayyyyyy more confident that the correct GC barriers are called at the correct times now than I was before.</p>
+<h3><code>i31ref</code></h3>
+<p>I started this commit by trying to add <code>i31ref</code> support. And it grew into the whole traits interface because I found that I needed to abstract GC barriers into helpers anyways to avoid running them <br>
+[message truncated]</p>
+</blockquote>
+
+
+
+<a name="428014414"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428014414" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428014414">(Mar 20 2024 at 20:57)</a>:</h4>
+<p><strong>fitzgen</strong> requested <a href="https://github.com/cfallin">cfallin</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428014415"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428014415" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428014415">(Mar 20 2024 at 20:57)</a>:</h4>
+<p><strong>fitzgen</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers">wasmtime-compiler-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428014416"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428014416" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428014416">(Mar 20 2024 at 20:57)</a>:</h4>
+<p><strong>fitzgen</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers">wasmtime-core-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428014417"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428014417" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428014417">(Mar 20 2024 at 20:57)</a>:</h4>
+<p><strong>fitzgen</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-default-reviewers">wasmtime-default-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428020541"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428020541" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428020541">(Mar 20 2024 at 21:44)</a>:</h4>
+<p>github-actions[bot] <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#issuecomment-2010693809">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>:</p>
+<blockquote>
+<h4>Subscribe to Label Action</h4>
+<p>cc @fitzgen</p>
+<p>&lt;details&gt;<br>
+This issue or pull request has been labeled: "cranelift", "cranelift:wasm", "fuzzing"</p>
+<p>Thus the following users have been cc'd because of the following labels:</p>
+<ul>
+<li>fitzgen: fuzzing</li>
+</ul>
+<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>
+<p><a href="https://github.com/bytecodealliance/subscribe-to-label-action">Learn more.</a><br>
+&lt;/details&gt;</p>
+</blockquote>
+
+
+
+<a name="428336162"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428336162" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428336162">(Mar 22 2024 at 14:02)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428373475"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428373475" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428373475">(Mar 22 2024 at 16:57)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1955314504">PR review</a>.</p>
+
+
+
+<a name="428373477"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428373477" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428373477">(Mar 22 2024 at 16:57)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1535900999">PR review comment</a>:</p>
+<blockquote>
+<p>This I think is accidentally doubling the size of the table</p>
+</blockquote>
+
+
+
+<a name="428397740"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428397740" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428397740">(Mar 22 2024 at 19:34)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428414994"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428414994" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428414994">(Mar 22 2024 at 21:56)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="428415237"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/428415237" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#428415237">(Mar 22 2024 at 21:58)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="429445994"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429445994" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429445994">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1953103452">PR review</a>:</p>
+<blockquote>
+<p>Looks great!  I'm excited to see this move forward.</p>
+<p>Please see a few inline comments and suggestions.  The only one that might be a blocker is the cast from a pointer to a 64-bit value to a pointer to a 32-bit value due to endianness concerns.  Based on our earlier conversation, sounds like you're planning to get rid of that anyway.</p>
+</blockquote>
+
+
+
+<a name="429445995"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429445995" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429445995">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1953103452">PR review</a>:</p>
+<blockquote>
+<p>Looks great!  I'm excited to see this move forward.</p>
+<p>Please see a few inline comments and suggestions.  The only one that might be a blocker is the cast from a pointer to a 64-bit value to a pointer to a 32-bit value due to endianness concerns.  Based on our earlier conversation, sounds like you're planning to get rid of that anyway.</p>
+</blockquote>
+
+
+
+<a name="429445997"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429445997" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429445997">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1535896563">PR review comment</a>:</p>
+<blockquote>
+<p>See above regarding wording.</p>
+</blockquote>
+
+
+
+<a name="429445998"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429445998" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429445998">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1535895357">PR review comment</a>:</p>
+<blockquote>
+<p>Can we clarify the wording here given the r64/NonZeroU32 duality?</p>
+</blockquote>
+
+
+
+<a name="429445999"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429445999" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429445999">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537652097">PR review comment</a>:</p>
+<blockquote>
+<p>The phrasing in this comment is slightly confusing ("will no longer be true", yet the value currently returned is <code>false</code>).  Perhaps something like "Once we support concrete struct and array types, we'll need to look at the payload to determine whether the type is GC-managed."</p>
+</blockquote>
+
+
+
+<a name="429446000"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429446000" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429446000">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537680476">PR review comment</a>:</p>
+<blockquote>
+<p><div class="codehilite" data-code-language="suggestion"><pre><span></span><code>    /// will lead to general incorrectness such as panics or wrong results.
+</code></pre></div><br>
+</p>
+</blockquote>
+
+
+
+<a name="429446001"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429446001" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429446001">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1534449521">PR review comment</a>:</p>
+<blockquote>
+<p>Should there be pseudo-code here to update the bump region <code>next</code> position? </p>
+</blockquote>
+
+
+
+<a name="429446002"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429446002" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429446002">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1535877227">PR review comment</a>:</p>
+<blockquote>
+<p>Replace this cast (from ptr to 64-bit value to ptr to 32-bit value) with something safer/portable.</p>
+</blockquote>
+
+
+
+<a name="429446005"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429446005" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429446005">(Mar 25 2024 at 15:49)</a>:</h4>
+<p>dicej created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537720708">PR review comment</a>:</p>
+<blockquote>
+<p>See my review comment for crates/types/src/lib.rs above.</p>
+</blockquote>
+
+
+
+<a name="429469816"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429469816" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429469816">(Mar 25 2024 at 17:14)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958286823">PR review</a>.</p>
+
+
+
+<a name="429469817"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429469817" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429469817">(Mar 25 2024 at 17:14)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958286823">PR review</a>.</p>
+
+
+
+<a name="429469818"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429469818" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429469818">(Mar 25 2024 at 17:14)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537929554">PR review comment</a>:</p>
+<blockquote>
+<p>Yeah I think we want to keep <code>Store</code> allocation infallible if we can, so I think it'd be best to defer fallible work to when it's required rather than needing the unwrap here.</p>
+</blockquote>
+
+
+
+<a name="429469821"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429469821" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429469821">(Mar 25 2024 at 17:14)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537927018">PR review comment</a>:</p>
+<blockquote>
+<p>If this <code>catch_unwind</code> is only here to restore <code>instances</code>, can this be done with a <code>Drop</code> rather than catching unwind?</p>
+</blockquote>
+
+
+
+<a name="429469823"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429469823" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429469823">(Mar 25 2024 at 17:14)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537921675">PR review comment</a>:</p>
+<blockquote>
+<p>Isn't the <code>TODO</code> here still applicable? Shouldn't funcrefs do the contra/covariance thing?</p>
+</blockquote>
+
+
+
+<a name="429469824"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429469824" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429469824">(Mar 25 2024 at 17:14)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537934748">PR review comment</a>:</p>
+<blockquote>
+<p>To avoid new/new_async, could the auto-gc here be pushed up to the caller, e.g. communicated through the <code>Result</code>?</p>
+</blockquote>
+
+
+
+<a name="429505911"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429505911" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429505911">(Mar 25 2024 at 20:38)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958733360">PR review</a>.</p>
+
+
+
+<a name="429505912"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429505912" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429505912">(Mar 25 2024 at 20:38)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1538206725">PR review comment</a>:</p>
+<blockquote>
+<p>To clarify, you mean define a new error type like <code>GcHeapOutOfMemory</code> and return that, allowing callers to decide whether they want to do a GC and try again, rather than automatically doing a GC on their behalf?</p>
+</blockquote>
+
+
+
+<a name="429507872"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429507872" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429507872">(Mar 25 2024 at 20:52)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958758927">PR review</a>.</p>
+
+
+
+<a name="429507874"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429507874" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429507874">(Mar 25 2024 at 20:52)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1538223763">PR review comment</a>:</p>
+<blockquote>
+<p>I guess the original TODO, in the context of the typed function references proposal which did not introduce function type subtyping, is resolved since we have canonicalized types at this point now. But we have a new TODO for Wasm GC, which introduces function type subtyping, to do subtyping checks. I can add this second TODO.</p>
+</blockquote>
+
+
+
+<a name="429513211"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429513211" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429513211">(Mar 25 2024 at 21:20)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958805687">PR review</a>.</p>
+
+
+
+<a name="429513212"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429513212" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429513212">(Mar 25 2024 at 21:20)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1538253947">PR review comment</a>:</p>
+<blockquote>
+<p>Indeed!</p>
+</blockquote>
+
+
+
+<a name="429517671"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429517671" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429517671">(Mar 25 2024 at 21:54)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="429685005"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429685005" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429685005">(Mar 26 2024 at 15:44)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="429686218"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429686218" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429686218">(Mar 26 2024 at 15:50)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1960879556">PR review</a>.</p>
+
+
+
+<a name="429686219"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429686219" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429686219">(Mar 26 2024 at 15:50)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1539537241">PR review comment</a>:</p>
+<blockquote>
+<p>Hm actually I'm not sure how this would work, because if the <code>externref</code> allocation fails, we need to give the host value back to the caller. We could stuff it back into the <code>GcHeapOutOfMemory</code> error, but then we would need a type parameter on the error type, and things start to get pretty funky. Not completely unworkable, but pretty funky. And then we need a different error type for non-<code>externref</code> errors that don't have a host value to return to the caller on OOM.</p>
+<p>Do you still think it is worth pursuing this?</p>
+</blockquote>
+
+
+
+<a name="429724354"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429724354" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429724354">(Mar 26 2024 at 19:24)</a>:</h4>
+<p>alexcrichton submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1961512294">PR review</a>.</p>
+
+
+
+<a name="429724355"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429724355" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429724355">(Mar 26 2024 at 19:24)</a>:</h4>
+<p>alexcrichton created <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1539972756">PR review comment</a>:</p>
+<blockquote>
+<p>Personally if you're ok with it I'd prefer to stick to the route of a custom error, basicaly <code>pub GcHeapOutOfMemory&lt;T&gt;(pub T)</code>. Otherwise I'd fear that there's little chance of embedders remembering to use <code>new_async</code> vs <code>new</code></p>
+</blockquote>
+
+
+
+<a name="429960781"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/429960781" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#429960781">(Mar 27 2024 at 22:38)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430015655"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430015655" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430015655">(Mar 28 2024 at 08:16)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430016824"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430016824" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430016824">(Mar 28 2024 at 08:24)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430020877"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430020877" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430020877">(Mar 28 2024 at 08:50)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430031023"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430031023" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430031023">(Mar 28 2024 at 09:52)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430663468"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430663468" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430663468">(Apr 01 2024 at 21:04)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430684092"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430684092" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430684092">(Apr 02 2024 at 00:09)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430793176"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430793176" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430793176">(Apr 02 2024 at 13:42)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430855376"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430855376" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430855376">(Apr 02 2024 at 19:04)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430855486"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430855486" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430855486">(Apr 02 2024 at 19:05)</a>:</h4>
+<p>fitzgen has enabled auto merge for <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430867354"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430867354" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430867354">(Apr 02 2024 at 20:24)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430868822"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430868822" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430868822">(Apr 02 2024 at 20:35)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430870322"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430870322" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430870322">(Apr 02 2024 at 20:45)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430874986"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430874986" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430874986">(Apr 02 2024 at 21:15)</a>:</h4>
+<p><strong>fitzgen</strong> requested <a href="https://github.com/orgs/bytecodealliance/teams/wasmtime-fuzz-reviewers">wasmtime-fuzz-reviewers</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430874988"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430874988" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430874988">(Apr 02 2024 at 21:15)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430878993"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430878993" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430878993">(Apr 02 2024 at 21:41)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430879007"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430879007" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430879007">(Apr 02 2024 at 21:41)</a>:</h4>
+<p>fitzgen has enabled auto merge for <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="430879454"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/430879454" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#430879454">(Apr 02 2024 at 21:44)</a>:</h4>
+<p>github-actions[bot] <a href="https://github.com/bytecodealliance/wasmtime/pull/8196#issuecomment-2033150934">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>:</p>
+<blockquote>
+<h4>Subscribe to Label Action</h4>
+<p>cc @peterhuene</p>
+<p>&lt;details&gt;<br>
+This issue or pull request has been labeled: "wasmtime:c-api"</p>
+<p>Thus the following users have been cc'd because of the following labels:</p>
+<ul>
+<li>peterhuene: wasmtime:c-api</li>
+</ul>
+<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>
+<p><a href="https://github.com/bytecodealliance/subscribe-to-label-action">Learn more.</a><br>
+&lt;/details&gt;</p>
+</blockquote>
+
+
+
+<a name="431146239"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/431146239" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#431146239">(Apr 03 2024 at 17:53)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="431155444"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/431155444" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#431155444">(Apr 03 2024 at 18:56)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="431155466"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/431155466" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#431155466">(Apr 03 2024 at 18:56)</a>:</h4>
+<p>fitzgen has enabled auto merge for <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="431188473"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/431188473" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#431188473">(Apr 03 2024 at 22:31)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="431192495"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/431192495" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#431192495">(Apr 03 2024 at 23:04)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="431197539"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/431197539" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#431197539">(Apr 03 2024 at 23:58)</a>:</h4>
+<p>fitzgen updated <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<a name="431203231"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%238196%20Add%20%60GcRuntime%60%20and%20%60GcCompiler%60%20trai.../near/431203231" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.238196.20Add.20.60GcRuntime.60.20and.20.60GcCompiler.60.20trai.2E.2E.2E.html#431203231">(Apr 04 2024 at 01:03)</a>:</h4>
+<p>fitzgen merged <a href="https://github.com/bytecodealliance/wasmtime/pull/8196">PR #8196</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

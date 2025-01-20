@@ -1,0 +1,302 @@
+[
+    {
+        "content": "<p>Hello, I'm a bit confused about how true multi-threading is achieved with Wasmtime. As far as I currently understand a potential implementation is:</p>\n<p>Create a single Engine and use e.g. tokio to create green threads where each green thread instantiates a component.<br>\nBut in that case the Engine still only really exists on a single OS thread? Should I create an Engine per OS thread?</p>",
+        "id": 383671618,
+        "sender_full_name": "Emiel Van Severen",
+        "timestamp": 1691681606
+    },
+    {
+        "content": "<p>we do have support for the wasi-threads proposal afaik -- cc <span class=\"user-mention\" data-user-id=\"254110\">@Andrew Brown</span> for more details?</p>",
+        "id": 383675424,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691682344
+    },
+    {
+        "content": "<p>Could you clarify what you mean by \"true multithreading\"?</p>\n<p>To provide some other thoughts in the meantime though:</p>\n<ul>\n<li><code>Engine</code> is intended to be one-per-process, shared across all threads.</li>\n<li>Right now <code>Store</code> is the one that's per-thread (sorta). A <code>Store</code> can only be executing on one store at a time</li>\n<li>Multiple threads within the same wasm instance requires shared memory and the <code>wasi-threads</code> proposal, both of which are experimental</li>\n</ul>\n<p>Multithreading today can happen with concurrent execution of unrelated wasm instances in different threads (e.g. one <code>Engine</code> plus one <code>Store</code> per-instance-per-thread)</p>",
+        "id": 383677069,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691682670
+    },
+    {
+        "content": "<p>afaik, wasi-threads is used to have the guest spawn multiple threads. Instead, we would like to run multiple guests in parallel, if that makes sense?</p>",
+        "id": 383677178,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691682693
+    },
+    {
+        "content": "<p>We're not talking about multiple threads within the same wasm instance. Instead, we're talking about multiple instances running in parallel on the same engine, if that makes sense.</p>",
+        "id": 383677942,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691682828
+    },
+    {
+        "content": "<p>Yes wasi-threads isn't required for multiple guests in parallel and that's supported today with wasmtime. And yes you'd have one <code>Engine</code> and one store per instance</p>",
+        "id": 383678070,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691682848
+    },
+    {
+        "content": "<p>er sorry, one <code>Engine</code> in total, and then every store-per-instance would refer to the same <code>Engine</code></p>",
+        "id": 383678186,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691682866
+    },
+    {
+        "content": "<p>Do you need the \"async\" functionality in order to have multiple instances on the same engine?</p>",
+        "id": 383678526,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691682926
+    },
+    {
+        "content": "<p>no, you can do it with sync calls too</p>",
+        "id": 383678617,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691682948
+    },
+    {
+        "content": "<p>async in that sense is an independent decision of how to run wasm</p>",
+        "id": 383678696,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691682960
+    },
+    {
+        "content": "<p>another useful detail: an <code>Engine</code> is internally an Arc wrapper around the actual data; so it's meant to be shared between threads, cloned cheaply, etc</p>",
+        "id": 383678946,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691683002
+    },
+    {
+        "content": "<p>likewise <code>Module</code>s can be (and should be) loaded once and shared between threads</p>",
+        "id": 383679133,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691683036
+    },
+    {
+        "content": "<p>OK, still trying to figure out what async does exactly. When you have two instances calling a regular (not async) host function. Does one instance have to wait on the other call to complete?</p>",
+        "id": 383680115,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691683223
+    },
+    {
+        "content": "<p>No they can complete in parallel. You'll probably use a single <code>Linker</code> which provides a single definition of the host function, and the host function is defined as <code>impl Fn(...) + Sync</code> which indicates it'll be called in parallel</p>",
+        "id": 383680756,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691683342
+    },
+    {
+        "content": "<p>instance-local state is provided via the <code>Caller&lt;'_, T&gt;</code> function parameter to the host function which can be used to access the <code>T</code> in the <code>Store&lt;T&gt;</code> which has per-instance state</p>",
+        "id": 383680857,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691683365
+    },
+    {
+        "content": "<p>async is required if:</p>\n<ul>\n<li>the host functions you're invoking are <code>async</code></li>\n<li>or you want to suspend wasm during its execution, for example to implement a form of time-slicing</li>\n</ul>",
+        "id": 383681054,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691683398
+    },
+    {
+        "content": "<p>otherwise you probably don't need async</p>",
+        "id": 383681107,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691683406
+    },
+    {
+        "content": "<p>time-slicing between different instances?</p>",
+        "id": 383681756,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691683508
+    },
+    {
+        "content": "<p>yeah for example if you want to prevent an infinite loop from hogging time from other instances</p>",
+        "id": 383681907,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691683535
+    },
+    {
+        "content": "<p>So if I have a PC with 4 cores, and 5 instances with an infinite loop, only 4 will actually execute at all times?</p>",
+        "id": 383682264,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691683606
+    },
+    {
+        "content": "<p>it depends, if those 5 instances are in 5 OS threads then no, the OS will time-slice between threads</p>",
+        "id": 383682598,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691683676
+    },
+    {
+        "content": "<p>if those 5 instances are on 4 OS threads then yes, those 4 OS threads will be locked up by the infinite loops</p>",
+        "id": 383682710,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691683692
+    },
+    {
+        "content": "<p>you can set up something like epochs/fuel to time out the wasm instances, but the OS threads will be locked up while the infinite loop is executing othewise</p>",
+        "id": 383682860,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691683729
+    },
+    {
+        "content": "<p>Does the instance run in the OS thread where it is started? Or is there a separate thread where the engine + instances run? I was confused by the explanation about the engine being \"shared\" between threads.</p>",
+        "id": 383683665,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691683912
+    },
+    {
+        "content": "<p>in the OS thread it was started on</p>",
+        "id": 383684461,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691684090
+    },
+    {
+        "content": "<p>Wasmtime doesn't spawn any threads for wasm execution, that's up to the embedder to configure</p>",
+        "id": 383684544,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691684103
+    },
+    {
+        "content": "<p>sharing the engine is done by the embedder as well by having it as part of the closed-over-state for new threads</p>",
+        "id": 383684679,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691684124
+    },
+    {
+        "content": "<p>I think I'm starting to get it now. What is closed-over-state?</p>",
+        "id": 383685315,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691684245
+    },
+    {
+        "content": "<p>Something like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">engine</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span>\n<span class=\"n\">std</span>::<span class=\"n\">thread</span>::<span class=\"n\">spawn</span><span class=\"p\">(</span><span class=\"k\">move</span><span class=\"w\"> </span><span class=\"o\">||</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">foo</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">engine</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"c1\">// the outer closure has `engine` in its closed-over-state</span>\n<span class=\"p\">});</span>\n</code></pre></div>",
+        "id": 383685581,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691684296
+    },
+    {
+        "content": "<p>So if e.g. I use tokio to spawn instances, they could if not careful, spawn on the same thread as my actual executor, blocking new instances of spawning?</p>",
+        "id": 383685693,
+        "sender_full_name": "Emiel Van Severen",
+        "timestamp": 1691684316
+    },
+    {
+        "content": "<p>correct, if using tokio it's recommended to enable async support (since your host functions are probably async) and to additionally enable epochs plus <a href=\"https://docs.rs/wasmtime/latest/wasmtime/struct.Store.html#method.epoch_deadline_async_yield_and_update\"><code>epoch_deadline_yield_and_update</code></a> to enable time-slicing and avoiding blocking the executor</p>",
+        "id": 383686074,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691684388
+    },
+    {
+        "content": "<p>that forces wasm to \"yield\" every period of epoch intervals which provides the ability to cancel wasm (e.g. time it out) or otherwise just let other stuff run if there's more</p>",
+        "id": 383686410,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691684433
+    },
+    {
+        "content": "<p>(just as a point of reference, this isn't really a problem unique to Wasmtime: any system that calls guest code from an executor has to worry about that code blocking the executor loop)</p>",
+        "id": 383686927,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691684520
+    },
+    {
+        "content": "<p>Ok, we're seeing this behavior with sleep too. Is that because, when a guest calls \"sleep\", it sleeps the entire OS thread? Or is it simply that the OS thread is locked by the executor doing someting like \"poll()\" in that thread?</p>",
+        "id": 383688649,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691684830
+    },
+    {
+        "content": "<p>yes, it'd be the same as native Rust code called by an async executor calling the system sleep(). Runtimes like tokio provide alternatives for things that would usually block, that integrate with the executor to yield instead</p>",
+        "id": 383689064,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691684903
+    },
+    {
+        "content": "<p>(including sleeps, async versions of IO, async versions of mutexes and queues, that sort of thing)</p>",
+        "id": 383689208,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691684927
+    },
+    {
+        "content": "<p>Does this mean that the <code>fuel</code> concept doesn't help trying to unblock threads with sleeping guests?</p>",
+        "id": 383689363,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691684960
+    },
+    {
+        "content": "<p>if you call into the kernel and ask for the entire thread to sleep, there's nothing we can do to stop that</p>",
+        "id": 383689516,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691684985
+    },
+    {
+        "content": "<p>Ok, I didn't realize <code>sleep</code> in the guest goes straight to the host kernel.</p>",
+        "id": 383689775,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691685027
+    },
+    {
+        "content": "<p>iiuc, the wasi impl of sleep will yield when using the async version of wasi</p>",
+        "id": 383689866,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1691685043
+    },
+    {
+        "content": "<p>ah, unclear, sorry, I had thought you meant you had a hostcall that directly called sleep</p>",
+        "id": 383689960,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1691685065
+    },
+    {
+        "content": "<p>ok, thanks for the clarification!</p>",
+        "id": 383690193,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691685109
+    },
+    {
+        "content": "<p>Hopefully, my final question: we'd like to launch X instances on X new OS threads, so the total number of threads is X+1 (thread launching other threads). Is this possible with Tokio?</p>",
+        "id": 383690945,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691685246
+    },
+    {
+        "content": "<p>One option is to use <code>std::thread::spawn</code> which guarantees a thread is spawned. Another is to use <a href=\"https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html\"><code>spawn_blocking</code></a> but that won't guarantee a thread is spawned (e.g. the thread pool may already be full)</p>",
+        "id": 383691423,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1691685352
+    },
+    {
+        "content": "<p>Great, thanks a lot!</p>",
+        "id": 383691599,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691685380
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"639836\">Merlijn Sebrechts</span> has marked this topic as resolved.</p>",
+        "id": 383692388,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1691685527
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"639836\">Merlijn Sebrechts</span> has marked this topic as unresolved.</p>",
+        "id": 383692434,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1691685537
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"639836\">Merlijn Sebrechts</span> has marked this topic as resolved.</p>",
+        "id": 383692491,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1691685547
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"639836\">Merlijn Sebrechts</span> <a href=\"#narrow/stream/217126-wasmtime/topic/.E2.9C.94.20true.20multithreading/near/383688649\">said</a>:</p>\n<blockquote>\n<p>Ok, we're seeing this behavior with sleep too. Is that because, when a guest calls \"sleep\", it sleeps the entire OS thread? Or is it simply that the OS thread is locked by the executor doing someting like \"poll()\" in that thread?</p>\n</blockquote>\n<p>that is true for the synchronous implementation of wasi preview 1 (wasi-cap-std-sync). for the async impl of wasi preview 1, and all impls of preview 2, its actually just a tokio yield for the duration of the sleep</p>",
+        "id": 383697899,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1691686633
+    },
+    {
+        "content": "<p>Ah, makes sense, thanks!</p>",
+        "id": 383698051,
+        "sender_full_name": "Merlijn Sebrechts",
+        "timestamp": 1691686667
+    }
+]

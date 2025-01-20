@@ -1,0 +1,205 @@
+<html>
+<head><meta charset="utf-8"><title>recommendations for proper usage of `wasmtime` (Rust) · wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/index.html">wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html">recommendations for proper usage of `wasmtime` (Rust)</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="342639902"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342639902" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> yonil <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342639902">(Mar 17 2023 at 18:31)</a>:</h4>
+<p>Hi,</p>
+<p>The following are perhaps 'basic' questions, but I wasn't able to get clear guidance for all of them from the <code>wasmtime</code> crate's documentation. I would appreciate your recommendations.</p>
+<p><strong>Scenario:</strong></p>
+<ul>
+<li>i have a single guest module with N different functions exported, and single long-living host.</li>
+<li>the input/output are serialized and passed by the host / returned by the guest via linear memory (in the form of ptr+size)</li>
+<li>each function F in F1,...Fn can be invoked many times during the lifetime of the host, either sequentially or concurrently.</li>
+<li>there are cases in which i need to invoke the same F many times sequentially (say, 10K-100K times).</li>
+</ul>
+<p><strong>Goal</strong>:</p>
+<ul>
+<li>Minimizing the runtime duration (as well as resource consumption, if possible) of invocations of functions in the guest.</li>
+</ul>
+<p><strong>Questions</strong>:</p>
+<ol>
+<li>should i have a single cached instance of <code>Linker</code> or one per invocation of a function in the guest? or, what are the considerations for each option?</li>
+<li>should i have a single instance of <code>Module</code> or one per invocation of a function in the guest? (i've tried caching the module after calling <code>Module::from_file(...)</code> once, and this has significantly reduced runtime duration. but i want to make sure i fully understand the downsides of doing this, if there are any)</li>
+<li>what does <code>wasmtime_wasi::add_to_linker(...)</code> actually do, and if I do cache the <code>Module</code>, is it ok to call it just once after i first call <code>Module::from_file(...)</code>?</li>
+<li>do I need a separate <code>Store</code> for each invocation of a function in the guest, or can i reuse <code>Store</code>s under certain circumstances (i understand there's no built-in GC for <code>Store</code>s)?</li>
+<li>are there any other tips  for improving the performance of the aforementioned scenario?</li>
+</ol>
+<p>Thanks in advance!</p>
+
+
+
+<a name="342641891"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342641891" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342641891">(Mar 17 2023 at 18:42)</a>:</h4>
+<p>Good questions, and thanks for asking!</p>
+<p>One important thing you may want to consider is the distinction between a module and an instance. A module is a compiled version of a wasm module, and an instance is a "runnable version" of that module. Modules have no state other than their compilation artifact and can hence be reused amongst many instances. Instances have state, but by default do not share state. The <code>Linker</code> type is the means by which you go from a <code>Module</code> to an <code>Instance</code> by satisfying all the imports of the module with actual runtime values.</p>
+<p>I'm explaining these bits because the answer to some of your questions is sort of how the state works out. Do you want one wasm instance for the entire lifetime of the host for example? One instance per function call? The impact of this is what state the wasm instance can share between function calls (e.g. with an instance-per-function-call you'll share no state). With only one instance then you only need one <code>Module</code> and one <code>Linker</code>. With instance-per-function (or some other granularity), you only need one <code>Module</code> and you probably only need one <code>Linker</code> for the whole lifetime unless you're instantiating with different runtime values for each import.</p>
+<p>Given some of that background, here's an attempt to answer some specific questions:</p>
+<ol>
+<li>The fastest option is going to be one <code>Linker</code> per lifetime of the process. This may require some refactoring and/or adjusting of the data model of your component, and it may not, depends on the specifics.</li>
+<li>You should only ever have one <code>Module</code> per wasm blob. If you've only got one wasm blob you should have only one <code>Module</code>. This is expected and there's no downside to <code>Module</code> reuse, it's designed to be reused.</li>
+<li>The <code>wasmtime_wasi::add_to_linker</code> function will populate a <code>Linker </code>with an implementation of WASI functions that the instance can get access to. This is required if the <code>Module</code> imports from the <code>wasi_snapshot_preview1</code> name, for example. The <code>Linker</code> does not store the <code>Module</code> so it doesn't matter whether this happens in relation to the creation of the <code>Module</code> or not.</li>
+<li>Whether or not you want a separate <code>Store</code> depends on your data sharing module. If you want the wasm instance to persist its linear memory between function invocations you'll want to use the same <code>Store</code>. If you want no data persisted you should create a second <code>Store</code> with a second instance. A good rule-of-thumb is one instance per store. You should not repeatedly instantiate into the same <code>Store</code> for the lifetime of your process since, as you've noted, nothing in a <code>Store</code> is dropped until the whole <code>Store</code> is dropped which means that your program would otherwise have a memory leak.</li>
+</ol>
+
+
+
+<a name="342652640"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342652640" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lann Martin <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342652640">(Mar 17 2023 at 19:44)</a>:</h4>
+<p>If you do end up wanting a single <code>Linker</code> and multiple <code>Instance</code>s, take a look at <a href="https://docs.rs/wasmtime/6.0.1/wasmtime/struct.InstancePre.html">https://docs.rs/wasmtime/6.0.1/wasmtime/struct.InstancePre.html</a>, which is intended to be the fastest way to get multiple instances from the same module/linker config</p>
+
+
+
+<a name="342654218"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342654218" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> yonil <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342654218">(Mar 17 2023 at 19:54)</a>:</h4>
+<p>thanks <span class="user-mention" data-user-id="253994">@Alex Crichton</span> ! this is <em>very</em> helpful information.</p>
+<p>one follow up question:</p>
+<ol start="5">
+<li>what does calling <code>linker.module()</code> actually do?<br>
+and if I go with the option of 'single linker, single module per lifetime of the process', but separate <code>Store</code> per <code>Instance</code> - is it possible to call <code>linker.module()</code> once (with some <code>Store</code>), or must i call it foreach <code>Store</code> that I create? (and is overhead in calling <code>linker.module()</code> each time i create a new <code>Store</code>?)</li>
+</ol>
+
+
+
+<a name="342654704"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342654704" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342654704">(Mar 17 2023 at 19:57)</a>:</h4>
+<p>The <code>linker.module()</code> method is intended for what is largely now legacy WASI integration, I'd recommend using <code>.instantiate_pre</code> as <span class="user-mention" data-user-id="480579">@Lann Martin</span> mentioned and working with that for creating multiple instances (or using <code>.instantiate</code> if you're only creating one instance)</p>
+<p>If you create a new instance-per-function (or similar), I'd go with <span class="user-mention" data-user-id="480579">@Lann Martin</span>'s suggestion which is to call <code>linker.instantiate_pre()</code> and then repeatedly instantiate that instance (since that does type and import checking once and not on each instantiation)</p>
+
+
+
+<a name="342655167"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342655167" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> yonil <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342655167">(Mar 17 2023 at 19:59)</a>:</h4>
+<p>thanks very much <span class="user-mention" data-user-id="253994">@Alex Crichton</span>  and <span class="user-mention" data-user-id="480579">@Lann Martin</span> !</p>
+
+
+
+<a name="342657647"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342657647" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> yonil <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342657647">(Mar 17 2023 at 20:15)</a>:</h4>
+<p>i'm not out of the woods just yet...</p>
+<p>i define host functions (using <code>linker.func_wrap()</code>) whose implementation depends on the contents of the current store (i write the input to the guest into them, and have the guest write its output using them)</p>
+<p>something like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">input</span>: <span class="kp">&amp;</span><span class="p">[</span><span class="kt">u8</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">..</span><span class="p">.;</span>
+<span class="w">            </span><span class="n">linker</span>
+<span class="w">                </span><span class="p">.</span><span class="n">func_wrap</span><span class="p">(</span><span class="s">"my_host"</span><span class="p">,</span><span class="w"> </span><span class="s">"get_input_size"</span><span class="p">,</span><span class="w"> </span><span class="k">move</span><span class="w"> </span><span class="o">||</span><span class="w"> </span>-&gt; <span class="kt">i32</span> <span class="p">{</span>
+<span class="w">                    </span><span class="n">input</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i32</span>
+<span class="w">                </span><span class="p">})</span>
+<span class="w">                </span><span class="p">.</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">            </span><span class="n">linker</span>
+<span class="w">                </span><span class="p">.</span><span class="n">func_wrap</span><span class="p">(</span>
+<span class="w">                    </span><span class="s">"my_host"</span><span class="p">,</span>
+<span class="w">                    </span><span class="s">"get_input"</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">move</span><span class="w"> </span><span class="o">|</span><span class="k">mut</span><span class="w"> </span><span class="n">caller</span>: <span class="nc">Caller</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="n">WasiState</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">ptr</span>: <span class="kt">i32</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">caller</span><span class="p">.</span><span class="n">get_export</span><span class="p">(</span><span class="s">"memory"</span><span class="p">).</span><span class="n">unwrap</span><span class="p">().</span><span class="n">into_memory</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span>
+<span class="w">                        </span><span class="n">mem</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">caller</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">input</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">                    </span><span class="p">},</span>
+<span class="w">                </span><span class="p">)</span>
+<span class="w">                </span><span class="p">.</span><span class="n">unwrap</span><span class="p">();</span>
+
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">output</span>: <span class="nc">Arc</span><span class="o">&lt;</span><span class="n">Mutex</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;&gt;&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Arc</span>::<span class="n">new</span><span class="p">(</span><span class="n">Mutex</span>::<span class="n">new</span><span class="p">(</span><span class="fm">vec!</span><span class="p">[]));</span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">output_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Arc</span>::<span class="n">clone</span><span class="p">(</span><span class="o">&amp;</span><span class="n">output</span><span class="p">);</span>
+
+<span class="w">            </span><span class="n">linker</span>
+<span class="w">                </span><span class="p">.</span><span class="n">func_wrap</span><span class="p">(</span>
+<span class="w">                    </span><span class="s">"my_host"</span><span class="p">,</span>
+<span class="w">                    </span><span class="s">"set_output"</span><span class="p">,</span>
+<span class="w">                    </span><span class="k">move</span><span class="w"> </span><span class="o">|</span><span class="k">mut</span><span class="w"> </span><span class="n">caller</span>: <span class="nc">Caller</span><span class="o">&lt;'</span><span class="nb">_</span><span class="p">,</span><span class="w"> </span><span class="n">WasiState</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">ptr</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">capacity</span>: <span class="kt">i32</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">output_</span><span class="p">.</span><span class="n">clone</span><span class="p">();</span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">caller</span><span class="p">.</span><span class="n">get_export</span><span class="p">(</span><span class="s">"memory"</span><span class="p">).</span><span class="n">unwrap</span><span class="p">().</span><span class="n">into_memory</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">buffer</span>: <span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="fm">vec!</span><span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">capacity</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">];</span>
+<span class="w">                        </span><span class="n">mem</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="o">&amp;</span><span class="n">caller</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">buffer</span><span class="p">).</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">output</span><span class="p">.</span><span class="n">lock</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span>
+<span class="w">                        </span><span class="o">*</span><span class="n">output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">buffer</span><span class="p">;</span>
+<span class="w">                    </span><span class="p">},</span>
+<span class="w">                </span><span class="p">)</span>
+<span class="w">                </span><span class="p">.</span><span class="n">unwrap</span><span class="p">();</span>
+</code></pre></div>
+<p>if i call <code>linker.instantiate_pre()</code> when i instantiate the module (once, at the beginning of the host's lifetime, and before i call the aforementioned <code>linker.func_wrap()</code>, which differ per function invocation as the <code>input</code> and <code>output</code> are different), then the guest doesn't recognize the host's functions and panics.</p>
+<p>is there a simple way around this you can think of?</p>
+
+
+
+<a name="342658217"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342658217" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342658217">(Mar 17 2023 at 20:19)</a>:</h4>
+<p>You'll want to place store-specific data in the <code>T</code> of <code>Store&lt;T&gt;</code></p>
+
+
+
+<a name="342658265"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342658265" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342658265">(Mar 17 2023 at 20:19)</a>:</h4>
+<p>right now it's <code>WasiState</code> in your example, but you'd instead want to do something like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">MyState</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">wasi</span>: <span class="nc">WasiState</span><span class="p">,</span>
+<span class="w">    </span><span class="n">input</span>: <span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="n">output</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;&gt;</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+
+
+<a name="342658433"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342658433" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342658433">(Mar 17 2023 at 20:20)</a>:</h4>
+<p>then before you invoke wasm you'd do:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">store</span><span class="p">.</span><span class="n">data_mut</span><span class="p">().</span><span class="n">input</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">..</span><span class="p">.;</span>
+</code></pre></div>
+<p>and after invoking wasm you'd do:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="n">output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">data</span><span class="p">().</span><span class="n">output</span><span class="p">.</span><span class="n">as_ref</span><span class="p">().</span><span class="n">ok_or_else</span><span class="p">(</span><span class="o">||</span><span class="w"> </span><span class="o">..</span><span class="p">.)</span><span class="o">?</span><span class="p">;</span>
+</code></pre></div>
+
+
+
+<a name="342664398"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342664398" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> yonil <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342664398">(Mar 17 2023 at 20:59)</a>:</h4>
+<p>great point. thanks again!</p>
+
+
+
+<a name="342665032"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342665032" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342665032">(Mar 17 2023 at 21:03)</a>:</h4>
+<p>If you've got suggestions about how to improve the docs here that'd also be much appreciated as well</p>
+
+
+
+<a name="342665061"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342665061" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342665061">(Mar 17 2023 at 21:03)</a>:</h4>
+<p>be it more examples or more words or less words!</p>
+
+
+
+<a name="342674608"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342674608" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> yonil <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342674608">(Mar 17 2023 at 22:24)</a>:</h4>
+<ol>
+<li>
+<p>i think an end-to-end example of how to write a guest and a host which pass arguments and returns values through shared memory would be very helpful for people with scenario's like mine</p>
+</li>
+<li>
+<p>the relationships between Module/Instance/Linker/Store, and best practices in creating/caching them, as mentioned in this thread, can also be helpful if documented in a central place.</p>
+</li>
+</ol>
+
+
+
+<a name="342721252"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/342721252" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Víctor García <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#342721252">(Mar 18 2023 at 07:03)</a>:</h4>
+<p><span class="user-mention" data-user-id="253994">@Alex Crichton</span>, as <span class="user-mention" data-user-id="589642">@yonil</span> mentioned, at least for my way of learning, I miss examples and best practice recommendations</p>
+
+
+
+<a name="343151296"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/217126-wasmtime/topic/recommendations%20for%20proper%20usage%20of%20%60wasmtime%60%20%28Rust%29/near/343151296" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://bytecodealliance.github.io/zulip-archive/stream/217126-wasmtime/topic/recommendations.20for.20proper.20usage.20of.20.60wasmtime.60.20.28Rust.29.html#343151296">(Mar 20 2023 at 15:22)</a>:</h4>
+<p>Makes sense! I don't know how best to put all that into a document today, but it's good to be aware of nonetheless!</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

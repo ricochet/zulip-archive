@@ -1,0 +1,356 @@
+[
+    {
+        "content": "<p>alexcrichton opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>:</p>\n<blockquote>\n<p>This commit is a relatively major change to the way that Wasmtime<br>\ngenerates code for Wasm modules and how functions call each other.<br>\nPrior to this commit all function calls between functions, even if they<br>\nwere defined in the same module, were done indirectly through a<br>\nregister. To implement this the backend would emit an absolute 8-byte<br>\nrelocation near all function calls, load that address into a register,<br>\nand then call it. While this technique is simple to implement and easy<br>\nto get right, it has two primary downsides associated with it:</p>\n<ul>\n<li>\n<p>Function calls are always indirect which means they are more difficult<br>\n  to predict, resulting in worse performance.</p>\n</li>\n<li>\n<p>Generating a relocation-per-function call requires expensive<br>\n  relocation resolution at module-load time, which can be a large<br>\n  contributing factor to how long it takes to load a precompiled module.</p>\n</li>\n</ul>\n<p>To fix these issues, while also compromising on the previously simple<br>\nimplementation technique, this commit switches wasm calls within a<br>\nmodule to using the <code>colocated</code> flag enabled in Cranelift-speak, which<br>\nbasically means that a relative call instruction is used with a<br>\nrelocation that's resolved relative to the pc of the call instruction<br>\nitself.</p>\n<p>When switching the <code>colocated</code> flag to <code>true</code> this commit is also then<br>\nable to move much of the relocation resolution from <code>wasmtime_jit::link</code><br>\ninto <code>wasmtime_cranelift::obj</code> during object-construction time. This<br>\nfrontloads all relocation work which means that there's actually no<br>\nrelocations related to function calls in the final image, solving both<br>\nof our points above.</p>\n<p>The main gotcha in implementing this technique is that there are<br>\nhardware limitations to relative function calls which mean we can't<br>\nsimply blindly use them. AArch64, for example, can only go +/- 64 MB<br>\nfrom the <code>bl</code> instruction to the target, which means that if the<br>\nfunction we're calling is a greater distance away then we would fail to<br>\nresolve that relocation. On x86_64 the limits are +/- 2GB which are much<br>\nlarger, but theoretically still feasible to hit. Consequently the main<br>\nincrease in implementation complexity is fixing this issue.</p>\n<p>This issue is actually already present in Cranelift itself, and is<br>\ninternally one of the invariants handled by the <code>MachBuffer</code> type. When<br>\ngenerating a function relative jumps between basic blocks have similar<br>\nrestrictions. At this time, however, I decided to not try to reuse<br>\n<code>MachBuffer</code> for inter-function relocations. The main reason for this is<br>\nthat <code>MachBuffer</code> doesn't actually handle any of the cases that<br>\ninter-function relocations need to handle, namely the 26-bit relocation<br>\nand 32-bit relocations of AArch64 and x86_64. If a 26-bit relocation<br>\nisn't resolvable because a function gets too large then <code>MachBuffer</code><br>\nwill simply panic. I also opted to not use <code>MachBuffer</code> for now, though,<br>\nbecause it doesn't quite have the infrastructure already set up where<br>\nwhen inserting an island for a smaller jump sequence the result should<br>\nbe a relocation to fill in later. Today it simply promotes a 19-bit<br>\nbranch on AArch64 to a 26-bit branch, assuming the 26 bits is enough.<br>\nAll-in-all I felt that at this time <code>MachBuffer</code> wasn't reusable enough<br>\nand would need enough work that it was probably more worthwhile to do<br>\nthis in <code>wasmtime-cranelift</code> first and looking to unify the strategies<br>\nin the future.</p>\n<p>For these reasons the <code>wasmtime_cranelift::obj</code> module has grown in<br>\ncomplexity quite a bit. This now entirely handles relative relocations<br>\nbetween functions, automatically inserting \"jump veneers\" to resolve<br>\ncalls between functions that are too far away. The general strategy is<br>\nsimilar to <code>MachBuffer</code>, but different in the final tracking of<br>\nrelocations. The current assumption is that each <code>TargetIsa</code> has the<br>\nability to generate a fixed \"jump veneer\" which internally has an 8-byte<br>\nimmediate value that is added to its own address to reach the<br>\ndestination of an indirect call. This relative jump, even in the veneer,<br>\nmeans that when veneers are used we still don't need absolute<br>\nrelocations since the code is still all implemented as relative jumps.<br>\nThe veneer jumps, however, are larger in code size because they don't<br>\nfit into the native versions.</p>\n<p>I've added some simple testing of this for now. A synthetic compiler<br>\noption was create to simply add padded 0s between functions and test<br>\ncases implement various forms of calls that at least need veneers. A<br>\ntest is also included for x86_64, but it is unfortunately pretty slow<br>\nbecause it requires generating 2GB of output. I'm hoping for now it's<br>\nnot too bad, but we can disable the test if it's prohibitive and<br>\notherwise just comment the necessary portions to be sure to run the<br>\nignored test if these parts of the code have changed.</p>\n<p>The final end-result of this commit is that for a large module I'm<br>\nworking with the number of relocations dropped to zero, meaning that<br>\nnothing actually needs to be done to the text section when it's loaded<br>\ninto memory (yay!). I haven't run final benchmarks yet but this is the<br>\nlast remaining source of significant slowdown when loading modules,<br>\nafter I land a number of other PRs both active and ones that I only have<br>\nlocally for now.</p>\n<p>&lt;!--</p>\n<p>Please ensure that the following steps are all taken care of before submitting<br>\nthe PR.</p>\n<ul>\n<li>\n<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>\n  here.</p>\n</li>\n<li>\n<p>[ ] A short description of what this does, why it is needed; if the<br>\n  description becomes long, the matter should probably be discussed in an issue<br>\n  first.</p>\n</li>\n<li>\n<p>[ ] This PR contains test cases, if meaningful.</p>\n</li>\n<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>\n  If you don't know who could review this, please indicate so. The list of<br>\n  suggested reviewers on the right can help you.</li>\n</ul>\n<p>Please ensure all communication adheres to the <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md\">code of\nconduct</a>.<br>\n--&gt;<br>\n</p>\n</blockquote>",
+        "id": 250848600,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630015946
+    },
+    {
+        "content": "<p><strong>alexcrichton</strong> requested <a href=\"https://github.com/cfallin\">cfallin</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a>.</p>",
+        "id": 250848624,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630015957
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-739985895\">PR review</a>.</p>",
+        "id": 250854493,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630018984
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-739985895\">PR review</a>.</p>",
+        "id": 250854494,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630018984
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697019616\">PR review comment</a>:</p>\n<blockquote>\n<p>This should be a load literal instruction, i.e. <code>ldr x16, 16</code>, and you should schedule it before the <code>adr</code> (whose offset would also be adjusted).</p>\n</blockquote>",
+        "id": 250854495,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630018984
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697017444\">PR review comment</a>:</p>\n<blockquote>\n<p>Typo - <code>generates</code>.</p>\n</blockquote>",
+        "id": 250854496,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630018984
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697017597\">PR review comment</a>:</p>\n<blockquote>\n<p><code>x16</code> should be <code>x17</code>, shouldn't it?</p>\n</blockquote>",
+        "id": 250854502,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630018989
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250859189,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630022457
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740056483\">PR review</a>.</p>",
+        "id": 250864444,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630026971
+    },
+    {
+        "content": "<p>akirilov-arm submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740056483\">PR review</a>.</p>",
+        "id": 250864445,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630026971
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697078992\">PR review comment</a>:</p>\n<blockquote>\n<p>Ditto.</p>\n</blockquote>",
+        "id": 250864446,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630026971
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697079062\">PR review comment</a>:</p>\n<blockquote>\n<p><code>adr x17, 12</code></p>\n</blockquote>",
+        "id": 250864447,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630026971
+    },
+    {
+        "content": "<p>akirilov-arm created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697078938\">PR review comment</a>:</p>\n<blockquote>\n<p>Has this been added by mistake?</p>\n</blockquote>",
+        "id": 250864448,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630026971
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740409991\">PR review</a>.</p>",
+        "id": 250915690,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630062671
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697357849\">PR review comment</a>:</p>\n<blockquote>\n<p>Using a markdown code block like done here makes sense to me.</p>\n</blockquote>",
+        "id": 250915692,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630062671
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740411182\">PR review</a>.</p>",
+        "id": 250915862,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630062777
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697358745\">PR review comment</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>/// This generates:\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 250915863,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630062777
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740415371\">PR review</a>.</p>",
+        "id": 250916436,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063140
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697361974\">PR review comment</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>        if name == \"wasmtime_linkopt_padding_between_functions\" {\n            self.linkopts.padding_between_functions = value.parse()?;\n            return Ok(());\n        }\n        if name == \"wasmtime_linkopt_force_jump_veneer\" {\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 250916438,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063140
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740415972\">PR review</a>.</p>",
+        "id": 250916511,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063187
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697362407\">PR review comment</a>:</p>\n<blockquote>\n<div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>            self.linkopts.force_jump_veneers = value.parse().unwrap();\n</code></pre></div>\n<p>to prevent silently ignoring invalid values.</p>\n</blockquote>",
+        "id": 250916512,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063188
+    },
+    {
+        "content": "<p>bjorn3 edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697362407\">PR review comment</a>.</p>",
+        "id": 250916529,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063199
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697363461\">PR review comment</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>    /// Packed form of windows unwind tables which, if present, will get emited\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 250916749,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063310
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740417380\">PR review</a>.</p>",
+        "id": 250916750,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063310
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697366287\">PR review comment</a>:</p>\n<blockquote>\n<p>Maybe make this <code>ud2</code> on x86?</p>\n</blockquote>",
+        "id": 250917381,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063633
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740421248\">PR review</a>.</p>",
+        "id": 250917382,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630063633
+    },
+    {
+        "content": "<p>alexcrichton edited <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>:</p>\n<blockquote>\n<p>This commit is a relatively major change to the way that Wasmtime<br>\ngenerates code for Wasm modules and how functions call each other.<br>\nPrior to this commit all function calls between functions, even if they<br>\nwere defined in the same module, were done indirectly through a<br>\nregister. To implement this the backend would emit an absolute 8-byte<br>\nrelocation near all function calls, load that address into a register,<br>\nand then call it. While this technique is simple to implement and easy<br>\nto get right, it has two primary downsides associated with it:</p>\n<ul>\n<li>\n<p>Function calls are always indirect which means they are more difficult<br>\n  to predict, resulting in worse performance.</p>\n</li>\n<li>\n<p>Generating a relocation-per-function call requires expensive<br>\n  relocation resolution at module-load time, which can be a large<br>\n  contributing factor to how long it takes to load a precompiled module.</p>\n</li>\n</ul>\n<p>To fix these issues, while also compromising on the previously simple<br>\nimplementation technique, this commit switches wasm calls within a<br>\nmodule to using the <code>colocated</code> flag enabled in Cranelift-speak, which<br>\nbasically means that a relative call instruction is used with a<br>\nrelocation that's resolved relative to the pc of the call instruction<br>\nitself.</p>\n<p>When switching the <code>colocated</code> flag to <code>true</code> this commit is also then<br>\nable to move much of the relocation resolution from <code>wasmtime_jit::link</code><br>\ninto <code>wasmtime_cranelift::obj</code> during object-construction time. This<br>\nfrontloads all relocation work which means that there's actually no<br>\nrelocations related to function calls in the final image, solving both<br>\nof our points above.</p>\n<p>The main gotcha in implementing this technique is that there are<br>\nhardware limitations to relative function calls which mean we can't<br>\nsimply blindly use them. AArch64, for example, can only go +/- 64 MB<br>\nfrom the <code>bl</code> instruction to the target, which means that if the<br>\nfunction we're calling is a greater distance away then we would fail to<br>\nresolve that relocation. On x86_64 the limits are +/- 2GB which are much<br>\nlarger, but theoretically still feasible to hit. Consequently the main<br>\nincrease in implementation complexity is fixing this issue.</p>\n<p>This issue is actually already present in Cranelift itself, and is<br>\ninternally one of the invariants handled by the <code>MachBuffer</code> type. When<br>\ngenerating a function relative jumps between basic blocks have similar<br>\nrestrictions. At this time, however, I decided to not try to reuse<br>\n<code>MachBuffer</code> for inter-function relocations. The main reason for this is<br>\nthat <code>MachBuffer</code> doesn't actually handle any of the cases that<br>\ninter-function relocations need to handle, namely the 26-bit relocation<br>\nand 32-bit relocations of AArch64 and x86_64. If a 26-bit relocation<br>\nisn't resolvable because a function gets too large then <code>MachBuffer</code><br>\nwill simply panic. I also opted to not use <code>MachBuffer</code> for now, though,<br>\nbecause it doesn't quite have the infrastructure already set up where<br>\nwhen inserting an island for a smaller jump sequence the result should<br>\nbe a relocation to fill in later. Today it simply promotes a 19-bit<br>\nbranch on AArch64 to a 26-bit branch, assuming the 26 bits is enough.<br>\nAll-in-all I felt that at this time <code>MachBuffer</code> wasn't reusable enough<br>\nand would need enough work that it was probably more worthwhile to do<br>\nthis in <code>wasmtime-cranelift</code> first and looking to unify the strategies<br>\nin the future.</p>\n<p>For these reasons the <code>wasmtime_cranelift::obj</code> module has grown in<br>\ncomplexity quite a bit. This now entirely handles relative relocations<br>\nbetween functions, automatically inserting \"jump veneers\" to resolve<br>\ncalls between functions that are too far away. The general strategy is<br>\nsimilar to <code>MachBuffer</code>, but different in the final tracking of<br>\nrelocations. The current assumption is that each <code>TargetIsa</code> has the<br>\nability to generate a fixed \"jump veneer\" which internally has an 8-byte<br>\nimmediate value that is added to its own address to reach the<br>\ndestination of an indirect call. This relative jump, even in the veneer,<br>\nmeans that when veneers are used we still don't need absolute<br>\nrelocations since the code is still all implemented as relative jumps.<br>\nThe veneer jumps, however, are larger in code size because they don't<br>\nfit into the native versions.</p>\n<p>I've added some simple testing of this for now. A synthetic compiler<br>\noption was create to simply add padded 0s between functions and test<br>\ncases implement various forms of calls that at least need veneers. A<br>\ntest is also included for x86_64, but it is unfortunately pretty slow<br>\nbecause it requires generating 2GB of output. I'm hoping for now it's<br>\nnot too bad, but we can disable the test if it's prohibitive and<br>\notherwise just comment the necessary portions to be sure to run the<br>\nignored test if these parts of the code have changed.</p>\n<p>The final end-result of this commit is that for a large module I'm<br>\nworking with the number of relocations dropped to zero, meaning that<br>\nnothing actually needs to be done to the text section when it's loaded<br>\ninto memory (yay!). I haven't run final benchmarks yet but this is the<br>\nlast remaining source of significant slowdown when loading modules,<br>\nafter I land a number of other PRs both active and ones that I only have<br>\nlocally for now.</p>\n<p>cc #3230<br>\n</p>\n</blockquote>",
+        "id": 250950014,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630078661
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250955920,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630081200
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-740691430\">PR review</a>.</p>",
+        "id": 250956022,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630081226
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r697566395\">PR review comment</a>:</p>\n<blockquote>\n<p>Nah this is because rustdoc tries to test all code blocks as Rust code so I needed to add an annotation that it's not actually Rust code.</p>\n</blockquote>",
+        "id": 250956023,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630081226
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250964476,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630084898
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250978797,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630090730
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250979224,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630090908
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250980862,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630091553
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250990869,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630096091
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250997408,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630099271
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 250999692,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630100473
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 251008162,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630105974
+    },
+    {
+        "content": "<p>alexcrichton updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a> from <code>call-relative</code> to <code>main</code>.</p>",
+        "id": 251015448,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630112351
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-741900007\">PR review</a>.</p>",
+        "id": 251269416,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-741900007\">PR review</a>.</p>",
+        "id": 251269417,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698678011\">PR review comment</a>:</p>\n<blockquote>\n<p>Two thoughts on this new addition to the backend trait:</p>\n<ul>\n<li>\n<p>I think there might be an opportunity to merge this per-backend behavior into the <code>LabelUse</code> trait already defined by each backend. The generated trampoline code is playing almost the same role -- extending the range of a branch and allowing a shorter-range reloc to be converted to a longer-range one -- except that, unlike intra-function veneers, it also assumes the use of various registers.</p>\n<p>That last bit is a key difference. In the aarch64 case <code>x16</code> and <code>x17</code> are used internally to instruction-lowering sequences but never across basic blocks, so this is fine; but <code>r10</code> and <code>r11</code> on x86-64 will potentially be used by regalloc, so we wouldn't want to blindly insert this as another type of veneer in the existing trait. So we'd want to add some parameters to the <code>supports_veneer</code>, <code>veneer_size</code> and <code>generate_veneer</code> functions to indicate what kind of veneer (\"next step up in range\" or \"absolute\" maybe) and whether the use of regs as per ABI for inter-function transfers is allowed.</p>\n<p>Whatever we do, it strikes me that the duplication here (\"veneers\" in two places, with similar APIs) is likely to confuse others so we should somehow merge them or distinguish them better. Furthermore if we're going to have low-level understanding of branches (e.g. embedded machine-code bits in a sequence to emit) we should have that in as few places as possible.</p>\n</li>\n<li>\n<p>I am wondering if there is a better name than \"veneer\", if we don't merge; maybe \"trampoline\" or \"linkage stub\"?</p>\n</li>\n</ul>\n</blockquote>",
+        "id": 251269418,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698678705\">PR review comment</a>:</p>\n<blockquote>\n<p>Do we still need this if we have the option below (force veneers) as well?</p>\n</blockquote>",
+        "id": 251269419,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698683792\">PR review comment</a>:</p>\n<blockquote>\n<p>For maps from one index space to another I like the <code>X_to_Y</code> naming idiom to make it clear what the index and value are; maybe <code>text_offset_to_text_contents_index</code>? Verbose I know but getting index spaces crossed is a potent footgun...</p>\n</blockquote>",
+        "id": 251269421,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698684227\">PR review comment</a>:</p>\n<blockquote>\n<p>resolved before the...? (don't leave me hanging, I need to know how this story ends!)</p>\n</blockquote>",
+        "id": 251269422,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698688956\">PR review comment</a>:</p>\n<blockquote>\n<p>Can you add a reference to the <code>MachBuffer</code> code that does this too? The cases are the same (known/in-bounds, known, out-of-bounds, unknown) and it'd be helpful to cross-reference where else this logic is used :-)</p>\n</blockquote>",
+        "id": 251269423,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698687293\">PR review comment</a>:</p>\n<blockquote>\n<p>can you add a TODO here referencing one of the remove-old-backends issues/PRs (<a href=\"https://github.com/bytecodealliance/rfcs/issues/12\">bytecodealliance/rfcs#12</a> maybe) so we can grep this when the time comes?</p>\n</blockquote>",
+        "id": 251269424,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698685664\">PR review comment</a>:</p>\n<blockquote>\n<p>Maybe at least a <code>checked_add</code> here, if not some clamping? A hypothetical machine with a 64-bit branch that can do a relative jump anywhere would overflow otherwise.</p>\n</blockquote>",
+        "id": 251269425,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698690030\">PR review comment</a>:</p>\n<blockquote>\n<p>\"cache loads\" is ambiguous here (my computer-architect mind thinks this means a normal memory load); maybe \"to make loading compiled modules from disk more efficient\"?</p>\n</blockquote>",
+        "id": 251269426,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698681199\">PR review comment</a>:</p>\n<blockquote>\n<p>I see here why you had to add methods to the <code>TargetIsa</code> to get at the veneer-generation implementation; above comments re: making use of <code>LabelUse</code> still apply and then maybe we could bounce through the <code>TargetIsa</code> to use those.</p>\n</blockquote>",
+        "id": 251269427,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698682573\">PR review comment</a>:</p>\n<blockquote>\n<p>Readability request: a little struct in place of this tuple, so we can write e.g. <code>TextSegmentFunction { body_bytes, alignment }</code> or something like that?</p>\n</blockquote>",
+        "id": 251269428,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698690504\">PR review comment</a>:</p>\n<blockquote>\n<p>There is some code in the runtime that applies relocations as well; can we consolidate the two implementations?</p>\n</blockquote>",
+        "id": 251269429,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630346856
+    },
+    {
+        "content": "<p>bjorn3 submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-741952820\">PR review</a>.</p>",
+        "id": 251274207,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630348758
+    },
+    {
+        "content": "<p>bjorn3 created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r698718229\">PR review comment</a>:</p>\n<blockquote>\n<p>This function could be useful for cranelift-jit too. It also needs a version that loads the address from memory at a specific location like ELF PLT's. Currently it only has a x86_64 version for the latter function.</p>\n</blockquote>",
+        "id": 251274209,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630348758
+    },
+    {
+        "content": "<p>alexcrichton closed without merge <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254\">PR #3254</a>.</p>",
+        "id": 251458224,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630443393
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-743195192\">PR review</a>.</p>",
+        "id": 251459908,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630443998
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r699673784\">PR review comment</a>:</p>\n<blockquote>\n<p>I'm going to leave this in for now because I think it's useful to exercise the veneers in real-world situations where they're actually needed. Otherwise I'd be worried that the logic for actually inserting veneers was only correct when the forcing was turned on. This way there's some exercising of the actual \"ok yes we need that veneer\" logic as well. (it's also relatively easy to support).</p>\n</blockquote>",
+        "id": 251459909,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630443998
+    },
+    {
+        "content": "<p>cfallin submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#pullrequestreview-743220327\">PR review</a>.</p>",
+        "id": 251465043,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630446135
+    },
+    {
+        "content": "<p>cfallin created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/3254#discussion_r699693645\">PR review comment</a>:</p>\n<blockquote>\n<p>Makes sense!</p>\n<p>Would it make sense to use it only in tests with the aarch64 backend (could be instantiated explicitly, doesn't need to run on aarch64 host), where the threshold for inserting an island is much lower, so we don't have the overhead of 2GiB object files in tests on x86?</p>\n</blockquote>",
+        "id": 251465044,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1630446135
+    }
+]

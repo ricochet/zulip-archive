@@ -1,0 +1,127 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #3727 Lazily load types into `Func` · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233727.20Lazily.20load.20types.20into.20.60Func.60.html">wasmtime / PR #3727 Lazily load types into `Func`</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="269465189"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233727%20Lazily%20load%20types%20into%20%60Func%60/near/269465189" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233727.20Lazily.20load.20types.20into.20.60Func.60.html#269465189">(Jan 26 2022 at 19:11)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/3727">PR #3727</a> from <code>no-type-in-func</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit changes the construction of a <code>Func</code> to lazily load the type<br>
+information if required instead of always loading the type information<br>
+at <code>Func</code>-construction time. The main purpose of this change is to<br>
+accelerate instantiation of instances which have many imports. Currently<br>
+in the fast way of doing this the instantiation loop looks like:</p>
+<div class="codehilite"><pre><span></span><code>let mut store = Store::new(&amp;engine, ...);
+let instance = instance_pre.instantiate(&amp;mut store);
+</code></pre></div>
+
+<p>In this situation the <code>instance_pre</code> will typically load host-defined<br>
+functions (defined via <code>Linker</code> APIs) into the <code>Store</code> as individual<br>
+<code>Func</code> items and then perform the instantiation process. The operation<br>
+of loading a <code>HostFunc</code> into a <code>Store</code> however currently involves two<br>
+expensive operations:</p>
+<ul>
+<li>
+<p>First a read-only lock is taken on the <code>RwLock</code> around engine<br>
+  signatures.</p>
+</li>
+<li>
+<p>Next a clone of the wasm type is made to pull it out of the engine<br>
+  signature registry.</p>
+</li>
+</ul>
+<p>Neither of these is actually necessary for imported functions. The<br>
+<code>FuncType</code> for imported functions is never used since all comparisons<br>
+happen with the intern'd indices instead. The only time a <code>FuncType</code> is<br>
+used typically is for exported functions when using <code>Func::typed</code> or<br>
+similar APIs which need type information.</p>
+<p>This commit makes this path faster by storing <code>Option&lt;FuncType&gt;</code> instead<br>
+of <code>FuncType</code> within a <code>Func</code>. This means that it starts out as <code>None</code><br>
+and is only filled in on-demand as necessary. This means that when<br>
+instantiating a module with many imports no clones/locks are done.</p>
+<p>On a simple microbenchmark where a module with 100 imports is<br>
+instantiated this PR improves instantiation time by ~35%. Due to the<br>
+rwlock used here and the general inefficiency of pthreads rwlocks the<br>
+effect is even more profound when many threads are performing the same<br>
+instantiation process. On x86_64 with 8 threads performing instantiation<br>
+this PR improves instantiation time by 80% and on arm64 it improves by<br>
+97% (wow read-contended glibc rwlocks on arm64 are slow).</p>
+<p>Note that much of the improvement here is also from memory<br>
+allocatoins/deallocations no longer being performed because dropping<br>
+functions within a store no longer requires deallocating the <code>FuncType</code><br>
+if it's not present.</p>
+<p>A downside of this PR is that <code>Func::ty</code> is now unconditionally taking<br>
+an rwlock if the type hasn't already been filled in. (it uses the<br>
+engine). If this is an issue in the future though we can investigate at<br>
+that time using somthing like a <code>Once</code> to lazily fill in even when<br>
+mutable access to the store isn't available.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="269466452"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233727%20Lazily%20load%20types%20into%20%60Func%60/near/269466452" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233727.20Lazily.20load.20types.20into.20.60Func.60.html#269466452">(Jan 26 2022 at 19:19)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3727#pullrequestreview-864000313">PR review</a>.</p>
+
+
+
+<a name="269466453"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233727%20Lazily%20load%20types%20into%20%60Func%60/near/269466453" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233727.20Lazily.20load.20types.20into.20.60Func.60.html#269466453">(Jan 26 2022 at 19:19)</a>:</h4>
+<p>cfallin submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/3727#pullrequestreview-864000313">PR review</a>.</p>
+
+
+
+<a name="269466454"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233727%20Lazily%20load%20types%20into%20%60Func%60/near/269466454" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233727.20Lazily.20load.20types.20into.20.60Func.60.html#269466454">(Jan 26 2022 at 19:19)</a>:</h4>
+<p>cfallin created <a href="https://github.com/bytecodealliance/wasmtime/pull/3727#discussion_r792966890">PR review comment</a>:</p>
+<blockquote>
+<p>There's probably a mundane borrow-checker-subtlety reason for returning the downgraded immutable-borrow of <code>StoreOpaque</code> here, but could we add a comment describing why?</p>
+</blockquote>
+
+
+
+<a name="269476237"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233727%20Lazily%20load%20types%20into%20%60Func%60/near/269476237" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233727.20Lazily.20load.20types.20into.20.60Func.60.html#269476237">(Jan 26 2022 at 20:23)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/3727">PR #3727</a> from <code>no-type-in-func</code> to <code>main</code>.</p>
+
+
+
+<a name="269476258"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%233727%20Lazily%20load%20types%20into%20%60Func%60/near/269476258" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.233727.20Lazily.20load.20types.20into.20.60Func.60.html#269476258">(Jan 26 2022 at 20:23)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/3727">PR #3727</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

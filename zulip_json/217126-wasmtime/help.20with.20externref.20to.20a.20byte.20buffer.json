@@ -1,0 +1,146 @@
+[
+    {
+        "content": "<p>I'm working on a sandbox environment for user defined functions in a data processing engine. It is a perfect use case for wasm, and even better it doesn't need interface types. I have a super simple need for the types on the wasm methods. All I need to do is be able to pass in a borrowed byte array into the method and it can return an owned byte array. This data processing engine expects to use a specific data serialization method inside WASM functions.  So I'm starting out with a really simple wasm module that takes a byte buffer and returns a number.  Once I have that working I'll expand out and actually parse the data with the serialization library.  Unfortunately I'm hitting a few issues on the way.</p>\n<p>So I've used two different signatures for this signature:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[no_mangle]</span><span class=\"w\"></span>\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"k\">extern</span><span class=\"w\"> </span><span class=\"s\">\"C\"</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">udf</span><span class=\"p\">(</span><span class=\"n\">input</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">u32</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">     </span><span class=\"mi\">1</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>and </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[wasm_bindgen]</span><span class=\"w\"></span>\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">udf</span><span class=\"p\">(</span><span class=\"n\">input_buffer</span>:  <span class=\"kp\">&amp;</span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">])</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">u32</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mi\">0</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>that produces a method that either accepts 1 or 2 i32s respectively.  The problem is I want to invoke this using an ExternRef and I'm ussure how to bridge the gap.  If I just call it directly it will complain about \"expected externref found i32\"  which makes sense.  It is either a pointer or a pointer and length.  I found that wasm-bindgen has a --reference-types flag.  I'm not great at reading decompiled wasm yet so I don't know if it is giving me what I need.  The way I'm invoking it is:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">RUSTFLAGS</span><span class=\"o\">=</span><span class=\"s\">\"-C target-feature=+reference-types\"</span><span class=\"w\"> </span><span class=\"n\">cargo</span><span class=\"w\"> </span><span class=\"n\">build</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">target</span><span class=\"w\"> </span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">unknown</span><span class=\"o\">-</span><span class=\"n\">unknown</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"n\">rm</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"n\">rf</span><span class=\"w\"> </span><span class=\"n\">bound</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"n\">wasm</span><span class=\"o\">-</span><span class=\"n\">bindgen</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">no</span><span class=\"o\">-</span><span class=\"n\">typescript</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">reference</span><span class=\"o\">-</span><span class=\"n\">types</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">target</span><span class=\"w\"> </span><span class=\"n\">no</span><span class=\"o\">-</span><span class=\"n\">modules</span><span class=\"w\"> </span><span class=\"n\">target</span><span class=\"o\">/</span><span class=\"n\">wasm32</span><span class=\"o\">-</span><span class=\"n\">unknown</span><span class=\"o\">-</span><span class=\"n\">unknown</span><span class=\"o\">/</span><span class=\"n\">debug</span><span class=\"o\">/</span><span class=\"n\">adder</span><span class=\"p\">.</span><span class=\"n\">wasm</span><span class=\"w\"> </span><span class=\"o\">--</span><span class=\"n\">out</span><span class=\"o\">-</span><span class=\"n\">dir</span><span class=\"w\"> </span><span class=\"n\">bound</span><span class=\"w\"></span>\n</code></pre></div>\n<p>The problem I'm having with the produced wasm file is that it tries to import <code>__wbindgen_init_externref_table </code> which my runner can't find.</p>\n<p>So my runner code looks like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">cfg</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Config</span>::<span class=\"n\">new</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">cfg</span><span class=\"p\">.</span><span class=\"n\">wasm_reference_types</span><span class=\"p\">(</span><span class=\"kc\">true</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">engine</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Engine</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">cfg</span><span class=\"p\">).</span><span class=\"n\">unwrap</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">store</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Store</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">engine</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">module</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Module</span>::<span class=\"n\">from_file</span><span class=\"p\">(</span><span class=\"n\">store</span><span class=\"p\">.</span><span class=\"n\">engine</span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"s\">\"../path_to_wasm/adder.wasm\"</span><span class=\"p\">).</span><span class=\"n\">unwrap</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">instance</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Instance</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">store</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">module</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"p\">[]).</span><span class=\"n\">unwrap</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">add</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">instance</span><span class=\"p\">.</span><span class=\"n\">get_typed_func</span>::<span class=\"o\">&lt;</span><span class=\"nb\">Option</span><span class=\"o\">&lt;</span><span class=\"n\">ExternRef</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"s\">\"udf\"</span><span class=\"p\">).</span><span class=\"n\">unwrap</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">ext_ref</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">ExternRef</span>::<span class=\"n\">new</span><span class=\"p\">([</span><span class=\"mi\">0</span><span class=\"p\">,</span><span class=\"mi\">1</span><span class=\"p\">]);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"Returned {}\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">add</span><span class=\"p\">.</span><span class=\"n\">call</span><span class=\"p\">(</span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">ext_ref</span><span class=\"p\">)).</span><span class=\"n\">unwrap</span><span class=\"p\">());</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Any help or ideas here would be much appreciated.  Even if you just point me in the general direction of a unit test that would do me a world of good.  Thank you so much!</p>",
+        "id": 231242760,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616362564
+    },
+    {
+        "content": "<p><code>wasm-bindgen </code>only targets the Web and other JS host environments, so unfortunately you can't use it in non-Web environments like Wasmtime.</p>",
+        "id": 231357035,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1616436245
+    },
+    {
+        "content": "<p>if you really just need a single exported function, I'd suggest writing raw FFI:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">udf</span><span class=\"p\">(</span><span class=\"n\">slice</span>: <span class=\"kp\">&amp;</span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">])</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">u32</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">     </span><span class=\"c1\">// ...</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">mod</span> <span class=\"nn\">raw_ffi</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"cp\">#[no_mangle]</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">udf</span><span class=\"p\">(</span><span class=\"n\">ptr</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">len</span>: <span class=\"kt\">usize</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">u32</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">slice</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">slice</span>::<span class=\"n\">from_raw_parts</span><span class=\"p\">(</span><span class=\"n\">ptr</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">len</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">super</span>::<span class=\"n\">udf</span><span class=\"p\">(</span><span class=\"n\">slice</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>and then in the runner code, do</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">udf</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">instance</span><span class=\"p\">.</span><span class=\"n\">get_typed_func</span>::<span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"s\">\"udf\"</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 231357805,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1616436559
+    },
+    {
+        "content": "<p>Beautiful.  That looks perfect.  I'll try that tonight</p>",
+        "id": 231361104,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616437875
+    },
+    {
+        "content": "<p>One thing that stands out to me is how will I pass a pointer to code on the host into the sandboxed run time?  I was under the impression that it needed to be an ExternRef to do that.  For <code>let udf = instance.get_typed_func::&lt;u32, u32, u32&gt;(\"udf\")?;</code> it would be a pointer to an address that already exists in the wasm runtime, correct?</p>",
+        "id": 231361693,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616438061
+    },
+    {
+        "content": "<p><code>externref</code> is completely opaque to the guest, it can't be inspected or modified, so it's perfect for giving the guest a \"handle\" to something the host keeps track of.  as such, it can't be used to pass data to the guest to use. you're right in that using a i32 pair you'll need to copy the bytes into the guest's memory to pass it a pointer to. i believe wasm-bindgen will export a \"malloc\"-like function that can be used to allocate memory in the guest in a way that's safe for hosts to use; that will give back such a pointer and then you'd use the Wasmtime <code>Memory</code> object to write to that location.</p>",
+        "id": 231365230,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1616439488
+    },
+    {
+        "content": "<p>One alternative that might be worth considering is to use a \"well-known\" file path with WASI and let the guest read the data from the file; WASI would handle the guest memory for you.</p>",
+        "id": 231365995,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1616439741
+    },
+    {
+        "content": "<p>Yeah I got a suggestion elsewhere* to implement that malloc like behavior.  Which makes sense and is doable.  I was hoping externref would be a reference to memory outside the sandbox and wouldn't require a copy</p>\n<ul>\n<li><a href=\"https://users.rust-lang.org/t/calling-a-wasm-method-that-accepts-a-byte-array-with-embedded-wasmtime/57241\">https://users.rust-lang.org/t/calling-a-wasm-method-that-accepts-a-byte-array-with-embedded-wasmtime/57241</a></li>\n</ul>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://users.rust-lang.org/t/calling-a-wasm-method-that-accepts-a-byte-array-with-embedded-wasmtime/57241\" style=\"background-image: url(https://aws1.discourse-cdn.com/business5/uploads/rust_lang/original/2X/8/83e41956eccfd67ad6ff76f15a2c22e58db31d4f.svg)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://users.rust-lang.org/t/calling-a-wasm-method-that-accepts-a-byte-array-with-embedded-wasmtime/57241\" title=\"Calling a WASM method that accepts a byte array with embedded wasmtime\">Calling a WASM method that accepts a byte array with embedded wasmtime</a></div><div class=\"message_embed_description\">I'm working on a sandbox environment for user defined functions in a data processing engine. It is a perfect use case for wasm, and even better it doesn't need interface types. I have a super simple need for the types on the wasm methods. All I need to do is be able to pass in a borrowed byte array into the method and it can return an owned byte array. This data processing engine expects to use a specific data serialization method inside WASM functions. I've been experimenting with building a si...</div></div></div>",
+        "id": 231366176,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616439806
+    },
+    {
+        "content": "<p>Yeah, unfortunately <code>externref</code> is more for the \"i accept something from the host which I'll give back to the host and has no semantic meaning to me, the guest\" use cases</p>",
+        "id": 231366302,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1616439855
+    },
+    {
+        "content": "<p>But it sounds like I might be misunderstanding the intention and abilities of externref.  I'll need to reread the proposal</p>",
+        "id": 231366321,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616439860
+    },
+    {
+        "content": "<p>a classic example would be WASI's use case: give the guest a \"descriptor\" that can't be forged so that we can guarantee if the guest passes the descriptor back it came from the host. right now WASI uses <code>i32</code> and the guest can give the host \"bad descriptors\" in the WASI functions.</p>",
+        "id": 231366523,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1616439950
+    },
+    {
+        "content": "<p>but eventually WASI will be defined in terms of <code>externref</code></p>",
+        "id": 231366655,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1616439998
+    },
+    {
+        "content": "<p>This makes a ton of sense and I think the parts that don't make sense will click in time</p>",
+        "id": 231366922,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616440100
+    },
+    {
+        "content": "<p>So should I think of externref like a file handler with a traditional OS?  It is an identifier to some resource controlled by the host OS, and in the WASM case control by the runtime.  It isn't so much a a reference to memory but some type of functionality?</p>",
+        "id": 231367094,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616440179
+    },
+    {
+        "content": "<p>exactly, but with the added benefit it can't be forged by the guest since the guest can't create an externref</p>",
+        "id": 231367187,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1616440209
+    },
+    {
+        "content": "<p>Awesome.  Thank you so much</p>",
+        "id": 231367226,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616440223
+    },
+    {
+        "content": "<p>So while I've got your ear I've got a question on best practices on the malloc/free helpers.  This should be super quick and simple.</p>\n<p>So the goal is to have users write their a wasm function that holds the user defined function that manipulates the data.  Let's say the function looks like </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">udf</span><span class=\"p\">(</span><span class=\"n\">ptr</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">len</span>: <span class=\"kt\">usize</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt;  <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"w\"></span>\n</code></pre></div>\n<p>It will accept a ptr and len and return a pointer (the pointer is an apache arrow encoded buffer so while include length)</p>\n<p>So I will need to have this malloc/free functionality provided somewhere.  I don't want the users implementing this UDF  to have to add it every time.  Is it best practice to just import the user provided UDF wasm module and also include a helper module that the system provides with the malloc/free functionality?</p>",
+        "id": 231368033,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616440555
+    },
+    {
+        "content": "<p>And once again a MASSIVE thank you for your help on this.  You've already cleared this up a ton.  I'm just new to system level wasm work and learning a ton</p>",
+        "id": 231368278,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616440634
+    },
+    {
+        "content": "<p>For this I'd probably implement a crate that exports the memory-management functions for the host which your users can depend upon in Cargo.toml (assuming you're not using wasm-bindgen)</p>",
+        "id": 231369214,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1616440924
+    },
+    {
+        "content": "<p>once interface types are a reality and the tooling catches up, this should all get muuuch nicer :)</p>",
+        "id": 231369313,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1616440965
+    },
+    {
+        "content": "<p>Yup! I'm so excited for interface types.  I've got a project that's been on the backburner for a while now that's itching waiting for interface types</p>",
+        "id": 231369510,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616441007
+    },
+    {
+        "content": "<p>I got excited when I friend brought this one up because of the use of Arrow the types needed at the entry and exit points are dead simple.  Its always an arrow encoded byte array</p>",
+        "id": 231369635,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616441052
+    },
+    {
+        "content": "<p>So the goal for this long term is to not be rust dependent.   So I don't want to lean on any cargo features if possible</p>",
+        "id": 231369700,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616441085
+    },
+    {
+        "content": "<p>The goal is for users of ballista[1] to be able to define UDFs in their data pipeline in the language they are most comfortable with.  It will then ship the WASM out to the executor nodes and allow you to use them as part of the query.  So I could say something like <code>SELECT levenshtein_distance(name1, name2) from foo</code> where levenshtein_distance is implemented with WASM.  The dream is that user's could use Rust,  C#, lua or whatever they are used to.  I'll probably need to make a pretty minor SDK for each supported lanaguage but so far it looks like they will be minor lifts for each.</p>\n<ol>\n<li><a href=\"https://github.com/ballista-compute/ballista\">https://github.com/ballista-compute/ballista</a></li>\n</ol>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ballista-compute/ballista\" style=\"background-image: url(https://avatars.githubusercontent.com/u/61914646?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ballista-compute/ballista\" title=\"ballista-compute/ballista\">ballista-compute/ballista</a></div><div class=\"message_embed_description\">Distributed compute platform implemented in Rust, and powered by Apache Arrow. - ballista-compute/ballista</div></div></div>",
+        "id": 231370904,
+        "sender_full_name": "Stuart Small",
+        "timestamp": 1616441415
+    }
+]

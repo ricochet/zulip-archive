@@ -1,0 +1,242 @@
+[
+    {
+        "content": "<p>Hi all -- I've been having an adventure learning about structured exception handling and unwind info on Windows, in an attempt to get the fastcall implementation (and Wasmtime generally) working in the new backend. I am starting to tend toward wondering if we might be able to avoid SEH altogether, by design; but would like feedback from others who know better (I rarely touch Win32 stuff):</p>\n<ul>\n<li>By default, it seems we need unwind info if we touch longjmp/setjmp at all -- this seems to have come up in lots of different contexts online (earlier in wasmtime #291; also e.g. <a href=\"https://github.com/ocaml/ocaml/issues/7638\">Ocaml</a> as a random example, and other compilers/JITs).</li>\n<li>That's somewhat surprising, and makes me wonder if we might be able to get away with our own longjmp/setjmp. Wasm frames have no destructors that need to run, and in fact it would be more efficient to skip over them in O(1) than to unwind the linked list via <code>RtlUnwind</code>.</li>\n<li>Some sources seem to suggest using <code>__builtin_setjmp()</code>/<code>__builtin_longjmp()</code> for this. These intrinsics exist in gcc (mingw) and clang, but not <code>CL.exe</code> (MSVC). It seems we need to be able to build with the latter -- or can we depend on Clang too even for windows-msvc builds?</li>\n<li>In general, metadata generation that is in the \"correctness critical path\" rather than simply best-effort makes me very nervous; for best security/quality, I want a small, simple compiler core I can reason about, and don't want to have to trust the SEH unwind opcode translation and invariants / subtle connections to the prologue generation.</li>\n<li>However, if we have to support SEH, then we have to do it. So: are there other things that <em>force</em> us to need correct unwind info? E.g. trap handling? I see we use <code>AddVectoredExceptionHandler</code> and it <em>seems</em> this runs before <code>RtlUnwind</code> would, but I'm not sure.</li>\n<li>On that same note, does our current GC stack-walking rely on this unwind info? (The smoke test seems to pass without it, but...) If it does, we have a simpler possible scheme (#2459) with explicit rooting frames, that would also be faster, and (for correctness/security) would make me much less nervous.</li>\n</ul>\n<p>So basically my thought at the top level is: do we really need SEH? If not, what are folks' thoughts on doing simpler/more explicit/more predictable things (simple longjmp, explicit GC rooting) instead?</p>\n<p>(bonus round for another time: the above \"let's make it simpler\" but for debuginfo generation...)</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/ocaml/ocaml/issues/7638\" style=\"background-image: url(https://repository-images.githubusercontent.com/6786166/88c78500-1ad7-11eb-850f-1f6a1a012d47)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/ocaml/ocaml/issues/7638\" title=\"Mingw64 + threads + system exception raised through longjmp() = crash · Issue #7638 · ocaml/ocaml\">Mingw64 + threads + system exception raised through longjmp() = crash · Issue #7638 · ocaml/ocaml</a></div><div class=\"message_embed_description\">Original bug ID: 7638 Reporter: @xavierleroy Status: resolved (set by @xavierleroy on 2017-09-28T09:44:41Z) Resolution: fixed Priority: normal Severity: major Platform: Mingw64 OS: Windows 64 OS Ve...</div></div></div>",
+        "id": 228915302,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614933721
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253989\">@Peter Huene</span> it seems you were involved last time we built this, for the old backend ^^</p>",
+        "id": 228915403,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614933752
+    },
+    {
+        "content": "<p>(also fwiw I have an <em>almost</em> working unwind generator in my <code>x64-fastcall-unwind</code> branch but it's currently failing in an inscrutable way when stack guard failures occur)</p>",
+        "id": 228915734,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614933922
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> wouldn't rustc eventually need it? I know my compiler needs full SEH and landingpad before I can consider using cranelift as a backend.</p>",
+        "id": 228919867,
+        "sender_full_name": "Carlo Kok",
+        "timestamp": 1614934792
+    },
+    {
+        "content": "<p>I was under the impression that it's required because sometimes the kernel will do unwinding for some kinds of exceptions, but other than that we do unwind for a number of other purposes like backtrace generation and native debugging. I'm pretty surprised that the gc tests passed without unwind info because they definitely rely on unwinding...</p>",
+        "id": 228967168,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614956437
+    },
+    {
+        "content": "<p>Hmm, I think the GC smoke test was actually passing on my WIP-sorta-unwind branch, now that I look again.</p>\n<p>OK, so it seems the consensus here is that we'll need SEH -- no problem, I'll keep debugging my WIP :-) I still remain somewhat unconfortable <em>relying</em> on it for correctness-critical paths. I'll admit I'm influenced here by a JIT worldview: I'm placing relatively more emphasis on security, and assuming we'll build our own runtime mechanisms anyway. If we could make GC independent of libunwind (#2459) that would go a long way. I'm still curious if we can get O(1) unwind by doing our own longjmp across Wasm frames; <span class=\"user-mention\" data-user-id=\"253989\">@Peter Huene</span> any win32 insights on that?</p>",
+        "id": 228991320,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614965047
+    },
+    {
+        "content": "<p>FWIW I think we basically rely on correctness of dwarf unwind information as well b/c of our usage of the <code>backtrace</code> crate to generate backtraces, if we get that wrong it segfaults at runtime</p>",
+        "id": 228991723,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965197
+    },
+    {
+        "content": "<p>In my dream future, we generate backtraces from our own very simple metadata (line numbers only) walking our own very simple linked list of frames. But I'll grant that that may be a ways off...</p>",
+        "id": 228992068,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614965337
+    },
+    {
+        "content": "<p>isn't SEH needed in situations where we have: host catching frame -&gt; wasm -&gt; host exception throwing frame? is this something we intend to support?</p>\n<p>also general ecosystem stuff, like Alex mentions about backtraces, but also sampling profilers and such</p>",
+        "id": 228992087,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1614965346
+    },
+    {
+        "content": "<p>or like attaching random debuggers, and them being able to get a stack trace without runtime help from us</p>",
+        "id": 228992148,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1614965375
+    },
+    {
+        "content": "<p>hmm, yeah, I hadn't thought about embedder code e.g. tossing a C++ exception over all wasmtime and wasm frames</p>",
+        "id": 228992308,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614965419
+    },
+    {
+        "content": "<p>agreed that for on-stack GC root identification, we want the thing we've talked about a bunch, but I think we still want to play nice with the existing OS/ecosystem</p>",
+        "id": 228992384,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1614965446
+    },
+    {
+        "content": "<p>we sort of do and don't want jit frames to be native-code-unwindable, we don't actually throw rust panics across wasm, we catch the panic, longjmp, then rethrow the panic on the other side</p>",
+        "id": 228992444,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965471
+    },
+    {
+        "content": "<p>and I don't disagree that our gc stack walking should probably use a custom linked list and such</p>",
+        "id": 228992481,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965484
+    },
+    {
+        "content": "<p>but every time I talk to someone or read about windows stuff for some reason windows seems to require unwinding to work at all times (I forget why though)</p>",
+        "id": 228992546,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965514
+    },
+    {
+        "content": "<p>and yeah as Nick mentioned it's <em>really</em> nice to be able to use native debuggers and native tools where we can (but this I don't think is a hard requirement)</p>",
+        "id": 228992623,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965533
+    },
+    {
+        "content": "<p>I'm sort of curious what other JIT compilers (e.g. SpiderMonkey) do here -- I'll go look in a bit</p>",
+        "id": 228992672,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614965553
+    },
+    {
+        "content": "<p>IIRC last I checked it's registering stuff for windows, although I'm not sure if it does anything for linux -- but I know that breakpad is real important for firefox and it'd be a bummer if you got nothing after JS whenever something crashed</p>",
+        "id": 228992795,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965596
+    },
+    {
+        "content": "<p>yeah, for sure, the ergonomics of having rich info on crashes are really valuable</p>",
+        "id": 228992957,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614965650
+    },
+    {
+        "content": "<p>anyway I think I need to stew on all of these thoughts more: I'm hoping to keep things simple and the easiest way to do that is to not target N programmable machines (the CPU, the dwarf parser, the SEH unwinder) with matching programs, but maybe the right answer is just to think hard and get it right :-)</p>",
+        "id": 228993062,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614965701
+    },
+    {
+        "content": "<p>I <em>think</em> this is what firefox does -- <a href=\"https://searchfox.org/mozilla-central/source/js/src/jit/ProcessExecutableMemory.cpp#147\">https://searchfox.org/mozilla-central/source/js/src/jit/ProcessExecutableMemory.cpp#147</a></p>",
+        "id": 228993397,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965828
+    },
+    {
+        "content": "<p>which isn't quite the same as us</p>",
+        "id": 228993416,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965831
+    },
+    {
+        "content": "<p>but I think is roughly the same</p>",
+        "id": 228993424,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965839
+    },
+    {
+        "content": "<p>hmm, fascinating... so it's just immediately vectoring off to its own exception handler on any unwind</p>",
+        "id": 228993600,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614965903
+    },
+    {
+        "content": "<p>this looks like it's not maintaining seh tables?</p>",
+        "id": 228993628,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965924
+    },
+    {
+        "content": "<p>the unwindInfo is part of SEH but its \"prologue length\" is zero so it doesn't have any unwind opcodes</p>",
+        "id": 228993725,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614965971
+    },
+    {
+        "content": "<p>er yeah, just maintaining \"trivial\" unwind info</p>",
+        "id": 228993755,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614965986
+    },
+    {
+        "content": "<p>which may just do something like \"to unwind anything in this region you zorp immediately back to the native code\"</p>",
+        "id": 228993794,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614966003
+    },
+    {
+        "content": "<p>it's been awhile since I poked around with this though</p>",
+        "id": 228993847,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614966009
+    },
+    {
+        "content": "<p>right</p>",
+        "id": 228993866,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614966016
+    },
+    {
+        "content": "<p>so the tradeoff there is that a debugger couldn't follow frames but JIT frames are a custom format anyway</p>",
+        "id": 228993983,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614966069
+    },
+    {
+        "content": "<p>that seems reasonable to me</p>",
+        "id": 228994076,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614966108
+    },
+    {
+        "content": "<p>a debugger doesn't know anything about symbols/debuginfo mappings anyway</p>",
+        "id": 228994099,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614966117
+    },
+    {
+        "content": "<p>unless we provide it a ton of extra data which we don't on windows and only do somewhat of sometimes on linux</p>",
+        "id": 228994182,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1614966135
+    },
+    {
+        "content": "<p>we could <em>almost</em> get away with a \"trivial\" SEH record that just basically says \"linked list of saved RBPs\", except offsets are always off of RSP so we need to carefully translate rsp shifts into unwind opcodes</p>",
+        "id": 228994196,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614966143
+    },
+    {
+        "content": "<p>though now that we're going down this route -- this is more or less what \"custom longjmp that doesn't touch RtlUnwind\" would give us</p>",
+        "id": 228994348,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614966220
+    },
+    {
+        "content": "<p>if we caught SEH unwinds at the hostcall side (\"under\" wasm frames), longjmp'd over wasm, and then re-threw (RtlUnwind again) on the other side, we'd preserve embedder exception continuity</p>",
+        "id": 228994500,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614966269
+    },
+    {
+        "content": "<p>anyway, will get actual SEH working for now; all this is an optimization/security-confidence win but not strictly necessary</p>",
+        "id": 228994780,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1614966403
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253994\">Alex Crichton</span> <a href=\"#narrow/stream/217117-cranelift/topic/unwind.20on.20Windows/near/228992546\">said</a>:</p>\n<blockquote>\n<p>but every time I talk to someone or read about windows stuff for some reason windows seems to require unwinding to work at all times (I forget why though)</p>\n</blockquote>\n<p>On Windows kernel code can directly call user code, allowing kernel code to be sandwiched between user code. To make unwinding, signals and cpu exception handling working, the kernel needs to know how to unwind the stack. On Unix unwinding is completely a userspace concepts. Cpu exceptions cause signals and the kernel never calls into user code.</p>",
+        "id": 228995862,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1614966841
+    },
+    {
+        "content": "<p>I found out today that Windows puts its exception stuff on the stack, too, instead of allocating.</p>\n<blockquote>\n<p>Under Itanium, throwing an exception typically involves allocating thread local memory to hold the exception, and calling into the EH runtime. The runtime identifies frames with appropriate exception handling actions, and successively resets the register context of the current thread to the most recently active frame with actions to run...</p>\n</blockquote>\n<blockquote>\n<p>The Windows EH model does not use these successive register context resets. Instead, the active exception is typically described by a frame on the stack. In the case of C++ exceptions, the exception object is allocated in stack memory and its address is passed to __CxxThrowException. General purpose structured exceptions (SEH) are more analogous to Linux signals, and they are dispatched by userspace DLLs provided with Windows.</p>\n</blockquote>",
+        "id": 236272418,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1619488400
+    }
+]

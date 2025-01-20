@@ -1,0 +1,90 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #9680 Add optional close/shutdown message t... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239680.20Add.20optional.20close.2Fshutdown.20message.20t.2E.2E.2E.html">wasmtime / PR #9680 Add optional close/shutdown message t...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="484394751"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239680%20Add%20optional%20close/shutdown%20message%20t.../near/484394751" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239680.20Add.20optional.20close.2Fshutdown.20message.20t.2E.2E.2E.html#484394751">(Nov 25 2024 at 21:44)</a>:</h4>
+<p>itowlson opened <a href="https://github.com/bytecodealliance/wasmtime/pull/9680">PR #9680</a> from <code>itowlson:closeable-async-write-stream</code> to <code>bytecodealliance:main</code>:</p>
+<blockquote>
+<p><strong>Summary</strong></p>
+<p>This proposal adds an optional <code>Receiver&lt;()&gt;</code> field to <code>AsyncWriteStream</code>. When signalled, this gracefully closes the underlying <code>AsyncWrite</code>.</p>
+<p><strong>Context</strong></p>
+<p>This emerged from trying to implement <a href="https://github.com/WebAssembly/wasi-blobstore">wasi-blobstore</a>.  I was passing the read end of a stream to a back-end provider, and the write end to the guest.  I was using <code>wasmtime_wasi</code> to store the write end in a resource table as a <code>HostOutputStream</code> because I didn't want to write a stream host interface myself!</p>
+<p>The API specifies that the guest calls a "finish" method (on a separate <code>outgoing-value</code> resource) to indicate that it has finished writing to the stream.  However, because I was using <code>AsyncWriteStream</code> and <code>wasmtime_wasi::HostOutputStream</code>, my host didn't have access to the underlying AsyncWrite's <code>shutdown</code> function to EOF the stream.  So the reader at the back end would continue waiting for input.</p>
+<p>My first plan was to add a <code>shutdown</code> function to <code>AsyncWriteStream</code>, but I couldn't downcast <code>HostOutputStream</code> to <code>AsyncWriteStream</code>, so that didn't work.  So what I ended up with was:</p>
+<ul>
+<li>Have AsyncWriteStream accept the receiver end of a sync channel.</li>
+<li>Have AsyncWriteStream run a background task which waited on the receiver.  When it received a message, it would enqueue a shutdown of the underlying <code>AsyncWrite</code>.</li>
+<li>Have the manager of the outbound connection (in wasi-blobstore, an <code>outgoing-value</code> resource) hold the sender end of the channel.</li>
+<li>When the guest called <code>outgoing-value::finish</code>, send a message via the sender.</li>
+</ul>
+<p>This seemed to work, although it's not been extensively tested.</p>
+<p>As an interface, it's awkward, because for most operations you interact with <code>AsyncWriteStream/HostOutputStream</code> via methods, but for this one special case you interact with it via a sync channel.  However, I don't see a way round that without adding a shutdown or close method to the WASI <code>output-stream</code> resource.  It's possible that WASI intends that shutdown be done by dropping the <code>output-stream</code> resource, but in my testing this seemed to result in an abort rather than an EOF.</p>
+<p>So after talking to @alexcrichton I'm putting this up for discussion and in the hope that WASI folks can come up with a better solution.  Please let me know if folks need clarifications around the problem I was trying to solve or the constraints that led me in this direction!<br>
+</p>
+</blockquote>
+
+
+
+<a name="484795738"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239680%20Add%20optional%20close/shutdown%20message%20t.../near/484795738" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239680.20Add.20optional.20close.2Fshutdown.20message.20t.2E.2E.2E.html#484795738">(Nov 27 2024 at 20:41)</a>:</h4>
+<p>pchickey <a href="https://github.com/bytecodealliance/wasmtime/pull/9680#issuecomment-2504737173">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/9680">PR #9680</a>:</p>
+<blockquote>
+<p>The prior art for shutdown is in the <code>wasi-sockets</code> implementation here: <a href="https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi/src/tcp.rs#L641">https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi/src/tcp.rs#L641</a></p>
+<p>Rather than shutdown be a method on a stream, its a method on the parent of the stream, in this case the <code>tcp-socket</code> <a href="https://github.com/WebAssembly/wasi-sockets/blob/main/wit/tcp.wit#L361-L385">https://github.com/WebAssembly/wasi-sockets/blob/main/wit/tcp.wit#L361-L385</a>.</p>
+<p>Can you restructure your blobstore interfaces to work in that manner, and then follow the architecture of wasmtime-wasi's  sockets in your implementation?</p>
+</blockquote>
+
+
+
+<a name="484796078"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239680%20Add%20optional%20close/shutdown%20message%20t.../near/484796078" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239680.20Add.20optional.20close.2Fshutdown.20message.20t.2E.2E.2E.html#484796078">(Nov 27 2024 at 20:43)</a>:</h4>
+<p>pchickey edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/9680#issuecomment-2504737173">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/9680">PR #9680</a>:</p>
+<blockquote>
+<p>The prior art for shutdown is in the <code>wasi-sockets</code> implementation here: <a href="https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi/src/tcp.rs#L641">https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi/src/tcp.rs#L641</a></p>
+<p>Rather than shutdown be a method on a stream, its a method on the parent of the stream, in this case the <code>tcp-socket</code> <a href="https://github.com/WebAssembly/wasi-sockets/blob/main/wit/tcp.wit#L361-L385">https://github.com/WebAssembly/wasi-sockets/blob/main/wit/tcp.wit#L361-L385</a>.</p>
+<p>It looks like this <code>finish</code> mechanism on the parent resource <code>outgoing-value</code> in wasi-blobstore follows the same approximate architecture. Can you follow the architecture used by wasmtime-wasi's  sockets in your implementation?</p>
+</blockquote>
+
+
+
+<a name="484796103"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239680%20Add%20optional%20close/shutdown%20message%20t.../near/484796103" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239680.20Add.20optional.20close.2Fshutdown.20message.20t.2E.2E.2E.html#484796103">(Nov 27 2024 at 20:43)</a>:</h4>
+<p>pchickey edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/9680#issuecomment-2504737173">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/9680">PR #9680</a>:</p>
+<blockquote>
+<p>The prior art for shutdown is in the <code>wasi-sockets</code> implementation here: <a href="https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi/src/tcp.rs#L641">https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi/src/tcp.rs#L641</a></p>
+<p>Rather than shutdown be a method on a stream, its a method on the parent of the stream, in this case the <code>tcp-socket</code> <a href="https://github.com/WebAssembly/wasi-sockets/blob/main/wit/tcp.wit#L361-L385">https://github.com/WebAssembly/wasi-sockets/blob/main/wit/tcp.wit#L361-L385</a>.</p>
+<p>It looks like this <code>finish</code> mechanism on the parent resource <code>outgoing-value</code> in wasi-blobstore follows an approximately similar architecture. Can you follow the architecture used by wasmtime-wasi's  sockets in your implementation?</p>
+</blockquote>
+
+
+
+<a name="484796241"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239680%20Add%20optional%20close/shutdown%20message%20t.../near/484796241" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239680.20Add.20optional.20close.2Fshutdown.20message.20t.2E.2E.2E.html#484796241">(Nov 27 2024 at 20:44)</a>:</h4>
+<p>pchickey edited a <a href="https://github.com/bytecodealliance/wasmtime/pull/9680#issuecomment-2504737173">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/9680">PR #9680</a>:</p>
+<blockquote>
+<p>The prior art for shutdown is in the <code>wasi-sockets</code> implementation here: <a href="https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi/src/tcp.rs#L641">https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi/src/tcp.rs#L641</a></p>
+<p>Rather than shutdown be a method on a stream, its a method on the parent of the stream, in this case the <code>tcp-socket</code> <a href="https://github.com/WebAssembly/wasi-sockets/blob/main/wit/tcp.wit#L361-L385">https://github.com/WebAssembly/wasi-sockets/blob/main/wit/tcp.wit#L361-L385</a>.</p>
+<p>It looks like this <code>finish</code> method consuming parent resource <code>outgoing-value</code> in wasi-blobstore follows an approximately similar architecture. It has the added advantage that the output-stream is already guaranteed to be dropped at that point. Cn you follow the architecture used by wasmtime-wasi's  sockets in your implementation?</p>
+</blockquote>
+
+
+
+<a name="484804133"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%239680%20Add%20optional%20close/shutdown%20message%20t.../near/484804133" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.239680.20Add.20optional.20close.2Fshutdown.20message.20t.2E.2E.2E.html#484804133">(Nov 27 2024 at 21:48)</a>:</h4>
+<p>itowlson <a href="https://github.com/bytecodealliance/wasmtime/pull/9680#issuecomment-2504834776">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/pull/9680">PR #9680</a>:</p>
+<blockquote>
+<p>Thanks for the pointers @pchickey.  I'll try to implement that pattern.</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

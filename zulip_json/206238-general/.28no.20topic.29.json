@@ -1,0 +1,254 @@
+[
+    {
+        "content": "<p>Hi<br>\nCould I do this:</p>\n<ol>\n<li>create in Rust crate <code>a.wasm</code> with function <code>funca()</code></li>\n</ol>\n<div class=\"codehilite\"><pre><span></span>$cat a/src/lib.rs\n\n#[no_mangle]\npub extern &quot;C&quot; fn funca() {\n   println!(&quot;funca&quot;);\n}\n#[no_mangle]\npub extern &quot;C&quot; fn _start() {\n}\n</pre></div>\n\n\n<ol start=\"2\">\n<li>create in Rust crate <code>b.wasm</code> with function <code>funcb()</code>, which calls <code>funca()</code> from a.wasm</li>\n</ol>\n<div class=\"codehilite\"><pre><span></span>$cat b/src/lib.rs\n\nextern &quot;C&quot; {\n    fn funca();\n}\n#[no_mangle]\npub extern &quot;C&quot; fn funcb() {\n    println!(&quot;funcb&quot;);\n    unsafe {\n        funca();\n    }\n}\n#[no_mangle]\npub extern &quot;C&quot; fn _start() {\n}\n</pre></div>\n\n\n<ol start=\"3\">\n<li>run $wasmtime --preload a.wasm --invoke funcb b.wasm<br>\nand wasmtime will load a.wasm and automatic link funca() to b.wasm<br>\n?</li>\n</ol>",
+        "id": 192397661,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585665213
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"279541\">@Alexey Melnikov</span>  Easiest way is <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs\" title=\"https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs\">https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/examples/linking.rs\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 192397865,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585665315
+    },
+    {
+        "content": "<p>notice that eventually you have manage common memory between into modules -- that's where things are getting tricky</p>",
+        "id": 192398155,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585665470
+    },
+    {
+        "content": "<p>I've made this by linking. By it's a not easiest way. Because I have to develop the third crate to link the first and  the second. I would like to see how this may work with <code>preload</code> option. Is it possible?</p>",
+        "id": 192398338,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585665554
+    },
+    {
+        "content": "<p>preload might not work as <code>Linker</code>, also see the above note about memory</p>",
+        "id": 192398926,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585665813
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"279541\">@Alexey Melnikov</span> is going via <code>wasmtime-cli</code> your requirement, or you allowed to use embedding/create your executable ?</p>",
+        "id": 192399109,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585665905
+    },
+    {
+        "content": "<p>So, what I mean.<br>\nMy current variant is:</p>\n<ol>\n<li></li>\n</ol>\n<div class=\"codehilite\"><pre><span></span>$cat a/src/lib.rs\n\n#[no_mangle]\npub extern &quot;C&quot; fn funca() {\n   println!(&quot;funca&quot;);\n}\n#[no_mangle]\npub extern &quot;C&quot; fn _start() {\n}\n</pre></div>\n\n\n<p>2.</p>\n<div class=\"codehilite\"><pre><span></span>$cat b/src/lib.rs\n\nextern &quot;C&quot; {\n    fn funca();\n}\n#[no_mangle]\npub extern &quot;C&quot; fn funcb() {\n    println!(&quot;funcb&quot;);\n    unsafe {\n        funca();\n    }\n}\n#[no_mangle]\npub extern &quot;C&quot; fn _start() {\n}\n</pre></div>\n\n\n<p>3.</p>\n<div class=\"codehilite\"><pre><span></span>$cat e/src/main.rs\n\nuse anyhow::Result;\nuse wasmtime::*;\nuse wasmtime_wasi::{Wasi, WasiCtx};\n\nfn main() -&gt; Result&lt;()&gt; {\n    // store &amp; wasi\n    let store = Store::default();\n    let wasi = Wasi::new(&amp;store, WasiCtx::new(std::env::args())?);\n\n    // linker\n    let mut linker = Linker::new(&amp;store);\n    wasi.add_to_linker(&amp;mut linker)?;\n\n    // module1\n    let module1 = Module::from_file(&amp;store, &quot;/at/rust/wasmer/a/target/wasm32-wasi/release/a.wasm&quot;)?;\n    let instance1 = linker.instantiate(&amp;module1)?;\n    linker.instance(&quot;env&quot;, &amp;instance1)?;\n    let run = instance1.get_export(&quot;funca&quot;).and_then(|e| e.func()).unwrap();\n    let run = run.get0::&lt;()&gt;()?;\n    run()?;\n\n    // module2\n    let module2 = Module::from_file(&amp;store, &quot;/at/rust/wasmer/b/target/wasm32-wasi/release/b.wasm&quot;)?;\n    let instance2 = linker.instantiate(&amp;module2)?;\n    linker.instance(&quot;env2&quot;, &amp;instance2)?;\n    let run = instance2.get_export(&quot;funcb&quot;).and_then(|e| e.func()).unwrap();\n    let run = run.get0::&lt;()&gt;()?;\n    run()?;\n\n    Ok(())\n}\n</pre></div>\n\n\n<p>OK! It's works. But how to rewrite this variant to using <code>preload</code> option (and without crate <code>e</code> ?)?</p>",
+        "id": 192399292,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585665992
+    },
+    {
+        "content": "<p>CLI is somewhat limited how it resolves the dependent modules</p>",
+        "id": 192399307,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585666002
+    },
+    {
+        "content": "<p>So you are saying that using <code>wasmtime-cli</code> tool is your requirement?</p>",
+        "id": 192399508,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585666101
+    },
+    {
+        "content": "<p>(FWIW crate \"e\" is a normal way to embed <code>wasmtime</code> and provide a customized module linking logic)</p>",
+        "id": 192399718,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585666206
+    },
+    {
+        "content": "<p>$wasmtime run --preload a/target/wasm32-wasi/release/a.wasm --invoke funcb b/target/wasm32-wasi/release/b.wasm<br>\nError: failed to run main module <code>b/target/wasm32-wasi/release/b.wasm</code><br>\nCaused by:<br>\n    import module <code>env</code> was not found</p>",
+        "id": 192400119,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585666382
+    },
+    {
+        "content": "<p>that's correct, looks like <code>wasmtime-cli</code> does not support linking yet (preload != linking)</p>",
+        "id": 192400350,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585666469
+    },
+    {
+        "content": "<p>Excuse me, what is <code>preload</code>?</p>",
+        "id": 192400466,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585666533
+    },
+    {
+        "content": "<p>afaik <code>preload</code> was introduced to support custom wasi modules</p>",
+        "id": 192400732,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585666650
+    },
+    {
+        "content": "<p>its logic at <a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/src/commands/run.rs#L189\" title=\"https://github.com/bytecodealliance/wasmtime/blob/master/src/commands/run.rs#L189\">https://github.com/bytecodealliance/wasmtime/blob/master/src/commands/run.rs#L189</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/master/src/commands/run.rs#L189\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/master/src/commands/run.rs#L189\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 192400846,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585666694
+    },
+    {
+        "content": "<p>Thank you for the notes.</p>",
+        "id": 192400936,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585666758
+    },
+    {
+        "content": "<p>just out of curiosity, why not use \"e\"-crate method?</p>",
+        "id": 192401102,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585666828
+    },
+    {
+        "content": "<p>If there are many modules with different dependencies then automatic linking may be usefull for server-side development.</p>",
+        "id": 192402336,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585667396
+    },
+    {
+        "content": "<p>agree, but there will be an issue in describing linking via command line</p>",
+        "id": 192402915,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585667636
+    },
+    {
+        "content": "<p>as well as resolution of module name to wasm file/bytecode</p>",
+        "id": 192403666,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585667857
+    },
+    {
+        "content": "<p>will it be easier to control that via custom logic/embedding?</p>",
+        "id": 192404094,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585668036
+    },
+    {
+        "content": "<p>anyway, but report was warranted here, do you want to re-open <a href=\"https://github.com/bytecodealliance/wasmtime/issues/1440\" title=\"https://github.com/bytecodealliance/wasmtime/issues/1440\">https://github.com/bytecodealliance/wasmtime/issues/1440</a> and define requirements and provide more details?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/issues/1440\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/issues/1440\" title=\"How to make: wasm calls wasm · Issue #1440 · bytecodealliance/wasmtime\">How to make: wasm calls wasm · Issue #1440 · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Hi, please advise me how to make: I created a simple library crate: $cat a/src/lib.rs #[no_mangle] pub extern &quot;C&quot; fn funca() { println!(&quot;funca&quot;); } #[no_mangle] pub extern &amp;quot...</div></div></div>",
+        "id": 192404451,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585668161
+    },
+    {
+        "content": "<p>I closed my issue after I've found a solution with <code>e</code>-crate.</p>",
+        "id": 192404783,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585668292
+    },
+    {
+        "content": "<p>okay</p>",
+        "id": 192404812,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585668305
+    },
+    {
+        "content": "<p>Of course, custom linking looks more reliable.</p>",
+        "id": 192405708,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585668670
+    },
+    {
+        "content": "<p>automatic/deterministic  linking is still a proposal and will be better defined in interface types proposal</p>",
+        "id": 192406190,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585668865
+    },
+    {
+        "content": "<p>notice that, a.wasm and b.wasm do not contain right linking info (inspect via wasm2wat), so automatic linking will have trouble to work with it: multiple non-connected memories, all imports come from \"env\", etc.</p>",
+        "id": 192406533,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585668995
+    },
+    {
+        "content": "<p>it is possible to address some of these issue, e.g. via <code>--import-memory</code> for LLD or <code>#[link(wasm_import_module = \"...\")]</code></p>",
+        "id": 192407056,
+        "sender_full_name": "Yury Delendik",
+        "timestamp": 1585669219
+    },
+    {
+        "content": "<p>it's interesting.</p>\n<div class=\"codehilite\"><pre><span></span>This commit stabilizes the #[wasm_import_module] attribute as\n#[link(wasm_import_module = &quot;...&quot;)]. Tracked by #52090 this new directive in\nthe #[link] attribute is used to configured the module name that the imports\nare listed with. The WebAssembly specification indicates two utf-8 names are\nassociated with all imported items, one for the module the item comes from and\none for the item itself. The item itself is configurable in Rust via its\nidentifier or #[link_name = &quot;...&quot;], but the module name was previously not\nconfigurable and defaulted to &quot;env&quot;. This commit ensures that this is also\nconfigurable.\n</pre></div>",
+        "id": 192410202,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585670409
+    },
+    {
+        "content": "<p>So, auto linking has rights to live.</p>",
+        "id": 192410588,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585670541
+    },
+    {
+        "content": "<p>Is it possible to change code:</p>\n<div class=\"codehilite\"><pre><span></span>    // module1\n    let module1 = Module::from_file(&amp;store, &quot;/at/rust/wasmer/a/target/wasm32-wasi/release/a.wasm&quot;)?;\n    let instance1 = linker.instantiate(&amp;module1)?;\n    linker.instance(&quot;env&quot;, &amp;instance1)?;\n    let run = instance1.get_export(&quot;funca&quot;).and_then(|e| e.func()).unwrap();\n    let run = run.get0::&lt;()&gt;()?;\n    run()?;\n</pre></div>\n\n\n<p>to </p>\n<div class=\"codehilite\"><pre><span></span>    // module1\n    let module1 = Module::from_file(&amp;store, &quot;/at/rust/wasmer/a/target/wasm32-wasi/release/a.wasm&quot;)?;\n    let instance1 = linker.instantiate(&amp;module1)?;\n    linker.instance(&quot;env&quot;, &amp;instance1)?;\n    let run = linker.get_instance(&quot;env&quot;).get_export(&quot;funca&quot;).and_then(|e| e.func()).unwrap();\n    let run = run.get0::&lt;()&gt;()?;\n    run()?;\n</pre></div>\n\n\n<p>Need to add the method <code>get_instance()</code> to <code>linker</code>.</p>",
+        "id": 192523660,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585746320
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"279541\">@Alexey Melnikov</span> while it may not necessarily be <code>get_instance</code> we could add <code>Linker::get_export</code> in the same manner as <code>Instance::get_export</code></p>",
+        "id": 192529975,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1585749004
+    },
+    {
+        "content": "<p>the <code>Linker</code> version would just take a module/name instead of just a name</p>",
+        "id": 192530003,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1585749014
+    },
+    {
+        "content": "<p>and would otherwise work the same way API-wise</p>",
+        "id": 192530009,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1585749018
+    },
+    {
+        "content": "<p>So, the code may look like:<br>\nlet run = linker.get_export(\"env\", \"funca\").and_then(|e| e.func()).unwrap();<br>\n?</p>",
+        "id": 192530565,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585749209
+    },
+    {
+        "content": "<p>well to be clear that API doesn't exist today</p>",
+        "id": 192530882,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1585749312
+    },
+    {
+        "content": "<p>but yeah such an API could be added</p>",
+        "id": 192530894,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1585749320
+    },
+    {
+        "content": "<p>Should I open an issue on github to start work?</p>",
+        "id": 192531401,
+        "sender_full_name": "Alexey Melnikov",
+        "timestamp": 1585749477
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"279541\">@Alexey Melnikov</span> sure! (A PR would also be fine!)</p>",
+        "id": 192533849,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1585750384
+    },
+    {
+        "content": "<p>Thanks <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> for a quick merge (of labelling PR)!</p>",
+        "id": 194807481,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1587478414
+    },
+    {
+        "content": "<p>is there a way to pass Cranelift CLI options to wasmtime's runner?</p>",
+        "id": 195836103,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1588252238
+    },
+    {
+        "content": "<p>hmm it seems not</p>",
+        "id": 195838310,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1588253421
+    }
+]

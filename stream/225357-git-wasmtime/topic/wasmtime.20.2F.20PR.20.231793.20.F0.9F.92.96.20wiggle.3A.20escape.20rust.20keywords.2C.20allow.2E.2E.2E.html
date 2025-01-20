@@ -1,0 +1,217 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #1793 💖 wiggle: escape rust keywords, allow... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html">wasmtime / PR #1793 💖 wiggle: escape rust keywords, allow...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="199242037"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199242037" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199242037">(May 30 2020 at 06:37)</a>:</h4>
+<p>katie-martin-fastly opened <a href="https://github.com/bytecodealliance/wasmtime/pull/1793">PR #1793</a> from <code>ktm/beep-beep-keywords-to-the-jeep</code> to <code>master</code>:</p>
+<blockquote>
+<p># Overview</p>
+<p>This commit makes changes to the <code>wiggle::from_witx</code> procedural in order<br>
+to allow for escaping strict and reserved Rust keywords.</p>
+<p>Additionally, this commit introduces the ability to use a <code>witx_literal</code><br>
+field in the <code>{..}</code> object provided as an argument to<br>
+<code>wiggle::from_witx</code>. This field allows for witx documents to be provided<br>
+as inline string literals.</p>
+<p>Documentation comments are added to the methods of<br>
+<code>wiggle_generate::names::Names</code> struct responsible for generating<br>
+<code>proc_macro2::Ident</code> words.</p>
+<p>## Keyword Escaping</p>
+<p>Today, an interface that includes witx identifiers that conflict with<br>
+with Rust syntax will cause the <code>from_witx</code> macro to panic at<br>
+compilation time.</p>
+<p>Here is a small example (adapted from<br>
+<code>/crates/wiggle/tests/keywords.rs</code>) that demonstrates this issue:</p>
+<div class="codehilite"><pre><span></span><code>;; Attempts to define a module `self`, containing a trait `Self`. Both
+;; of these are reserved keywords, and will thus cause a compilation
+;; error.
+(module $self
+    (@interface func (export &quot;betchya_cant_implement_this&quot;)
+    )
+)
+</code></pre></div>
+
+
+<p>Building off of code that (as of <code>master</code> today)<br>
+[demonstrates a strategy][esc] for escaping keywords, we introduce an<br>
+internal <code>escaping</code> module to <code>generate/src/config.rs</code> that contains<br>
+code responsible for escaping Rust keywords in a generalized manner.</p>
+<p>[esc]: <a href="https://github.com/bytecodealliance/wasmtime/blob/0dd77d36f895df70c6e82758f23f553365c2f25f/crates/wiggle/generate/src/names.rs#L106">https://github.com/bytecodealliance/wasmtime/blob/0dd77d36f895df70c6e82758f23f553365c2f25f/crates/wiggle/generate/src/names.rs#L106</a></p>
+<p>Some code related to special cases, such as accounting for<br>
+[<code>errno::2big</code>][err] while generating names for enum variants, is moved<br>
+into this module as well.</p>
+<p>[err]: <a href="https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/docs.md#-errno-enumu16">https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/docs.md#-errno-enumu16</a></p>
+<p>As mentioned in the document comments of this diff, we do not include<br>
+weak keywords like <code>'static</code> or <code>union</code>. Their semantics do not impact<br>
+us in the same way from a code generation perspective.</p>
+<p>## witx_literal</p>
+<p>First, some background. Trait names, type names, and so on use a<br>
+camel-cased naming convention.  As such, <code>Self</code> is the only keyword that<br>
+can potentially conflict with these identifiers. (See the [Rust<br>
+Reference][key] for a complete list of strict, reserved, and weak<br>
+keywords.)</p>
+<p>When writing tests, this meant that many tests had to be outlined into<br>
+separate files, as items with the name <code>$self</code> could not be defined in<br>
+the same namespace. As such, it seemed like a worthwhile feature to<br>
+implement while the above work was being developed.</p>
+<p>The most important function to note is the <code>load_document</code> inherent<br>
+method added to <code>WitxConf</code>, and that <code>WitxConf</code> is now an enum<br>
+containing either (a) a collection of paths, identical to its current<br>
+functionality, or (b) a single string literal.</p>
+<p>Note that a witx document given to <code>from_witx</code> using a string literal<br>
+provided to <code>from_witx</code> cannot include <code>use (..)</code> directives, per<br>
+the <code>witx::parse</code> documentation.<br>
+(See: <a href="https://docs.rs/witx/0.8.5/witx/fn.parse.html">https://docs.rs/witx/0.8.5/witx/fn.parse.html</a>)</p>
+<p>Two newtypes, <code>Paths</code> and <code>Literal</code>, are introduced to facilitate the<br>
+parsing of <code>WitxConf</code> values. Their public API and trait implementations<br>
+has been kept to the minimum required to satisfy compilation in order to<br>
+limit the scope of this diff. Additional surface for external consumers<br>
+can be added in follow-up commits if deemed necessary in review.</p>
+<p><span aria-label="sparkling heart" class="emoji emoji-1f496" role="img" title="sparkling heart">:sparkling_heart:</span> <span aria-label="sparkles" class="emoji emoji-2728" role="img" title="sparkles">:sparkles:</span> </p>
+</blockquote>
+
+
+
+<a name="199245766"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199245766" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199245766">(May 30 2020 at 08:33)</a>:</h4>
+<p>bjorn3 submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1793#pullrequestreview-421389267">PR Review</a>.</p>
+
+
+
+<a name="199245767"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199245767" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199245767">(May 30 2020 at 08:33)</a>:</h4>
+<p>bjorn3 created <a href="https://github.com/bytecodealliance/wasmtime/pull/1793#discussion_r432822972">PR Review Comment</a>:</p>
+<blockquote>
+<p>Is it appropriate to add a joke of this kind in the source?</p>
+</blockquote>
+
+
+
+<a name="199269768"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199269768" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199269768">(May 30 2020 at 18:29)</a>:</h4>
+<p>pchickey submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1793#pullrequestreview-421433740">PR Review</a>.</p>
+
+
+
+<a name="199269769"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199269769" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199269769">(May 30 2020 at 18:29)</a>:</h4>
+<p>pchickey created <a href="https://github.com/bytecodealliance/wasmtime/pull/1793#discussion_r432876565">PR Review Comment</a>:</p>
+<blockquote>
+<p>Yes</p>
+</blockquote>
+
+
+
+<a name="199270403"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199270403" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199270403">(May 30 2020 at 18:46)</a>:</h4>
+<p>pchickey submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1793#pullrequestreview-421434504">PR Review</a>.</p>
+
+
+
+<a name="199270404"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199270404" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199270404">(May 30 2020 at 18:46)</a>:</h4>
+<p>pchickey submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/1793#pullrequestreview-421434504">PR Review</a>.</p>
+
+
+
+<a name="199270405"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199270405" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199270405">(May 30 2020 at 18:46)</a>:</h4>
+<p>pchickey created <a href="https://github.com/bytecodealliance/wasmtime/pull/1793#discussion_r432877891">PR Review Comment</a>:</p>
+<blockquote>
+<div class="codehilite"><pre><span></span><code>    /// function will return `None`.
+    ///
+    /// This functionality is a short-term fix that keeps WASI working. Instead of expanding these sort of special cases,
+    /// we should replace this function by having the user provide a mapping of witx identifiers to Rust identifiers in the
+    /// arguments to the macro.
+</code></pre></div>
+
+
+</blockquote>
+
+
+
+<a name="199274013"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199274013" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199274013">(May 30 2020 at 20:10)</a>:</h4>
+<p>pchickey updated <a href="https://github.com/bytecodealliance/wasmtime/pull/1793">PR #1793</a> from <code>ktm/beep-beep-keywords-to-the-jeep</code> to <code>master</code>:</p>
+<blockquote>
+<p># Overview</p>
+<p>This commit makes changes to the <code>wiggle::from_witx</code> procedural in order<br>
+to allow for escaping strict and reserved Rust keywords.</p>
+<p>Additionally, this commit introduces the ability to use a <code>witx_literal</code><br>
+field in the <code>{..}</code> object provided as an argument to<br>
+<code>wiggle::from_witx</code>. This field allows for witx documents to be provided<br>
+as inline string literals.</p>
+<p>Documentation comments are added to the methods of<br>
+<code>wiggle_generate::names::Names</code> struct responsible for generating<br>
+<code>proc_macro2::Ident</code> words.</p>
+<p>## Keyword Escaping</p>
+<p>Today, an interface that includes witx identifiers that conflict with<br>
+with Rust syntax will cause the <code>from_witx</code> macro to panic at<br>
+compilation time.</p>
+<p>Here is a small example (adapted from<br>
+<code>/crates/wiggle/tests/keywords.rs</code>) that demonstrates this issue:</p>
+<div class="codehilite"><pre><span></span><code>;; Attempts to define a module `self`, containing a trait `Self`. Both
+;; of these are reserved keywords, and will thus cause a compilation
+;; error.
+(module $self
+    (@interface func (export &quot;betchya_cant_implement_this&quot;)
+    )
+)
+</code></pre></div>
+
+
+<p>Building off of code that (as of <code>master</code> today)<br>
+[demonstrates a strategy][esc] for escaping keywords, we introduce an<br>
+internal <code>escaping</code> module to <code>generate/src/config.rs</code> that contains<br>
+code responsible for escaping Rust keywords in a generalized manner.</p>
+<p>[esc]: <a href="https://github.com/bytecodealliance/wasmtime/blob/0dd77d36f895df70c6e82758f23f553365c2f25f/crates/wiggle/generate/src/names.rs#L106">https://github.com/bytecodealliance/wasmtime/blob/0dd77d36f895df70c6e82758f23f553365c2f25f/crates/wiggle/generate/src/names.rs#L106</a></p>
+<p>Some code related to special cases, such as accounting for<br>
+[<code>errno::2big</code>][err] while generating names for enum variants, is moved<br>
+into this module as well.</p>
+<p>[err]: <a href="https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/docs.md#-errno-enumu16">https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/docs.md#-errno-enumu16</a></p>
+<p>As mentioned in the document comments of this diff, we do not include<br>
+weak keywords like <code>'static</code> or <code>union</code>. Their semantics do not impact<br>
+us in the same way from a code generation perspective.</p>
+<p>## witx_literal</p>
+<p>First, some background. Trait names, type names, and so on use a<br>
+camel-cased naming convention.  As such, <code>Self</code> is the only keyword that<br>
+can potentially conflict with these identifiers. (See the [Rust<br>
+Reference][key] for a complete list of strict, reserved, and weak<br>
+keywords.)</p>
+<p>When writing tests, this meant that many tests had to be outlined into<br>
+separate files, as items with the name <code>$self</code> could not be defined in<br>
+the same namespace. As such, it seemed like a worthwhile feature to<br>
+implement while the above work was being developed.</p>
+<p>The most important function to note is the <code>load_document</code> inherent<br>
+method added to <code>WitxConf</code>, and that <code>WitxConf</code> is now an enum<br>
+containing either (a) a collection of paths, identical to its current<br>
+functionality, or (b) a single string literal.</p>
+<p>Note that a witx document given to <code>from_witx</code> using a string literal<br>
+provided to <code>from_witx</code> cannot include <code>use (..)</code> directives, per<br>
+the <code>witx::parse</code> documentation.<br>
+(See: <a href="https://docs.rs/witx/0.8.5/witx/fn.parse.html">https://docs.rs/witx/0.8.5/witx/fn.parse.html</a>)</p>
+<p>Two newtypes, <code>Paths</code> and <code>Literal</code>, are introduced to facilitate the<br>
+parsing of <code>WitxConf</code> values. Their public API and trait implementations<br>
+has been kept to the minimum required to satisfy compilation in order to<br>
+limit the scope of this diff. Additional surface for external consumers<br>
+can be added in follow-up commits if deemed necessary in review.</p>
+<p><span aria-label="sparkling heart" class="emoji emoji-1f496" role="img" title="sparkling heart">:sparkling_heart:</span> <span aria-label="sparkles" class="emoji emoji-2728" role="img" title="sparkles">:sparkles:</span> </p>
+</blockquote>
+
+
+
+<a name="199274016"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%231793%20%F0%9F%92%96%20wiggle%3A%20escape%20rust%20keywords%2C%20allow.../near/199274016" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.231793.20.F0.9F.92.96.20wiggle.3A.20escape.20rust.20keywords.2C.20allow.2E.2E.2E.html#199274016">(May 30 2020 at 20:11)</a>:</h4>
+<p>pchickey merged <a href="https://github.com/bytecodealliance/wasmtime/pull/1793">PR #1793</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

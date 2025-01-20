@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>Hey! I am trying to experiment with strings, but whenever I use the code I get a <code>Failed to link module</code> error.</p>\n<p>The code that I am using is:</p>\n<div class=\"codehilite\"><pre><span></span>#[no_mangle]\npub extern &quot;C&quot; fn __modlib_return_string(ptr: *const u8, len: usize) -&gt; *mut c_char {\n    let string: String = String::from(&quot;Returning a string&quot;);\n    let cstr = CString::new(string).unwrap();\n    cstr.into_raw()\n}\n</pre></div>\n\n\n<p>Could anyone explain what am I doing wrong?</p>",
+        "id": 190066818,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583759839
+    },
+    {
+        "content": "<p>Is this <code>extern \"C\"</code> function host code that's called from wasm code?</p>",
+        "id": 190123107,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1583791717
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span> this function is compiled to wasm code and called externally from the host using wasmtime.</p>",
+        "id": 190147961,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583825594
+    },
+    {
+        "content": "<p>It's probably also worth mentioning that the error is <code>Link error: wasi_snapshot_preview1/fd_write</code></p>",
+        "id": 190220529,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583872056
+    },
+    {
+        "content": "<p>I was going to guess that the error was because you're passing a pointer argument. This will need to be translated from a wasm pointer, which is 32-bit and relative to the wasm linear memory, to a host pointer, which I assume is 64-bit for you.</p>",
+        "id": 190239524,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1583885808
+    },
+    {
+        "content": "<p>But I don't know what would cause an <code>fd_write</code> link error. Can you show the code that calls <code>fd_write</code>?</p>",
+        "id": 190239542,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1583885833
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254083\">@Dan Gohman</span>  I kind of changed the example now. Nevertheless I am still getting the same error.<br>\nThe module code (it basically tries to call a function from a host which loads another module). It also had to be wrapped in unsafe as without it the compiler spits out errors.</p>\n<div class=\"codehilite\"><pre><span></span>#[link(wasm_import_module = &quot;env&quot;)]\nextern &quot;C&quot; {\n    pub fn load(name: i32) -&gt; i32;\n}\n\n#[no_mangle]\npub extern &quot;C&quot; fn __modlib_memory() {\n    unsafe {\n        load(0);\n    }\n}\n</pre></div>\n\n\n<p>And the load function in the host is:</p>\n<div class=\"codehilite\"><pre><span></span>pub fn load(name: i32) -&gt; i32 {\n    let store = Store::default();\n    let mod_name = format!(&quot;{}.{}&quot;, name, &quot;wasm&quot;);\n    let module = Module::from_file(&amp;store, mod_name).expect(&quot;Cannot load a module&quot;);\n    let instance = Instance::new(&amp;module, &amp;[]).expect(&quot;Cannot instantiate a module&quot;);\n\n    instances.with(|mut i| {\n        let new_instance = ModuleInstance::new(name, instance);\n        (*i.borrow_mut()).lock().unwrap().push(new_instance);\n    });\n\n    // Success.\n    return 0;\n}\n</pre></div>\n\n\n<p>It's a bit of a hacky code, but I suppose the error is in the modules themselves rather than in main, but of course I might be wrong.</p>\n<p>This code calls another module, but that module is super simple without any returns and with one line of <code>println!(\"OK\")</code></p>\n<p>I also saw <a href=\"https://github.com/wasmerio/wasmer/issues/1088\" target=\"_blank\" title=\"https://github.com/wasmerio/wasmer/issues/1088\">this issue</a>. Not sure if it's relevant in this case.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/wasmerio/wasmer/issues/1088\" style=\"background-image: url(https://repository-images.githubusercontent.com/152572186/f467fe00-c8e6-11e9-9237-9449454fdcf5)\" target=\"_blank\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/wasmerio/wasmer/issues/1088\" target=\"_blank\" title=\"I cannot run RustPython using wasmer · Issue #1088 · wasmerio/wasmer\">I cannot run RustPython using wasmer · Issue #1088 · wasmerio/wasmer</a></div><div class=\"message_embed_description\">Summary I seem to not be able to run RustPython with wasmer. I already looked into the issue RustPython/RustPython#1637 but now it seems like wasmer cannot identify it uses wasi_snapshot_preview1. ...</div></div></div>",
+        "id": 190259656,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583915891
+    },
+    {
+        "content": "<p>Oh and instances is just a:<br>\n<code>thread_local!(static instances: Mutex&lt;Vec&lt;ModuleInstance&gt;&gt; = Mutex::new(Vec::new()));</code></p>",
+        "id": 190260346,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583916544
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"269320\">@daubaris</span> it looks like you're compiling for the wasm32-wasi target which requires wasi imports to be satisfied. For that you'll need to pull in the <code>wasmtime-wasi</code> crate and iterate over the module exports to hook them up to wasi functions. If you want to generate a wasm module that doesn't have wasi imports you'll want to use the wasm32-unknown-unknown target. The <code>fd_write</code> intrinsic here is most likely showing up because of panics, which trigger writes to stderr</p>",
+        "id": 190278757,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1583932267
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> Oooh, okay. By the way, about hooking up the exports, I assume you are talking about <a href=\"https://github.com/bytecodealliance/wasmtime/tree/85cfdd0bb130a5b8e793c090f80ca6e59be43228/crates/wasi\" target=\"_blank\" title=\"https://github.com/bytecodealliance/wasmtime/tree/85cfdd0bb130a5b8e793c090f80ca6e59be43228/crates/wasi\">this repository</a>. I am a bit puzzled on how this \"hooking up\" is done, any hints?</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/tree/85cfdd0bb130a5b8e793c090f80ca6e59be43228/crates/wasi\" style=\"background-image: url(https://avatars0.githubusercontent.com/u/54038801?s=400&amp;v=4)\" target=\"_blank\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/tree/85cfdd0bb130a5b8e793c090f80ca6e59be43228/crates/wasi\" target=\"_blank\" title=\"bytecodealliance/wasmtime\">bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - bytecodealliance/wasmtime</div></div></div>",
+        "id": 190308824,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583947655
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"269320\">@daubaris</span> oh it sort of depends, are you using the <code>wasmtime</code> crate or the C API?</p>",
+        "id": 190308958,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1583947716
+    },
+    {
+        "content": "<p>I am using <code>wasmtime</code> crate.</p>",
+        "id": 190308999,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583947737
+    },
+    {
+        "content": "<p>Ah the hooking up happens in <a href=\"https://bytecodealliance.github.io/wasmtime/api/wasmtime/struct.Instance.html#method.new\" target=\"_blank\" title=\"https://bytecodealliance.github.io/wasmtime/api/wasmtime/struct.Instance.html#method.new\"><code>Instance::new</code></a> w</p>",
+        "id": 190309047,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1583947768
+    },
+    {
+        "content": "<p>which has docs about what the imports argument there is</p>",
+        "id": 190309075,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1583947780
+    },
+    {
+        "content": "<p>and for wasi you'd be using the <a href=\"https://bytecodealliance.github.io/wasmtime/api/wasmtime_wasi/struct.Wasi.html\" target=\"_blank\" title=\"https://bytecodealliance.github.io/wasmtime/api/wasmtime_wasi/struct.Wasi.html\"><code>wasmtime_wasi</code></a> crate</p>",
+        "id": 190309176,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1583947814
+    },
+    {
+        "content": "<p>and namely the <a href=\"https://bytecodealliance.github.io/wasmtime/api/wasmtime_wasi/struct.Wasi.html#method.get_export\" target=\"_blank\" title=\"https://bytecodealliance.github.io/wasmtime/api/wasmtime_wasi/struct.Wasi.html#method.get_export\"><code>get_export</code></a> method</p>",
+        "id": 190309194,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1583947825
+    },
+    {
+        "content": "<p>Hmmm, in the previously mentioned example, I already had the <code>Instance::new</code>, but the problem is that <code>load</code> is being called in the module itself</p>",
+        "id": 190309502,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583948003
+    },
+    {
+        "content": "<p>I think I get the idea. I'll try it out and report how it goes <span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span> thanks for the help!</p>",
+        "id": 190309739,
+        "sender_full_name": "daubaris",
+        "timestamp": 1583948147
+    }
+]

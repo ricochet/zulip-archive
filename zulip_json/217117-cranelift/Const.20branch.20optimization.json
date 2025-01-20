@@ -1,0 +1,164 @@
+[
+    {
+        "content": "<p>Consider the following function...</p>\n<p>function u0:0(r64) system_v {<br>\nblock0(v0: r64):<br>\n    v1 = iconst.i64 0<br>\n    v2 = iconst.i64 0<br>\n    v3 = icmp eq v1, v2  ; v1 = 0, v2 = 0 <br>\n    brif v3, block1, block2</p>\n<p>block1:<br>\n    v4 = iconst.i64 0<br>\n    jump block3(v4)  ; v4 = 0 </p>\n<p>block2:<br>\n    v5 = load.i64 notrap aligned v0<br>\n    jump block3(v5)</p>\n<p>block3(v6: i64):<br>\n    return<br>\n}</p>\n<p>This is currently optimized to ...</p>\n<p>function u0:0(r64) system_v {<br>\nblock0(v0: r64):<br>\n    v7 = iconst.i8 1<br>\n    brif v7, block1, block2  ; v7 = 1</p>\n<p>block1:<br>\n    v1 = iconst.i64 0<br>\n    jump block3(v1)  ; v1 = 0</p>\n<p>block2:<br>\n    v5 = load.i64 notrap aligned v0<br>\n    jump block3(v5)</p>\n<p>block3(v6: i64):<br>\n    return<br>\n}</p>\n<p>Completely missing the fact that the brif v7, block1, block2  ; v7 = 1 uses a constant and can be replaced with a jump block1.   Ideally this should reduce to something like...</p>\n<p>function u0:0(r64) system_v {<br>\nblock0(v0: r64):<br>\n    v7 = iconst.i8 1<br>\n    jump block1</p>\n<p>block1:<br>\n    v1 = iconst.i64 0<br>\n    jump block3(v1)  ; v1 = 0</p>\n<p>block3(v6: i64):<br>\n    return<br>\n}</p>\n<p>or even better ...</p>\n<p>function u0:0(r64) system_v {<br>\nblock0(v0: r64):<br>\n    return<br>\n}</p>\n<p>The reason this is mattering to me is if the result of the branch is constant and the value passed to the final block becomes constant, more of the middle layer optimizations start to take effect and great big spaghetti code (ie naively lifted code) condenses down really nice.</p>\n<p>I thought I would be super slick and add a optimization to cprop.isle.  Turns out brif is a \"pure\" instruction and doesn't pass through ISLE.</p>\n<p>So tracing through the code led to me optimize_skeleton_inst in <a href=\"http://egraph.rs\">egraph.rs</a>.  I <em>think</em> this would be where you would put in a condition for checking on constant branches, but I am totally at a loss on where to even begin.  I feel like once I got out of the ISLE land it was way too deep in the weeds to start hacking and slashing without causing too much grief.  Am I correct in understanding that brif instructions will never pass in to ISLE land?  Is this something that can be done simply or should I create a github issue?</p>",
+        "id": 328503434,
+        "sender_full_name": "Michael Conrad",
+        "timestamp": 1676649223
+    },
+    {
+        "content": "<p>The egraph based optimizations don't support any control flow.</p>",
+        "id": 328521516,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1676653900
+    },
+    {
+        "content": "<p>(ISLE is a generic pattern matching language. It is used by the egraph based optimizations, but also by backends to lower from clif ir to machine specific instructions. In the later case brif definitively does pass through ISLE.)</p>",
+        "id": 328521796,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1676653962
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"589943\">@Michael Conrad</span> you're correct that the egraph midend does not invoke the <code>simplify</code> entry-point on non-pure insts, like branches. However there's been a lot of thought about how we could do this. Most recently, <span class=\"user-mention\" data-user-id=\"504918\">@Jamey Sharp</span>, <span class=\"user-mention\" data-user-id=\"506239\">@Trevor Elliott</span> , <span class=\"user-mention\" data-user-id=\"253990\">@fitzgen (he/him)</span> and I were discussing how we could build branch simplification directly into the egraph pass and the idea is basically to check the condition of a <code>brif</code> when we reach it (since it will have been eagerly optimized to a const by this point) and replace as necessary</p>",
+        "id": 328527332,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1676655495
+    },
+    {
+        "content": "<p>So: yes, we'd like to do this, we just haven't gotten around to it yet :-)</p>",
+        "id": 328527406,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1676655514
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254389\">Chris Fallin</span> <a href=\"#narrow/stream/217117-cranelift/topic/Const.20branch.20optimization/near/328527332\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"589943\">Michael Conrad</span> you're correct that the egraph midend does not invoke the <code>simplify</code> entry-point on non-pure insts, like branches. However there's been a lot of thought about how we could do this. Most recently, <span class=\"user-mention silent\" data-user-id=\"504918\">Jamey Sharp</span>, <span class=\"user-mention silent\" data-user-id=\"506239\">Trevor Elliott</span> , <span class=\"user-mention silent\" data-user-id=\"253990\">fitzgen (he/him)</span> and I were discussing how we could build branch simplification directly into the egraph pass and the idea is basically to check the condition of a <code>brif</code> when we reach it (since it will have been eagerly optimized to a const by this point) and replace as necessary</p>\n</blockquote>\n<p>This was basically what I was thinking and I think I found the \"right\" place to do it, but got lost at that point trying to extract the information needed to do the check.  I am glad you have it on your minds to do and will either keep pondering it or watching for it to appear.  Thank you!</p>",
+        "id": 328528796,
+        "sender_full_name": "Michael Conrad",
+        "timestamp": 1676655906
+    },
+    {
+        "content": "<p>If you want to give it a go, I'd be happy to review a PR and help guide the way! I think it should basically come down to:</p>\n<ul>\n<li>define a separate helper on <code>OptimizeCtx</code> for branches;</li>\n<li>define a helper to check whether a value is a \"truthy constant\";</li>\n<li>on a brif of a constant true or false, replace with a br instead;</li>\n<li>optionally, track whether blocks are still live by counting removed preds, and skip useless work (dec this count of the skipped succ; on reaching a block, if removed preds == total preds, skip). CLIF is allowed to have unreachable blocks though, so this is strictly speaking unnecessary</li>\n</ul>\n<p>all that does imply some context/familiarity so I'm happy to help point things out but it's also fine if you want to leave this for others later :-)</p>",
+        "id": 328529658,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1676656168
+    },
+    {
+        "content": "<p>To add to Chris' comment, specifically, I want to change the <code>optimize_skeleton_inst</code> function you found so that it calls a different ISLE term than the one used to simplify pure instructions.<br>\nThere are a bunch of rewrites that would make sense to do on not just branches but really any instructions that have side effects. However that doesn't fit into the \"egraph\" idea, where we're declaring that there are several equivalent ways to compute the same \"Value\". Instead, I think we just want to do a more traditional optimization here and pick a single \"best\" instruction that has the same effect as the original. That's why these \"skeleton\" instructions need to be treated differently than pure ops.</p>",
+        "id": 328529682,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1676656180
+    },
+    {
+        "content": "<p>I think we should do a minimal PR that invokes an <code>Inst</code>-&gt;<code>Inst</code> ISLE term on these instructions (which is tricky for a few reasons) but doesn't actually implement any optimization rules, and then people should be able to write a bunch of interesting rules in that framework.<br>\nAlso I've been thinking about the pruning unreachable blocks detail: instead of ref-counting branches as we remove them, I think we just need to mark a block as reachable whenever we process a branch instruction that points to it. As we walk the blocks in dominance-tree pre-order, if we see one that we haven't already marked as reachable, then at that point I believe it's definitely unreachable.</p>",
+        "id": 328531004,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1676656599
+    },
+    {
+        "content": "<blockquote>\n<p>I think we should do a minimal PR that invokes an Inst-&gt;Inst ISLE term on these instructions (which is tricky for a few reasons) but doesn't actually implement any optimization rules, and then people should be able to write a bunch of interesting rules in that framework.</p>\n</blockquote>\n<p>I actually think there's value in considering <em>not</em> doing this, and having the branch folding be built-in behavior in the egraph pass. (I'm not 100% tied to this, but good reasons follow...) The original thought behind ISLE-for-midend was that it works well for value-substitutions, so pure nodes make perfect sense, but there are many considerations (moving side effects? creating new ones?) and plumbing issues (talking about block-targets in ISLE; multi-value, which will arise for calls; probably more that I'm forgetting now) when generalizing to all instructions.</p>\n<p>I say all this because I too went down this path when trying to do some branch optimizations (removing <code>uextend</code> on a <code>(brif (uextend (icmp ...)))</code> pattern, specifically) and found that I kept bumping into all of these unfinished bits and incongruities. My \"this is the wrong solution and I'm bulldozing through a wall\" intuition went off.</p>\n<p>At the very least, such a PR is far from \"minimal\", as compared to branch-folding that I think could be done in ~50-100 LoC and provide immediate value, in a simple and verifiable way!</p>",
+        "id": 328534814,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1676657758
+    },
+    {
+        "content": "<p>I have the start of the branch folding implemented, and am looking into to removing dead blocks.</p>\n<p>Clearly the easiest thing to do is bail out when a branch target is eliminated, recompute the graphs and start over.  Gross.  So I'm thinking I need to get access to the ControlFlowGraph inside egraph, fix up the ControlFlowGraph <em>and</em> the DominatorTree / DomTreeWithChildren before continuing on, correct?</p>\n<p>Initial code is at <a href=\"https://github.com/mmitton/wasmtime/tree/branch_folding\">https://github.com/mmitton/wasmtime/tree/branch_folding</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/mmitton/wasmtime/tree/branch_folding\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/dfa43bdcb609e1fbbb584bf399a7968150dd69cf\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f386164376230366231613962346436656237323762316261373262386465656566393039626330383064336531323935326535383738346639363236663632342f6d6d6974746f6e2f7761736d74696d65)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/mmitton/wasmtime/tree/branch_folding\" title=\"GitHub - mmitton/wasmtime at branch_folding\">GitHub - mmitton/wasmtime at branch_folding</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to mmitton/wasmtime development by creating an account on GitHub.</div></div></div>",
+        "id": 329191245,
+        "sender_full_name": "Michael Conrad",
+        "timestamp": 1676986358
+    },
+    {
+        "content": "<p>ah, I would actually not try to remove dead blocks -- lowering will skip them automatically</p>",
+        "id": 329239731,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1676998251
+    },
+    {
+        "content": "<p>the only relevant thing to do on the midend, IMHO, is to skip them during traversal, as an optimization</p>",
+        "id": 329239784,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1676998267
+    },
+    {
+        "content": "<p>Without removing them, you miss out on optimizations in the midend.</p>\n<p>What I have at the moment is code that folds BrIf and BrTable to Jump if there is a constant, but then it converts the block params to aliases if there is one and only one pred that matches the block (looking inside the pred inst for the block call that matches, and only if there is ONLY one block call that matches.  ie, you cannot have two block calls in a BrTable that branch to that block)</p>\n<p>Without elimination dead code, the target block may never know it only has one pred and then cannot alias the block params / enable more optimizations.</p>\n<p>I have committed my changes to my fork and have a sample test app at <a href=\"https://github.com/mmitton/test-opt\">https://github.com/mmitton/test-opt</a> which shows the results of folding.  Commenting out line 404 in codegen/src/context.rs shows the gain/loss of doing this.</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/mmitton/test-opt\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/909b9285b64111cf0523e246ef51fc0b1a7b3ab5\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f396362346462363664373561633865303732343266616333636462303665613461333438376537366665376461336162373033326461323862623631613035372f6d6d6974746f6e2f746573742d6f7074)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/mmitton/test-opt\" title=\"GitHub - mmitton/test-opt\">GitHub - mmitton/test-opt</a></div><div class=\"message_embed_description\">Contribute to mmitton/test-opt development by creating an account on GitHub.</div></div></div>",
+        "id": 329266355,
+        "sender_full_name": "Michael Conrad",
+        "timestamp": 1677005510
+    },
+    {
+        "content": "<p>I am still not thrilled that the result code has jump jump jump jump to the final block and then the return.  I suspect that is something in the lowering that can realize a jump to the very next instruction isn't needed?</p>",
+        "id": 329266879,
+        "sender_full_name": "Michael Conrad",
+        "timestamp": 1677005635
+    },
+    {
+        "content": "<p>I think we're using terms slightly differently: by \"removing\" I mean actually removing from the body. Branch folding can make something unreachable, while the dead block sticks around in the layout</p>",
+        "id": 329267023,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1677005666
+    },
+    {
+        "content": "<p>We can absolutely do the right thing once we know that the block has one less pred in that case</p>",
+        "id": 329267076,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1677005685
+    },
+    {
+        "content": "<p>function u0:0() -&gt; i32 system_v {<br>\nblock0:<br>\n    v0 = iconst.i32 0<br>\n    brif v0, block1, block2  ; v0 = 0</p>\n<p>block1:<br>\n    v1 = iconst.i32 4<br>\n    jump block3(v1)  ; v1 = 4</p>\n<p>block2:<br>\n    v2 = iconst.i32 8<br>\n    jump block3(v2)  ; v2 = 8</p>\n<p>block3(v3: i32):<br>\n    return v3<br>\n}</p>\n<p>Folding the brif in block0 makes block2 unreachable, but block3 doesn't get the memo without removing block2.  You could, and I contemplated at one point, realize block2 was unreachable after folding the brif, but if block2 is involved in a loop, it would still have a pred after taking block0 out of its list of preds.</p>\n<p>Now that I'm talking this through, there is probably a way to extract that from LoopAnalysis?  I may have to explore that.</p>",
+        "id": 329268458,
+        "sender_full_name": "Michael Conrad",
+        "timestamp": 1677006046
+    },
+    {
+        "content": "<p>I think it could look something like: keep is-constant state per blockparam; this is a lattice (<code>Top</code>, <code>Const(value)</code>, <code>Bottom</code>); on processing a branch, meet state into succs. On starting new block, check preds: if any do not dominate this block, do nothing (all blockparams are effectively unknown); else, use state as starting constant-state when optimizing this block.</p>",
+        "id": 329269197,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1677006247
+    },
+    {
+        "content": "<p>Basically, we are implicitly OK because if we exclude a block by not visiting it (if it becomes unreachable), we just won't meet into the blockparams of its succ(s)</p>",
+        "id": 329269279,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1677006278
+    },
+    {
+        "content": "<p>this requires keeping a \"reachability\" bit that is set whenever a branch targets another block, and is set for the entry block initially</p>",
+        "id": 329269353,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1677006305
+    },
+    {
+        "content": "<p>There's a refinement to this that <span class=\"user-mention\" data-user-id=\"504918\">@Jamey Sharp</span> and I talked about where if we see a pred uses <em>our own blockparam value</em> as an arg to that blockparam, we can ignore it (trivial self-loop); this subsumes the \"remove useless phis\" pass; but that's an extension to the above and not necessary at first</p>",
+        "id": 329269512,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1677006357
+    },
+    {
+        "content": "<p>This might be the type of optimization where something like a RVSDG form might be more natural: dead code elimination would become another egraph rule, eg <code>if true X else Y &lt;=&gt; X</code>. Then again, you would need to reduce the CFG first, and you would need to keep some special node types for irreducible graphs.</p>",
+        "id": 340650480,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1678378503
+    },
+    {
+        "content": "<p>Yes, this would be somewhat easier with an RVSDG input than a CFG. Of course, getting to that point is a much bigger change. And some difficulties apply to both approaches.</p>\n<p>In particular, Cranelift's \"acyclic egraph\" currently relies on visiting each block only once during the equality saturation phase, which misses some optimization opportunities for loops but has a bunch of advantages. In an RVSDG, we'd miss the same loop optimizations. I think it's possible to offer a compiler option for re-visiting already-processed blocks when you care more about generated code quality than compile time, but I don't have the details right yet. If we had that though, it would work equally well on CFGs and RVSDGs.</p>\n<p>Regarding irreducible graphs, have you read <a href=\"https://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.687.6305\">Perfect Reconstructability of Control Flow from Demand Dependence Graphs</a> by Helge Bahmann _et al_? I suspect it would work out better to use their \"predicate continuation normal form\" to transform arbitrary control flow to purely reducible control flow and back, rather than having special-case nodes.</p>",
+        "id": 340659693,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1678380603
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"504918\">Jamey Sharp</span> <a href=\"#narrow/stream/217117-cranelift/topic/Const.20branch.20optimization/near/340659693\">said</a>:</p>\n<blockquote>\n<p>Regarding irreducible graphs, have you read <a href=\"https://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.687.6305\">Perfect Reconstructability of Control Flow from Demand Dependence Graphs</a> by Helge Bahmann _et al_? I suspect it would work out better to use their \"predicate continuation normal form\" to transform arbitrary control flow to purely reducible control flow and back, rather than having special-case nodes.</p>\n</blockquote>\n<p>Trying to read it now, but it's a bit dense for me. That paper needs more illustrations =(</p>",
+        "id": 341835757,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1678808978
+    },
+    {
+        "content": "<p>I've read the paper now; maybe I missed something, but it really doesn't seem to address irreducible control flows at all. Or at least, it doesn't seem to treat them in a specific way, and they barely test any irreducible CFGs in their benchmarks. It just seems like a more (?) efficient way to transform CFGs into RVSDGs and back</p>",
+        "id": 341861060,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1678814592
+    },
+    {
+        "content": "<p>The abstract summarizes this by saying, \"Our destruction algorithm can generate arbitrarily complex control flow; we show this by proving that the original CFG an RVSDG was derived from can, apart from overspecific detail, be reconstructed perfectly.\" They mean that regardless of whether the input CFG was reducible or not. The really cool part is that even irreducible control flow is reconstructed perfectly.</p>\n<p>Section 4, \"TRANSFORMING CFGS TO RVSDGS\", begins by describing a \"direct transformation from any structured CFG to an RVSDG\". Structured CFGs exclude irreducible CFGs and even some reducible CFGs. But the next page notes, \"The remainder of this section describes an algorithm that converts an arbitrary CFG into a structured one.\" And figure 3 is an irreducible CFG, though it's only labeled as \"unstructured\" in the figure caption.</p>\n<p>I totally agree that the paper could have used more illustrations. I spent a lot of time staring at figure 3 when writing my implementation of sections 4.1 and 4.2. Maybe reading my implementation will help clarify the paper, or maybe it'll just be more confusing… <a href=\"https://github.com/jameysharp/optir/blob/main/src/cfg/restructure.rs\">https://github.com/jameysharp/optir/blob/main/src/cfg/restructure.rs</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/jameysharp/optir/blob/main/src/cfg/restructure.rs\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/da308e3b88eb5d5190804269d341d4bd63aaedb3\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f366461623530383836313630333965386231616334386164323139396331363534386162396237306265633561626637353431363234373038616237343937612f6a616d657973686172702f6f70746972)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/jameysharp/optir/blob/main/src/cfg/restructure.rs\" title=\"optir/restructure.rs at main · jameysharp/optir\">optir/restructure.rs at main · jameysharp/optir</a></div><div class=\"message_embed_description\">Compiler optimizer for arbitrary control flow based on equality saturation - optir/restructure.rs at main · jameysharp/optir</div></div></div>",
+        "id": 342102471,
+        "sender_full_name": "Jamey Sharp",
+        "timestamp": 1678896414
+    }
+]

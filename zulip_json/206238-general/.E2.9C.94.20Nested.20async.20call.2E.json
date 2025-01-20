@@ -1,0 +1,260 @@
+[
+    {
+        "content": "<p>Hi there, a fan of wasmtime here. We've  been using wasmtime as part of our project for a plugin-like framework. I ran into the problem that a nested <code>call_async</code> invocation causes the corruption of the stack on resume. That is, I started an instance whose wasm function was called (async), which in turn invokes a host function (async), which, as part of the logic follow, invokes the wasm function of another instance (but the same wasm code). The async call did return, but it looks like the wasm variables on stack are all corrupted... Is it because there is only one \"WASM stack\" during the async call (although there might be  separated host stack created on the fly)? How does one implement such nested async call that a wasm function may end up calling another one through the host function logic? (Or is it possible) Thanks!</p>\n<p>TLDR: I wrote a logic that does wasm-&gt;host-&gt;wasm kinda invocation (with async), while the call returns, the initial caller's stack seems to be corrupted. Is that an expected behavior, or I did something wrong?</p>",
+        "id": 421564660,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1707962066
+    },
+    {
+        "content": "<p>Can you detail more what's being corrupted? The host stack? The guest stack? Also, to confirm, you aren't using unsafe rust are you? Or are you using the C API?</p>",
+        "id": 421585975,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1707976231
+    },
+    {
+        "content": "<p>It's the guest stack.  The local variables' values in wasm function are corrupted. No I'm not using unsafe Rust, just made some standard call_async, but what's interesting in this case is it triggers a host which again triggers call_async.</p>",
+        "id": 421589828,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1707978451
+    },
+    {
+        "content": "<p>In this case it may not be the case that the guest module is prepared to be reentrant. Whether or not that works well depends on the guest module and how it was compiled. What language is the guest?</p>",
+        "id": 421676664,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708010040
+    },
+    {
+        "content": "<p>Rust is both for host and guest. Could you elaborate on \"is prepared to be reentrant\"?</p>",
+        "id": 421739029,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708030536
+    },
+    {
+        "content": "<p>I couldn't find such an info in the documentation, and wonder how wasmtime handles this...</p>",
+        "id": 421739077,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708030557
+    },
+    {
+        "content": "<p>Hm by reentrancy I basically mean that the guest is prepared to be called again when it calls out to the host. For Rust that in theory should be the case though.</p>\n<p>Would you be able to share an example reproduction of this issue?</p>",
+        "id": 421753203,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708036898
+    },
+    {
+        "content": "<p>I think it may have something to do with the fact that I share the RuntimeMemory impl for both instances (caller * callee).</p>",
+        "id": 421755526,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038114
+    },
+    {
+        "content": "<p>Could it be the case that the stack switching fiber mechanism is implemented by allocating in the guest memory?</p>",
+        "id": 421755641,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038158
+    },
+    {
+        "content": "<p>So if both instances share the memory impl, the guest (wasm) stack may be corrupted?</p>",
+        "id": 421755690,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038188
+    },
+    {
+        "content": "<p>No, the stacks for fibers are disjoint from guest memories</p>",
+        "id": 421755970,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708038338
+    },
+    {
+        "content": "<p>I'll note though that <code>RuntimeMemory</code> is an internal implementation detail of Wasmtime, are you using the <code>wasmtime-*</code> crates as opposed to the <code>wasmtime</code> crate?</p>",
+        "id": 421756068,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708038378
+    },
+    {
+        "content": "<p>Yeah, basically I'm trying to implement a persisted (virtual) memory for my plugin...</p>",
+        "id": 421756647,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038673
+    },
+    {
+        "content": "<p>It's kinda strange: after I tried to not share the memory, the corruption goes away.</p>",
+        "id": 421756677,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038692
+    },
+    {
+        "content": "<p>Oh if you're using the <code>wasmtime-*</code> internal crates like <code>wasmtime-runtime</code> then all bets are off</p>",
+        "id": 421756715,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708038714
+    },
+    {
+        "content": "<p>those are intended to be exclusively used by the <code>wasmtime</code> crate and are not vetted/reviewed for external consumption</p>",
+        "id": 421756787,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708038735
+    },
+    {
+        "content": "<p>(BTW, while the memory was shared, there should be no data race because the caller is suspended right? Also my case is single-threaded..)</p>",
+        "id": 421756813,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038746
+    },
+    {
+        "content": "<p>I see...</p>",
+        "id": 421756891,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038796
+    },
+    {
+        "content": "<p>With the <code>wasmtime-runtime</code> crate, or other internal crates, there's quite a few things that could be going wrong so it's tough to say what the case might be here</p>",
+        "id": 421756904,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708038808
+    },
+    {
+        "content": "<p>So changes are, because I'm overriding the runtime memory, I may corrupt the fiber stack because that might be part of the runtime mem...</p>",
+        "id": 421756933,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038828
+    },
+    {
+        "content": "<p>*chances</p>",
+        "id": 421756943,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038834
+    },
+    {
+        "content": "<p>I see. Got it. Thanks for your patience! Now I have more clues of what's going on, and perhaps I should avoid doing that.</p>",
+        "id": 421757043,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038870
+    },
+    {
+        "content": "<p>At least try not to derive my own RuntimeMemory impl...</p>",
+        "id": 421757077,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708038886
+    },
+    {
+        "content": "<p><a href=\"https://docs.wasmtime.dev/api/wasmtime/struct.Config.html#method.with_host_stack\">https://docs.wasmtime.dev/api/wasmtime/struct.Config.html#method.with_host_stack</a> &lt;- would this be a way to have custom guest/wasm stack allocation?</p>",
+        "id": 421759294,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708039725
+    },
+    {
+        "content": "<p>Indeed!</p>",
+        "id": 421759396,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708039796
+    },
+    {
+        "content": "<p>if that doesn't work though feel free to file an issue</p>",
+        "id": 421759424,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708039803
+    },
+    {
+        "content": "<p>Thanks!</p>",
+        "id": 421761574,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708041071
+    },
+    {
+        "content": "<p>I realize the actual issue is not because of the stack, but the static global: when the call enters the inner one, the new instance is created, but that also triggers some initialization of those static globals in the same memory. Do you know if there is a way to prevent wasmtime runtime from initialize those statics?</p>",
+        "id": 421801154,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708066784
+    },
+    {
+        "content": "<p>It seems that with_host_stack only customize the host stack, not the wasm stack...With this configured, I still see wasm runtime stack is allocated right after my code+statics in the Linear Memory.</p>",
+        "id": 421810111,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708071611
+    },
+    {
+        "content": "<p>I guess the documentation could use some clarification for this.</p>",
+        "id": 421810174,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708071643
+    },
+    {
+        "content": "<p>Sorry but I'll reiterate again that crates below <code>wasmtime</code> itself are not intended for use. We don't maintain documentation or try to make them usable at all, they're just for internalize organization. We also can't provide much help for them, so if you're using <code>wasmtime-runtime</code> for example you'll be on your own</p>",
+        "id": 421886643,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708098953
+    },
+    {
+        "content": "<p>Im a bit confused: with_host_stack is a method of  wasmtime::Config</p>",
+        "id": 421914282,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708107386
+    },
+    {
+        "content": "<p>Im not using wasmtime-runtime anymore.</p>",
+        "id": 421914524,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708107483
+    },
+    {
+        "content": "<p>oh oops sorry I misread, my apologies!</p>",
+        "id": 421914844,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708107625
+    },
+    {
+        "content": "<p>You're right that only the host stack is configured here, and wasmtime has no control over the guest shadow stack in use, that's entirely up to the guest to manage</p>",
+        "id": 421914898,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708107649
+    },
+    {
+        "content": "<p>I see! That’s consistent with my findings. Thanks!</p>",
+        "id": 421915186,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708107761
+    },
+    {
+        "content": "<p>On guest shadow stack: is there a way to let the stack pointer start with some manual location?</p>",
+        "id": 421915317,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708107816
+    },
+    {
+        "content": "<p>I found the corruption was caused by the fact that the inner callee instance doesn’t know the caller already has a stack allocated (they are the same code sharing the mem)…</p>",
+        "id": 421915501,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708107884
+    },
+    {
+        "content": "<p>Currently I'm not aware of a great way to do this, no</p>",
+        "id": 421915593,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708107933
+    },
+    {
+        "content": "<p>You'd need to read the wasm file and mutate it to inject your own intrinsics to manage the stack pointer</p>",
+        "id": 421915619,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708107944
+    },
+    {
+        "content": "<p>put another way, I'm not aware of any guest language using LLVM that has already solved the problem neatly of how to manage the shadow stack pointer</p>",
+        "id": 421915706,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1708107968
+    },
+    {
+        "content": "<p>Got it, thanks for the help!</p>",
+        "id": 421915868,
+        "sender_full_name": "Ted Yin",
+        "timestamp": 1708108037
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"234973\">Till Schneidereit</span> has marked this topic as resolved.</p>",
+        "id": 469710993,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1726155498
+    }
+]

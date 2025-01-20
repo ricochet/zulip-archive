@@ -1,0 +1,158 @@
+[
+    {
+        "content": "<p>I'm in the process of writing my own cranelift backend for a proprietary bytecode which has signed and unsigned instructions which do overflow checking. Since cranelift doesn't differentiate between signed/unsigned types and operations I'm kind of lost how to preserve that information through the optimization process. Is there a good way to do that, maybe attaching value labels (assuming they are preserved through e-graph and isle shenanigans)? How does the rust cranelift backend do it?</p>",
+        "id": 464148154,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724268624
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"745970\">@Jan Katzer</span> what sort of consumer are you needing the information for? In other words, do you have some stage or tooling that needs to know that a particular {value,operator} at the IR level became a particular {register,instruction} at the machine level? That is what debug value labels would give you. For overflow checking and compiled-in checks in general though, I'd expect the IR itself to encode the check and what happens if it fails -- for example, a compare and trap on overflow (<code>iadd</code>, <code>icmp</code> the result to either input, if result is less, wraparound/overflow; <code>trapnz</code> on that 0/1 value). See e.g. how the Wasmtime frontend emits CLIF to implement explicit bounds-checks on heaps for an example of \"compiled-in checks\"</p>",
+        "id": 464153498,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724270150
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> In my specific case I have bytecode instructions which encode the signedness and overflow check as part of the operation, e.g. <code>add16s dst, src</code> does a signed 16-bit addition and traps if needed. So I would need that information in the isa backend</p>",
+        "id": 464154770,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724270371
+    },
+    {
+        "content": "<p>Ah, sorry, I missed the \"new backend\" bit; I think the best answer here (or at least, the right one imho) is probably to add new CLIF instructions for these operators</p>",
+        "id": 464155176,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724270435
+    },
+    {
+        "content": "<p>Oh boy, that sounds like an adventure and a half :D</p>",
+        "id": 464155342,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724270464
+    },
+    {
+        "content": "<p>hopefully not too bad! The instructions are defined in cranelift/codegen/meta/src/shared/instructions.rs; takes a little stanza of a handful of lines for each; most of the compiler shouldn't need to know about them (they'll be considered pure by default which may be a problem if you want trapping ops that are unused to not be optimized out); then use them in lowering rules in your backend</p>",
+        "id": 464156805,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724270731
+    },
+    {
+        "content": "<p>the InstBuilder boilerplate to add them when driving the Cranelift API, and all the glue for ISLE matching rules and such, is generated automatically</p>",
+        "id": 464156941,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724270755
+    },
+    {
+        "content": "<p>The trapping behaviour should not matter too much, since that's transparent to the program (the interpreter just exits early) EDIT: Oh you're right, but I'm fine with unused/optimized operations not trapping, since it's more of a security than a correctness thing</p>\n<p>I'm mostly concerned about cranelift then not knowing how to optimize these new opcodes properly</p>",
+        "id": 464157550,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724270865
+    },
+    {
+        "content": "<p>so absent any other newly defined midend rules, Cranelift should treat newly defined instructions as opaque operators -- we don't know what they are, so we won't rewrite them</p>",
+        "id": 464157850,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724270951
+    },
+    {
+        "content": "<p>since they default to \"pure\" they'll also be subject to code motion, so e.g. GVN (reusing the result of the same trapping op computed earlier) or hoisting out of a loop (LICM, if loop-invariant), but those should be fine too from your description</p>",
+        "id": 464157980,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724270996
+    },
+    {
+        "content": "<p>Makes sense, but as essentially all arithmetic operations would be my own opcodes, that would basically prohibit much if not all of the optimization</p>",
+        "id": 464158294,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724271072
+    },
+    {
+        "content": "<p>the other good news is that you're free to add your own mid-end rules :-)</p>",
+        "id": 464158352,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271089
+    },
+    {
+        "content": "<p>I can see why you might want to take a different approach and re-use all the rules we have for \"normal\" adds and such</p>",
+        "id": 464158421,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271104
+    },
+    {
+        "content": "<p>I guess I'd be a little cautious of that in the face of signed/unsigned overflow semantics (is it still valid to commute operations or rewrite x-y to x+(-y) or ... any other algebraic identity if we want to preserve what would have trapped in the middle of that expression)</p>",
+        "id": 464158693,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271171
+    },
+    {
+        "content": "<p>Like I said, that's shouldn't be that big of a deal. The overflow checks are mostly for preventing accidental overflow, they aren't really a guaranteed part of the operations semantics. <code>x + (-y)</code> is fine with me as long as the effective value doesn't cause a robot arm to spin around and decapitate a worker :D</p>",
+        "id": 464159519,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724271381
+    },
+    {
+        "content": "<p>(obligatory disclaimer: Cranelift is not warrantied against decapitation risks; that is, uh, terrifying and I'll keep thinking about formal verification techniques)</p>",
+        "id": 464160025,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271481
+    },
+    {
+        "content": "<p>one other thing that comes to mind: you could define new \"overflow check\" operators that <em>wrap</em> the existing operators; so <code>overflow_check(iadd(x, y), x, y)</code> or something of the sort</p>",
+        "id": 464160345,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271524
+    },
+    {
+        "content": "<p>with the semantics that these check-opcodes pass through the result value, but also potentially have the side-effect of trapping</p>",
+        "id": 464160426,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271545
+    },
+    {
+        "content": "<p>this allows existing rules in the mid-end to fire, though we'll miss any rewrites that match on trees (<code>iadd(x, iadd(y, z))</code> sort of thing) because of the check ops wrapping each layer</p>",
+        "id": 464160569,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271591
+    },
+    {
+        "content": "<p>but with additional rewrite rules the \"middle\" check ops could be removed, depending on what precise trapping semantics you want</p>",
+        "id": 464160671,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271608
+    },
+    {
+        "content": "<p>Hm, that might be a good idea, though I also would have to tinker with basically all rewrite rules</p>",
+        "id": 464160910,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724271666
+    },
+    {
+        "content": "<p>finally to your original point/direction, I can imagine a framework that basically carries signedness and boundedness information on the side; new array in CLIF (<code>SecondaryMap&lt;Value, SignAndBound&gt;</code> or somesuch), and accessors to use that in lowering rules. I'd probably suggest that over trying to use debug value labels since the latter... mostly work, but aren't really meant to be used in a \"100% precision lossless type system\" sort of way</p>",
+        "id": 464161266,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271762
+    },
+    {
+        "content": "<p>Yeah, I figured as much</p>",
+        "id": 464161429,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724271810
+    },
+    {
+        "content": "<p>anyway best of luck with your (properly signed and bounded) robots!</p>",
+        "id": 464161483,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1724271831
+    },
+    {
+        "content": "<p>This might be the easiest route. I would have to tinker with the egraph/rewrite/whatever to preserve that info, but easier then to rewrite all rules :D</p>",
+        "id": 464161604,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724271859
+    },
+    {
+        "content": "<p>Thanks! :D</p>",
+        "id": 464161613,
+        "sender_full_name": "Jan Katzer",
+        "timestamp": 1724271862
+    }
+]

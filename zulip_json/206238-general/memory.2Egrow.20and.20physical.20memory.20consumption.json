@@ -1,0 +1,218 @@
+[
+    {
+        "content": "<p>Hi guys,  I want to ask about the relation between memory.grow and physical memory consumption. On linux, when we call memory.grow, the runtime calls mmap to reserve the virtual memory space, but linux shouldn't really reserve physical memory for this operation, until the the new page being accessed right?</p>\n<p>But if the above is true, then what's is the downside of just initialize the linear memory to be 4GB (the entire 32 bit space) at the beginning ?</p>",
+        "id": 445972930,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718927181
+    },
+    {
+        "content": "<p>using an entire 4gb section of address space can quickly run into limitations, such as on common x86-64 systems where userspace only has 47-bits of total address space available, which would mean you can't have more than 32768 wasm instances at once, which is a pretty low limit</p>",
+        "id": 445975401,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1718928563
+    },
+    {
+        "content": "<p>somewhat older versions of windows limit that to 43-bits, meaning you're limited to just 2048 wasm instances</p>",
+        "id": 445975970,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1718928912
+    },
+    {
+        "content": "<p>I see, this makes sense thank you!</p>",
+        "id": 445976181,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718929036
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"710667\">@Coulson Liang</span> I think there may be several inaccuracies in your description of how the opcodes work:</p>\n<ul>\n<li>We do reserve the virtual memory space upfront; otherwise we wouldn't be able to grow without possibly moving, which is complex if we're deep in a callstack and there are native heap addresses in the compiled code up the stack</li>\n<li><code>memory.grow</code> does an <code>mprotect</code> to make memory accessible</li>\n</ul>\n<p>What <span class=\"user-mention\" data-user-id=\"315881\">@Jacob Lifshay</span> says about address space limits is also true, and something we worry about, but in practice we still choose to use the VM-based approach typically because the alternative is explicit bounds checks which is a nontrivial perf impact and so usually a worse option</p>",
+        "id": 445976596,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1718929306
+    },
+    {
+        "content": "<p>finally -- I'm not sure what you mean by \"initialize the linear memory to be 4GB at the beginning\" but we're constrained by Wasm semantics -- the linear memory size is defined by the initial size and any grow operations, we <em>must</em> trap if accesses happen that are out of bounds, so we have to actually adjust memory permissions as it grows</p>",
+        "id": 445976714,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1718929376
+    },
+    {
+        "content": "<p>A downside to an embedder for starting linear memories at 4G is that the embedder can't keep track easily of what's paged in and what isn't. The memory.grow instruction can fail and provides a hook for the embedder to reject a requested growth as being to big or possibly block the instance entirely until there is more memory available. If everything is mapped in the there's no way to hook and event of memory being paged in easily</p>",
+        "id": 445980055,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1718931764
+    },
+    {
+        "content": "<p>Hey all, I'm working with Coulson. Really appreciate all the replies here!</p>\n<p><span class=\"user-mention\" data-user-id=\"254389\">@Chris Fallin</span> Can you possibly direct me to where virtual memory space is reserved? I'm assuming this is for the 4GB region. This makes a lot of sense since I was concerned about how remap operations would work.</p>",
+        "id": 446154168,
+        "sender_full_name": "Nicholas Renner",
+        "timestamp": 1718997942
+    },
+    {
+        "content": "<p>Grep for <code>mmap</code> in the wasmtime codebase, you'll find the abstractions in the runtime crate</p>",
+        "id": 446154706,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1718998127
+    },
+    {
+        "content": "<p>(I hope that doesn't sound like a glib answer, but it really is that simple: we use mmap to reserve the space, so you can trace backward from there :-) )</p>",
+        "id": 446154773,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1718998150
+    },
+    {
+        "content": "<p>in particular you might want to study the \"on-demand allocator\" first, it's simpler than the pooling allocator</p>",
+        "id": 446154881,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1718998194
+    },
+    {
+        "content": "<p>Yeah yeah, here's the unified abstraction <a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/mmap.rs\">https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/mmap.rs</a><br>\nAnd here's the underlying implementation for unix systems<br>\n<a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/sys/unix/mmap.rs\">https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/sys/unix/mmap.rs</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/mmap.rs\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/f01553be2c4e9dfe39fdc86ceec00b3c4ecdf35a/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316332613062646164633837393936363539313062326633653062313566353438396331323837666563356538386663336466393532303962663463333339612f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/mmap.rs\" title=\"wasmtime/crates/wasmtime/src/runtime/vm/mmap.rs at main · bytecodealliance/wasmtime\">wasmtime/crates/wasmtime/src/runtime/vm/mmap.rs at main · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to bytecodealliance/wasmtime development by creating an account on GitHub.</div></div></div><div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/sys/unix/mmap.rs\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/f01553be2c4e9dfe39fdc86ceec00b3c4ecdf35a/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316332613062646164633837393936363539313062326633653062313566353438396331323837666563356538386663336466393532303962663463333339612f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasmtime/src/runtime/vm/sys/unix/mmap.rs\" title=\"wasmtime/crates/wasmtime/src/runtime/vm/sys/unix/mmap.rs at main · bytecodealliance/wasmtime\">wasmtime/crates/wasmtime/src/runtime/vm/sys/unix/mmap.rs at main · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to bytecodealliance/wasmtime development by creating an account on GitHub.</div></div></div>",
+        "id": 446160702,
+        "sender_full_name": "Coulson Liang",
+        "timestamp": 1718999572
+    },
+    {
+        "content": "<p>With default settings the mmap happens <a href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/wasmtime/src/runtime/vm/memory.rs#L264\">here</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/wasmtime/src/runtime/vm/memory.rs#L264\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/f01553be2c4e9dfe39fdc86ceec00b3c4ecdf35a/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316332613062646164633837393936363539313062326633653062313566353438396331323837666563356538386663336466393532303962663463333339612f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/wasmtime/src/runtime/vm/memory.rs#L264\" title=\"wasmtime/crates/wasmtime/src/runtime/vm/memory.rs at 81efaa738419c6e2078e4ad6d14df1e1461d415f · bytecodealliance/wasmtime\">wasmtime/crates/wasmtime/src/runtime/vm/memory.rs at 81efaa738419c6e2078e4ad6d14df1e1461d415f · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to bytecodealliance/wasmtime development by creating an account on GitHub.</div></div></div>",
+        "id": 446169007,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719002059
+    },
+    {
+        "content": "<p>The default settings for various knobs there are <a href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/environ/src/tunables.rs#L151-L158\">here</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/environ/src/tunables.rs#L151-L158\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/f01553be2c4e9dfe39fdc86ceec00b3c4ecdf35a/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316332613062646164633837393936363539313062326633653062313566353438396331323837666563356538386663336466393532303962663463333339612f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/environ/src/tunables.rs#L151-L158\" title=\"wasmtime/crates/environ/src/tunables.rs at 81efaa738419c6e2078e4ad6d14df1e1461d415f · bytecodealliance/wasmtime\">wasmtime/crates/environ/src/tunables.rs at 81efaa738419c6e2078e4ad6d14df1e1461d415f · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to bytecodealliance/wasmtime development by creating an account on GitHub.</div></div></div>",
+        "id": 446169125,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719002084
+    },
+    {
+        "content": "<p>if you look at <code>strace</code> for a single linear memory you should see a <code>mmap</code> of anonymous PROT_NONE memory which is 8G large (2G guard before, 4G region in the middle, 2G guard after)</p>",
+        "id": 446169297,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719002119
+    },
+    {
+        "content": "<p>you'll then see <code>mprotect</code> calls to <code>PROT_READ | PROT_WRITE</code> to make things read/write as memory becomes accessible</p>",
+        "id": 446169373,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719002135
+    },
+    {
+        "content": "<p>Wasmtime has no bindings to <code>mremap</code> right now if that's what you're looking for</p>",
+        "id": 446169547,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719002168
+    },
+    {
+        "content": "<p>memory growth which moves linear memory (which again doesn't happen by default, requires non-default settings), happens <a href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/wasmtime/src/runtime/vm/memory.rs#L334-L366\">here</a> with a simple memcpy</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/wasmtime/src/runtime/vm/memory.rs#L334-L366\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/f01553be2c4e9dfe39fdc86ceec00b3c4ecdf35a/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316332613062646164633837393936363539313062326633653062313566353438396331323837666563356538386663336466393532303962663463333339612f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/wasmtime/src/runtime/vm/memory.rs#L334-L366\" title=\"wasmtime/crates/wasmtime/src/runtime/vm/memory.rs at 81efaa738419c6e2078e4ad6d14df1e1461d415f · bytecodealliance/wasmtime\">wasmtime/crates/wasmtime/src/runtime/vm/memory.rs at 81efaa738419c6e2078e4ad6d14df1e1461d415f · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to bytecodealliance/wasmtime development by creating an account on GitHub.</div></div></div>",
+        "id": 446169729,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719002206
+    },
+    {
+        "content": "<p>Cool thank both of you so much. This all makes a lot of sense now.</p>",
+        "id": 446172521,
+        "sender_full_name": "Nicholas Renner",
+        "timestamp": 1719003458
+    },
+    {
+        "content": "<p>So as linear memory grows thats essentially just expanding whats accessible via mprotect. Are there any other checks being done to make sure addresses are valid? or is that just handled by the underlying OS?</p>\n<p>I think Coulson asked the same question in a different way but just want to be sure. I believe I saw in a doc somewhere that adress checking similar to how NaCl handles SFI doesnt exist because of the overhead?</p>",
+        "id": 446172922,
+        "sender_full_name": "Nicholas Renner",
+        "timestamp": 1719003645
+    },
+    {
+        "content": "<p><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator/bounds_checks.rs\">https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator/bounds_checks.rs</a> should answer your questiosn re: bounds-checks -- study the cases in there. We do have modes where we use dynamic checks instead of virtual memory permissions, it's configurable, but VM-based (we call it a \"static memory\") is the default</p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator/bounds_checks.rs\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/f01553be2c4e9dfe39fdc86ceec00b3c4ecdf35a/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f316332613062646164633837393936363539313062326633653062313566353438396331323837666563356538386663336466393532303962663463333339612f62797465636f6465616c6c69616e63652f7761736d74696d65&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/wasm/src/code_translator/bounds_checks.rs\" title=\"wasmtime/cranelift/wasm/src/code_translator/bounds_checks.rs at main · bytecodealliance/wasmtime\">wasmtime/cranelift/wasm/src/code_translator/bounds_checks.rs at main · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">A fast and secure runtime for WebAssembly. Contribute to bytecodealliance/wasmtime development by creating an account on GitHub.</div></div></div>",
+        "id": 446173273,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719003789
+    },
+    {
+        "content": "<p>ok thank you will try to go through this, its quite a lot of code. What I think youre saying though is that the default VM-based static memory just makes sure addresses are within the 4GB reserved region?</p>",
+        "id": 446174284,
+        "sender_full_name": "Nicholas Renner",
+        "timestamp": 1719004243
+    },
+    {
+        "content": "<p>It's a little more subtle than that, I'd recommend reading the code</p>",
+        "id": 446174430,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719004304
+    },
+    {
+        "content": "<p>there are details to do with offsets on the loads/stores for example, and a \"guard region\"</p>",
+        "id": 446174461,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719004322
+    },
+    {
+        "content": "<p>the main bit is the seven cases with comments that show inequalities; that shouldn't be too bad to read through</p>",
+        "id": 446174546,
+        "sender_full_name": "Chris Fallin",
+        "timestamp": 1719004354
+    },
+    {
+        "content": "<p>You can also check out online some various settings -- <a href=\"https://godbolt.org/z/sxzjTsMMG\">https://godbolt.org/z/sxzjTsMMG</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://godbolt.org/z/sxzjTsMMG\" style=\"background-image: url(&quot;https://uploads.zulipusercontent.net/4bf336f7597f851df0732b12f8d4b7b383508ec8/68747470733a2f2f6769746875622e636f6d2f636f6d70696c65722d6578706c6f7265722f696e6672612f626c6f622f6d61696e2f6c6f676f2f66617669636f6e2e706e673f7261773d74727565&quot;)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://godbolt.org/z/sxzjTsMMG\" title=\"Compiler Explorer - WASM\">Compiler Explorer - WASM</a></div><div class=\"message_embed_description\">(module\n    (memory 1)\n    (func (param i32) (result i32)\n        local.get 0\n        i32.load\n    )\n)\n</div></div></div>",
+        "id": 446181998,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719007463
+    },
+    {
+        "content": "<p>you can see there how the CLI settings affect the codegen for loads/stores</p>",
+        "id": 446182013,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719007472
+    },
+    {
+        "content": "<p>although you have to sort of manually reassemble things in your head due to lack of mapping there</p>",
+        "id": 446182030,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719007485
+    },
+    {
+        "content": "<p>Locally you can use <code>wasmtime explore</code> to take a look at what wasm corresponds to what asm</p>",
+        "id": 446182056,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1719007499
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253994\">Alex Crichton</span> <a href=\"#narrow/stream/206238-general/topic/memory.2Egrow.20and.20physical.20memory.20consumption/near/446169729\">said</a>:</p>\n<blockquote>\n<p>memory growth which moves linear memory (which again doesn't happen by default, requires non-default settings), happens <a href=\"https://github.com/bytecodealliance/wasmtime/blob/81efaa738419c6e2078e4ad6d14df1e1461d415f/crates/wasmtime/src/runtime/vm/memory.rs#L334-L366\">here</a> with a simple memcpy</p>\n</blockquote>\n<p>That is when I saw the doc says memory.grow() will relocate base ptr but actually it does not (on 64-bit linux). Can I safely assume in this case I can have a “long lived” pointer into memory since the base ptr will not change? Thanks a lot.</p>\n<p>Long context: I want to avoid the copy of output data from guest to host so I tried to store a pointer to the guest's memory(the output data) in host's \"MyBuffer\". When this \"MyBuffer\" drops it will call the dealloc func in guest to free the memory. That instance/store may also be reused after the pointer is saved in this \"MyBuffer\", meaning that memory.grow() will be called.</p>",
+        "id": 469348001,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726048653
+    },
+    {
+        "content": "<p>In general it's not safe to assume the pointer won't change. If possible I'd operate under the assumption that the pointer can change whenever wasm is called. Otherwise though it is possible where you can configure wasmtime specifically to ensure that the base pointer never changes.</p>",
+        "id": 469427148,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1726066333
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253994\">Alex Crichton</span> <a href=\"#narrow/stream/206238-general/topic/memory.2Egrow.20and.20physical.20memory.20consumption/near/469427148\">said</a>:</p>\n<blockquote>\n<p>In general it's not safe to assume the pointer won't change. If possible I'd operate under the assumption that the pointer can change whenever wasm is called. Otherwise though it is possible where you can configure wasmtime specifically to ensure that the base pointer never changes.</p>\n</blockquote>\n<p>I see. Thanks. I think if we ensure after we get the pointer no wasm calls will be made to that instace&amp;store (and the store wont be dropped), that pointer also won't change? A follow-up question is, would this be the canonical way to avoid copy of output data from wasm? In my use case, I would like the output to be zero-copy since it is large. That is the reason for my hacking above.</p>",
+        "id": 469538517,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726108624
+    },
+    {
+        "content": "<p>Sorry to add more to this thread, one more question though: When the wasm code contains malloc and free, will those be compiled to <code>mprotect</code> under default setting?</p>",
+        "id": 469547617,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726113754
+    },
+    {
+        "content": "<blockquote>\n<p>. I think if we ensure after we get the pointer no wasm calls will be made to that instace&amp;store (and the store wont be dropped), that pointer also won't change? </p>\n</blockquote>\n<p>Correct yeah. You'll also need to avoid growing memory. If possible it's recommended to use the safe <code>Memory::data</code> API or <code>Memory::data_mut</code> so you don't have to worry about these concerns, but that may also not be applicable in all situations.</p>\n<p>And yes it's expected the embedders should be able to borrow data directly from wasm, and that's what <code>Memory::data</code> enables (or raw access too).</p>\n<blockquote>\n<p>When the wasm code contains malloc and free, will those be compiled to <code>mprotect</code> under default setting?</p>\n</blockquote>\n<p>If I understand you question right, I believe the answer is \"sort of\". The wasm code itself probably has a malloc/free, for example from wasi-libc. This is not implemented with mprotect at all since it's a pure wasm-level abstractions. The wasm code for malloc, though, probably calls the <code>memory.grow</code> wasm instruction at some point to allocate more meomry (that's a WebAssembly-level primitive). That is implemented with <code>mprotect</code> in Wasmtime.</p>\n<p>There is, however, no equivalent to freeing memory in WebAssembly. Once an instance has memory it has no means of releasing it until the entire instance is destroyed.</p>",
+        "id": 469550578,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1726114970
+    },
+    {
+        "content": "<blockquote>\n<p>but that may also not be applicable in all situations.</p>\n</blockquote>\n<p>Yes that is my case... Thank you so much</p>",
+        "id": 469551199,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726115277
+    },
+    {
+        "content": "<p>Understood the memory can only be released after instance dropped. Thank you.<br>\nBut I am thinking about whether we can reuse the grown linear memory. Say we have:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span><span class=\"w\"> </span><span class=\"nf\">alloc_and_return_ptr</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">-&gt;</span><span class=\"w\"> </span><span class=\"nc\">Ptr</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">  </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">buff</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"fm\">vec!</span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"k\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">1024</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"mi\">1024</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"mi\">1024</span><span class=\"p\">]</span>\n<span class=\"w\">  </span><span class=\"n\">std</span><span class=\"p\">::</span><span class=\"n\">mem</span><span class=\"p\">::</span><span class=\"n\">forget</span><span class=\"p\">(</span><span class=\"n\">buf</span><span class=\"p\">);</span>\n<span class=\"w\">  </span><span class=\"c1\">// somehow return buff's pointer to host</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"k\">extern</span><span class=\"w\"> </span><span class=\"s\">\"C\"</span><span class=\"w\"> </span><span class=\"k\">fn</span><span class=\"w\"> </span><span class=\"nf\">dealloc</span><span class=\"p\">(</span><span class=\"n\">ptr</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">len</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">align</span><span class=\"p\">:</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span>\n<span class=\"w\">    </span><span class=\"n\">std</span><span class=\"p\">::</span><span class=\"n\">alloc</span><span class=\"p\">::</span><span class=\"n\">dealloc</span><span class=\"p\">(</span>\n<span class=\"w\">        </span><span class=\"n\">ptr</span><span class=\"p\">,</span>\n<span class=\"w\">        </span><span class=\"n\">std</span><span class=\"p\">::</span><span class=\"n\">alloc</span><span class=\"p\">::</span><span class=\"n\">Layout</span><span class=\"p\">::</span><span class=\"n\">from_size_align_unchecked</span><span class=\"p\">(</span><span class=\"n\">len</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">align</span><span class=\"p\">),</span>\n<span class=\"w\">    </span><span class=\"p\">);</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n<p>Both functions are compiled to WASM and exported to host. After calling <code>alloc_and_return_ptr</code>say the physical memory grows 1GB, but then calling <code>dealloc</code> on the pointer does not make the physical memory freed. But then we call <code>alloc_and_return_ptr</code>I assume that 1GB will be reused and physical memory will not grow? My test shows it grows a little but I don't know where that growth comes from. </p>\n<p>I am also wondering why we cannot release the 1GB physical memory after calling <code>dealloc</code> since it is mmap under the hood. I guess the answer is wasm's linear memory requirement.</p>",
+        "id": 469552880,
+        "sender_full_name": "Xinyu Zeng",
+        "timestamp": 1726116197
+    }
+]

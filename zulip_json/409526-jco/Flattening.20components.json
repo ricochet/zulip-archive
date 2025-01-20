@@ -1,0 +1,152 @@
+[
+    {
+        "content": "<p>I've noticed that when composing components, jco (or wasm-tools compose... I'm not sure what's the best place to post this thread but I assume all the relevant parties do read the jco stream) leaves all of the constituent core wasm modules as-is and leaves it to the host to connect imports with exports</p>\n<p>I think it would be valuable to have a capability for flattening components, i.e. combining all of the core wasm modules into one by (a) using multi-memory and multi-table to provide the same strong isolation (b) rewriting all of the memory and table instruction indices (c) generating Wasm trampolines for export-to-import connections that are internal to the flattened core wasm modules</p>\n<p>the output would still be a component and jco should be able to bind it to JS just as you can now, but there are several benefits to this approach which currently cannot be reaped:</p>\n<ul>\n<li>cross-core-module optimization right now is more difficult. statically it's not feasible for sure (wasm-opt can't even parse CM files). I don't know whether browsers or wasmtime can do cross-module optimization but I suspect the answer is no.</li>\n<li>adapting a component <em>back</em> to a core module is impossible since you need a component-aware runtime to compose the core modules within the component.</li>\n<li>code transformations on components (e.g. polyfilling runtime instantiation) are more difficult because you need to transform several modules in parallel.</li>\n<li>there are probably more</li>\n</ul>\n<p>I'm interested to work on this, but it's a fairly big task, so I'd like to know first where should I work on it (wasm-tools I assume), whether such a contribution is desired, and what are the acceptance criteria</p>\n<p>I'm personally most worried about the trampolines. I am sure I can get 80% of the way there, but nailing down every corner case of the canonical ABI is going to be extremely difficult; it is a big and complex ABI that is also new, and I am sure to run into difficulties as one of the first (the first, possibly?) non-BA engineers to attempt implementing it</p>",
+        "id": 417337549,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1705967250
+    },
+    {
+        "content": "<p>Am I understanding it right that the proposed flattening approach would likely be less cache-friendly? If I'm following, then every update would create a new flattened big blob, rather than having multiple smaller blobs which can be individually cached and invalidated? So it's trading off properties for different ones, and so we'd likely end up wanting to support both approaches?</p>",
+        "id": 417475908,
+        "sender_full_name": "Yoshua Wuyts",
+        "timestamp": 1706025257
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"684890\">Catherine (whitequark)</span> <a href=\"#narrow/stream/409526-jco/topic/Flattening.20components/near/417337549\">said</a>:</p>\n<blockquote>\n<p>I'm interested to work on this, but it's a fairly big task, so I'd like to know first where should I work on it (wasm-tools I assume), whether such a contribution is desired, and what are the acceptance criteria</p>\n</blockquote>\n<p>These sound like <span class=\"user-mention\" data-user-id=\"553681\">@Guy Bedford</span> questions to answer.</p>",
+        "id": 417475923,
+        "sender_full_name": "Yoshua Wuyts",
+        "timestamp": 1706025263
+    },
+    {
+        "content": "<blockquote>\n<p>If I'm following, then every update would create a new flattened big blob, rather than having multiple smaller blobs which can be individually cached and invalidated?</p>\n</blockquote>\n<p>Correct.</p>\n<blockquote>\n<p>So it's trading off properties for different ones, and so we'd likely end up wanting to support both approaches?</p>\n</blockquote>\n<p>Correct.</p>\n<p>My main use case for Wasm,  <a href=\"https://yowasp.org\">YoWASP</a>, ships all of the pieces together, and the main core Wasm file is something like 15 MB in size (I think this will grow up to 150 MB after I start using WASI-Virt and bundle all of the files I'm currently unconditionally downloading anyway), I'm not particularly concerned about the inability to cache the adapter and other accessory modules.</p>",
+        "id": 417489225,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706029214
+    },
+    {
+        "content": "<p>okay, that makes sense to me - thanks for clarifying!</p>",
+        "id": 417491187,
+        "sender_full_name": "Yoshua Wuyts",
+        "timestamp": 1706029840
+    },
+    {
+        "content": "<p>The reason the trampolines are needed in the first place is due to V8 not having multi-memory support. That story is changing fast though since it is now getting supported in the latest JS platforms.</p>\n<p>For those that are happy to only support the latest platforms, we could therefore add a <code>--multi-memory</code> option to <code>jco transpile</code> that could skip unnecessary adapter construction when using JCO. This work would be amazing to explore if someone is interested (looks to <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> :P)</p>\n<p><span class=\"user-mention\" data-user-id=\"684890\">@Catherine (whitequark)</span> so I think splitting up such a problem into (a) static component linking optimizations and (b) jco multi-memory support.</p>\n<p>For (a) the question then is if this is really needed and what components you are practically looking at here. For WASI-Virt in particular, if you've got an application with multiple components all using WASI-Virt we probably don't want to have them all optimized in this way --- instead, we probably want a tool that does the opposite! That can extract out the shared WASI-Virts and treat them as a shared dependency that gets instantiated for each of them somehow.</p>\n<p>All in all, theres a huge space of very very interesting problems to solve here, so hope that helps find focus as some initial feedback.</p>",
+        "id": 417509258,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1706036126
+    },
+    {
+        "content": "<blockquote>\n<p>For those that are happy to only support the latest platforms, we could therefore add a --multi-memory option to jco transpile that could skip unnecessary adapter construction when using JCO. </p>\n</blockquote>\n<p>That would be nice.</p>\n<blockquote>\n<p>The reason the trampolines are needed in the first place is due to V8 not having multi-memory support. </p>\n</blockquote>\n<p>When I said \"trampoline\" I meant \"function that transfers data from one linear memory to another\". It seems I've misused the terminology. As long as you have multiple address spaces you will need such a function, I believe, and as far as I know this isn't currently something that jco can generate, instead relying on the host Wasm engine to transfer data between modules. Correct me if I'm wrong, please.</p>\n<blockquote>\n<p>For (a) the question then is if this is really needed and what components you are practically looking at here.</p>\n</blockquote>\n<p>What I would like to have is a command component that runs another command component via something like popen(). The idea here is that toolchains often come in multiple pieces that are all UNIX commands (like gcc, having cc1 and as and ld as the subcommands) and you can't really make the whole thing work unless a driver command can call subcommands. (I work with FPGA toolchains, which are slightly different but the general idea is the same: you have a popen() or posix_spawn() call to a statically known target or at least one of a known list, and the call not reentrant, but can be made several times.)  So I'd like to be able to package the entire thing as one single WASI command, which would work on any WASI+CM host without the need to embed each piece individually.</p>\n<p>I wanted this for a long time. Actually, first I wanted to embed the auxiliary filesystem data often used by toolchains (think /usr/include) in the command, which WASI-Virt solves now. So now I'm thinking about the next stage of the process.</p>",
+        "id": 417527077,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706043474
+    },
+    {
+        "content": "<p>The reason I bring up flattening is that when working on a single core module it's much easier to polyfill e.g. a \"restart\" entry point (which lets you run a single instantiation of a command more than once) than if you're working with several interconnected core modules.</p>",
+        "id": 417527210,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706043524
+    },
+    {
+        "content": "<blockquote>\n<p>When I said \"trampoline\" I meant \"function that transfers data from one linear memory to another\". It seems I've misused the terminology. As long as you have multiple address spaces you will need such a function, I believe, and as far as I know this isn't currently something that jco can generate, instead relying on the host Wasm engine to transfer data between modules. Correct me if I'm wrong, please.</p>\n</blockquote>\n<p>Yes this isn't quite correct. JCO generates the adaptors to get around having to support multi memory. That is done in <a href=\"https://github.com/bytecodealliance/jco/blob/main/crates/js-component-bindgen/src/core.rs\">https://github.com/bytecodealliance/jco/blob/main/crates/js-component-bindgen/src/core.rs</a> which is called from <a href=\"https://github.com/bytecodealliance/jco/blob/main/crates/js-component-bindgen/src/lib.rs#L123\">https://github.com/bytecodealliance/jco/blob/main/crates/js-component-bindgen/src/lib.rs#L123</a>. Having a flag to switch it off might even be straightforward.</p>\n<p>Since running a command is just calling a <code>run()</code> function, creating a <code>run()</code> function which wraps multiple run functions in a single component, where the individual components are imported sounds like a VERY SIMPLE tool to build to me. Perhaps that's just the OSS project you need here. A component-based tool to take multiple CLIs, and define the rules for creating a \"super CLI\" that calls the appropriate one. This is component composition 101, I don't think there's anything too tricky there?</p>",
+        "id": 417528438,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1706044013
+    },
+    {
+        "content": "<blockquote>\n<p>creating a run() function which wraps multiple run functions in a single component, where the individual components are imported sounds like a VERY SIMPLE tool to build to me</p>\n</blockquote>\n<p>No that's not what I'm talking about. I'm talking about one command being able to run another (from deep within its code), while being able to set their arguments and environment, provide data on stdin and capturing data from stdout/stderr streams. That's considerably more complex and even wrapping a command so that instead of an argument-less <code>run()</code> function you have a <code>run(argv: list&lt;string&gt;, ...)</code> function isn't something that today's <code>wasm-tools compose</code> can easily do. There's also no way to run the same instantiation of a command multiple times since the start function poisons itself when it's first called and can't be invoked again. This means that something like the gcc compiler driver calling cc1 several times isn't possible to do currently by composing components.</p>",
+        "id": 417538322,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706047948
+    },
+    {
+        "content": "<p>Right, so on the simple CLI interception side, there are a few features to think about:</p>\n<ol>\n<li>Supporting multi-run CLIs, via a memory and mutable variable reset technique binary rewriting</li>\n<li>Supporting stdio hooking where it can be redirected to other streams</li>\n<li>Supporting super-calls</li>\n</ol>\n<p>Remember that the CLI is just a <code>run()</code> function. If (1) is solved, it's a function that can be called multiple times, so then it's not some posix primitive just another exported function that can be called anytime. This makes things much much simpler is what I'm getting at.</p>\n<p>For (2) the question is if you want that routing to be \"dynamic\" or \"static\". If its static and you always control the stream, WASI-Virt customization for this makes sense. But if it's dynamic, it might have to rather be part of the solution to (1) instead, properly parameterizing the execution.</p>\n<p>(3) feels like it comes fairly naturally part with (1) and (2) solved?</p>",
+        "id": 417540452,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1706048952
+    },
+    {
+        "content": "<blockquote>\n<p>Remember that the CLI is just a <code>run()</code> function</p>\n</blockquote>\n<p>I do know that. You've also just explained what I said above back to me, which I don't really appreciate. This simplicity is why I am interested in a CM or WASI-Virt based solution in the first place, compared to the solutions that are accessible to me now.</p>\n<p>(1) is straightforward to solve regardless of whether you have a single core module within a component or several of them, it's just more work in the latter case, and it seems like parsing a component is pretty involved and the libraries aren't anywhere close to being mature yet.</p>\n<p>(2) can be more difficult to solve depending on the interface chosen. My first pick was to have a \"wrapper\" component which imports run() from an inner one, exports streams to an inner one, and exports run() to an outer one, but this isn't actually possible to do with <code>wasm-tools compose</code> at the moment. Given that I've switched the strategy to exporting a number of functions like <code>set-arguments</code> and <code>set-envrionment</code>, which works but is less elegant. I think there is value in having a redirection-capable command's entry point still be just <code>run(...)</code>, which would take as arguments the environment, redirected streams, and so on, because I use Wasm to turn complex UNIX commands like compilers into pure functions, and so it's natural to have them <em>be</em> a function.</p>\n<p>(3) I am not sure what you mean by \"super-call\".</p>",
+        "id": 417548884,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706053438
+    },
+    {
+        "content": "<p>Only excited about your use case here and wanting to help, it's been really great to follow your explorations of the model. Will be more careful with tone.</p>\n<p>I suppose the streams virtualization exactly needs WASI-Virt's full streams replacements as there's no easy way to create a rerouting stream otherwise.</p>\n<p>For the use case of turning commands into pure functions, that would be a great tool to have, and it comes up a lot in the context of WASI Virt. Definitely it involves quite a bit of binary work. It would be a great addition to the WASI-Virt project or as another OSS component project though to have this kind of tooling working for arbitrary CLIs for the component model.</p>\n<p>For (3) I was meaning pretty much as in your model of creating a new CLI which internally can call pure component functions that correspond to the other CLIs, as it sounds like you are doing.</p>\n<p>Always happy to discuss framing and collaboration if/where it helps, because there is a real ability for solutions that can work widely here and be maintained to everyones benefit in the component tooling space.</p>",
+        "id": 417558775,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1706059269
+    },
+    {
+        "content": "<blockquote>\n<p>I suppose the streams virtualization exactly needs WASI-Virt's full streams replacements as there's no easy way to create a rerouting stream otherwise.</p>\n</blockquote>\n<p>Is there not? I feel like maybe there could be, but I haven't sat down and tried to write one, and you've certainly thought about this far more than I did. It seems like <code>poll</code> would be the biggest problem, but there are some cases where it's possible to wrap. For example, if you can only redirect stdin from a buffer and stdout to a buffer, you do not have any concurrency with the caller, so stdin is only readable until exhausted and stdout is always writable, and then you could just delegate to an outer <code>poll</code> for filesystem/network resources. And if you want parts of the caller to execute concurrently with the callee and stdin/stdout to be connected to code in the caller, maybe that could be integrated with the wrapper <code>poll</code> somehow, though I can't think of how to make the interface not be onerous.</p>\n<blockquote>\n<p>It would be a great addition to the WASI-Virt project or as another OSS component project though to have this kind of tooling working for arbitrary CLIs for the component model.</p>\n</blockquote>\n<p>This is something I am motivated to work on in the little free time I have, so I'll probably try to chip at the edges of this task. Do you suppose adding <code>reset</code> would be a good start?</p>",
+        "id": 417606909,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706089112
+    },
+    {
+        "content": "<p>as an aside, <span class=\"user-mention\" data-user-id=\"684890\">@Catherine (whitequark)</span>, your pushing here is extremely fascinating. You're pushing me to ponder more questions -- a real gift for me. Like Guy, I'm excited about these areas.</p>",
+        "id": 417622027,
+        "sender_full_name": "Ralph",
+        "timestamp": 1706094262
+    },
+    {
+        "content": "<p>Thanks! I think the next thing I'll release is a very raw prototype of something that packages a command into something that can be launched by another command, and then look into implementing the reset transformation. That feels foundational to most other capabilities.</p>",
+        "id": 417636157,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706099837
+    },
+    {
+        "content": "<p>I'd love to try! Let us know if you do this.....</p>",
+        "id": 417637198,
+        "sender_full_name": "Ralph",
+        "timestamp": 1706100234
+    },
+    {
+        "content": "<blockquote>\n<p>Is there not? I feel like maybe there could be, but I haven't sat down and tried to write one, and you've certainly thought about this far more than I did.</p>\n</blockquote>\n<p>The problem here is creating custom virtual streams. As long as the stream is a non-virtualized host stream, it should be possible to intercept the stdio streams with _any host stream_. But it would still have to be a host-defined stream. To fully virtualize the stream gets into the WASI-Virt problem space, which is that once you virtualize any stream you need to virtualize every single interface that uses streams.</p>\n<blockquote>\n<p>This is something I am motivated to work on in the little free time I have, so I'll probably try to chip at the edges of this task. Do you suppose adding reset would be a good start?</p>\n</blockquote>\n<p>The reset transformation involves injecting a new function into the core module, while the pure component wrapping step involves parameterizing how the CLI should be called and configuring how to expose that as a function. I think either can be done first.</p>\n<p>With regards to the virtualization, if you do want to virtualize the stdin and stdout and hit the problem of needing virtual streams, such that WASI-Virt functionality is needed, I am more than happy to take this as a WASI-Virt PR. Because this is one of the big use cases folks have for virt.</p>\n<p>Of course, no pressure at all, and only if you are interested in collaborating on it. Sometimes it's nice just to solve ones own use cases / have ones own projects too. So whatever suits you best, we are all just exploring here together.</p>",
+        "id": 417703022,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1706120697
+    },
+    {
+        "content": "<p>Maybe the virt step can even be split into two: (1) creating any virtual streams if necessary which are applied with WASI Virt, and (2) separately creating a \"wrapper\" that composes in front of the command (as opposed to WASI virt which composes as imports behind the command). (1) likely still needs some WASI Virt changes maybe? and the wrapper for (2) is something that has come up for WASI virt before, for example for virtualizing incoming HTTP.</p>\n<p>There are definitely a bunch of complexity to the composition parts here, one thing stating it all at a high level, and another doing it. There's lots of help in these channels to be found as needed, I could get a WASI Virt stream going on Zulip if it helps as well? I know <span class=\"user-mention\" data-user-id=\"509936\">@Joel Dice</span> and others have looked into some of these problems before and might have feedback to share too.</p>",
+        "id": 417705797,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1706121794
+    },
+    {
+        "content": "<p>wasi-virt is definitely an up and coming target area, for sure.</p>",
+        "id": 417966377,
+        "sender_full_name": "Ralph",
+        "timestamp": 1706131555
+    },
+    {
+        "content": "<p>WASI-Virt stream on Zulip would be great</p>\n<p>in terms of collaboration, I always prefer working with an upstream project if possible; I'm very happy to conform to the standards and culture of an existing project, especially if it's a BA one, and I do like having all of one's virtualization needs be solved in one place</p>",
+        "id": 417969173,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706132765
+    },
+    {
+        "content": "<p>Ok I've set it up at <a href=\"#narrow/stream/422794-WASI-Virt/topic/CLI.20Virtualization\">https://bytecodealliance.zulipchat.com/#narrow/stream/422794-WASI-Virt/topic/CLI.20Virtualization</a> and created a thread to continue this discussion there.</p>",
+        "id": 417969563,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1706132951
+    },
+    {
+        "content": "<p>I think I maybe don't fully understand how the output of <code>componentize</code> is structured yet. My first impression/understanding was that the four core .wasm files that are created by jco transpile when I build a YoWASP project correspond to the original wasi preview1 core file, the preview1 adapter, and then two other shims or something? I think I'll need to look closer at the output of WASI-Virt to understand exactly what's going on there</p>",
+        "id": 417969603,
+        "sender_full_name": "Catherine (whitequark)",
+        "timestamp": 1706132971
+    },
+    {
+        "content": "<p>The other two small core wasm files are the multi-memory workaround trampolines / adaptors I always forget what we call them too. Created <a href=\"https://github.com/bytecodealliance/jco/issues/356\">https://github.com/bytecodealliance/jco/issues/356</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/jco/issues/356\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/39742f85e2f97e34c452ec24a3f579b7f0d74511\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f303761613634643365363237326464376230313861313336623233653031346164323566623761313361396337346238333365653830623035386537326664652f62797465636f6465616c6c69616e63652f6a636f2f6973737565732f333536)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/jco/issues/356\" title=\"Add a `--multi-memory` transpile option · Issue #356 · bytecodealliance/jco\">Add a `--multi-memory` transpile option · Issue #356 · bytecodealliance/jco</a></div><div class=\"message_embed_description\">Now that V8 is supporting multi memory, it can be worth starting to implement this as an opt-in flag. This will involve having this flag disable the current translation process that initiates the c...</div></div></div>",
+        "id": 417970102,
+        "sender_full_name": "Guy Bedford",
+        "timestamp": 1706133196
+    },
+    {
+        "content": "<p>Chiming in here, to add a +1 to supporting <code>--multi-memory</code>. A friend and I were exploring running WASI preview 2 apps in the browser, but because browsers don't support components yet, we were trying to use use <code>jco transpile</code> naively expecting it'd give us a single core module (we didn't want to rely on the generated wrapper/trampoline code), but of course it has to split up all the components into separate modules as described above.</p>\n<p><code>--multi-memory</code> sounds like exactly what we need, and yes, I realise a single file won't cache well, and it's a bit weird to code against the WASI preview 2 API in flattened non-component form, but we're looking at this as a temporary solution to start working on a preview 2 implementation in the hope that browsers support the component model later on.</p>",
+        "id": 417998793,
+        "sender_full_name": "Katie Bell",
+        "timestamp": 1706150347
+    }
+]

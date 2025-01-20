@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>Is there any way to make WAMR allocate until it runs out of _actual_ memory? The comment on heap makes it seem like the param passed in here is some additional memory:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"o\">@</span><span class=\"n\">param</span><span class=\"w\"> </span><span class=\"n\">heap_size</span><span class=\"w\"> </span><span class=\"n\">the</span><span class=\"w\"> </span><span class=\"n\">default</span><span class=\"w\"> </span><span class=\"n\">heap</span><span class=\"w\"> </span><span class=\"n\">size</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">the</span><span class=\"w\"> </span><span class=\"n\">module</span><span class=\"w\"> </span><span class=\"n\">instance</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"n\">heap</span><span class=\"w\"> </span><span class=\"n\">will</span><span class=\"w\"></span>\n<span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\">        </span><span class=\"n\">be</span><span class=\"w\"> </span><span class=\"n\">created</span><span class=\"w\"> </span><span class=\"n\">besides</span><span class=\"w\"> </span><span class=\"n\">the</span><span class=\"w\"> </span><span class=\"n\">app</span><span class=\"w\"> </span><span class=\"n\">memory</span><span class=\"w\"> </span><span class=\"n\">space</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"n\">Both</span><span class=\"w\"> </span><span class=\"n\">wasm</span><span class=\"w\"> </span><span class=\"n\">app</span><span class=\"w\"> </span><span class=\"n\">and</span><span class=\"w\"> </span><span class=\"n\">native</span><span class=\"w\"></span>\n<span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\">        </span><span class=\"n\">function</span><span class=\"w\"> </span><span class=\"n\">can</span><span class=\"w\"> </span><span class=\"n\">allocate</span><span class=\"w\"> </span><span class=\"n\">memory</span><span class=\"w\"> </span><span class=\"n\">from</span><span class=\"w\"> </span><span class=\"n\">the</span><span class=\"w\"> </span><span class=\"n\">heap</span><span class=\"p\">.</span><span class=\"w\"></span>\n</code></pre></div>\n<p>However, I'm pretty sure it fails the assert in <code>weasm_enlarge_memory()</code> because it tries to enlarge it pass that limit.</p>",
+        "id": 240538363,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1622153154
+    },
+    {
+        "content": "<p>A good additional question is what is an app in this context? Is app the host program that embeds a wasm VM?</p>\n<p>It also mentions the default heap size. It seems like it should grow, but it doesn't.</p>",
+        "id": 240539578,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1622154096
+    },
+    {
+        "content": "<p>Even more weirdly, it fails the assert in <code>ems_kfc.c</code> at line 203 <code>    bh_assert(cur == end);</code> in <code>gc_migrate</code> in an intermitent manner, so it seems like this is something other than hitting the memory limit?</p>",
+        "id": 240540961,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1622155154
+    },
+    {
+        "content": "<p>the memory layout of WAMR likes:</p>\n<table>\n<thead>\n<tr>\n<th></th>\n<th></th>\n<th>linear memory</th>\n<th></th>\n<th></th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>data</td>\n<td>operand stack</td>\n<td>app memory</td>\n<td>heap</td>\n<td>enlarged heap</td>\n</tr>\n</tbody>\n</table>\n<ul>\n<li>data is from <em>data segments</em></li>\n<li>the <code>heap_size</code> indicates the size of  <em>app_memory</em>. <em>app_memory</em> is backup heap for WASM apps and native functions(callers of WAMR APIs). If a WASM app doesn't export <code>malloc()</code> for host embedding, embedding will allocate resource from <em>app_memory</em> and will be able to share it with the WASM app</li>\n<li>heap is the area accessed by <code>malloc()</code> of <em>WASI-LIBC</em>. </li>\n<li><code>memory.size</code> doesn't include <em>app memory</em></li>\n<li><code>memory.grow</code> will only change <em>heap</em></li>\n</ul>",
+        "id": 241113777,
+        "sender_full_name": "lum1n0us",
+        "timestamp": 1622618763
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"298375\">@Alexandru Ene</span> if you want to make WAMR allocate until out of actual memory, there are several ways:<br>\n(1) Set the maximum size for wasm app's linear memory, e.g. for wasi-sdk or emcc, add -Wl,--max-memory=value option;<br>\n(2) Init the runtime memory allocator with pool mode (Alloc_With_Pool), provide a global heap buffer for runtime to allocate memory from it but not from system memory. For example, you can set macro USE_GLOBAL_HEAP_BUF to 1 in product-mini/platforms/linux/main.c to enable it. Ref to document of wasm_runtime_full_init and RuntimeInitArgs for more details.</p>\n<p>And you want to disable the app memory (app heap with ems memory allocator), please export the malloc/free function, e.g. for wasi-sdk and emcc, add -Wl,--export=malloc -Wl,--export=free, so the wasm_runtime_module_malloc from native will allocate memory from the libc's heap.</p>",
+        "id": 241344375,
+        "sender_full_name": "Wenyong Huang",
+        "timestamp": 1622690001
+    },
+    {
+        "content": "<p>This is really useful. I have found that setting the heap size to various sizes has helped avoid the problem I describe with that assertion triggering. Is there a requirement that the heap size to be a multiple of X? I didn't see anything written down, but the same WASM code works with a heap size of 16*1024 but not 512 * 1024 (or some larger value but I don't remember what I tried at the time).</p>\n<p>I didn't make use of the WAMR heap at all, the code just did some normal allocations in the WASM module itself.</p>",
+        "id": 241429826,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1622743511
+    },
+    {
+        "content": "<p>I will set some time aside, put some breakpoints and figure out what's happening. I didn't have time to root cause what was triggering that assert. Thanks for the explanations!</p>",
+        "id": 241437725,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1622747195
+    },
+    {
+        "content": "<p>If wasm app doesn't export malloc/free function, the app heap will be inserted into linear memory, which enlarges the __heap_base global of libc heap if it is exported or enlarges the initial linear memory size to reserve enough memory space for the app heap. The app heap will be initialized when setting up the linear memory space, also the libc heap will be initialized when the wasm app starts by special wasm function, e.g. the _start function. And the initialization of the libc heap depends on the value __heap_base global, unfortunately, the wasm-sdk compiler doesn't generate the bytecode to read the __heap_base global value (e.g. global.get __heap_base), it just hardcodes the initial constant value of __heap_base in the bytecode, so the initialization of libc heap may overwritten the data in the app heap, in other words, the app heap might be corrupted. And when runtime detects the app heap is corrupted, it reports \"out of memory\" when allocating memory from app heap.</p>\n<p>So please had better use only one of them: only enable app heap, and disable libc heap, for example, hack wasi-sdk's libc.a, remove dlmalloc.o from it; or only enable libc heap by export malloc/free function for runtime, so native side can use wasm_runtime_module_malloc to allocate memory from libc heap.</p>",
+        "id": 242014498,
+        "sender_full_name": "Wenyong Huang",
+        "timestamp": 1623209718
+    },
+    {
+        "content": "<p>Right, so I think what confused me is that i was using <code>wasm_engine_new</code> that allocates with system malloc from what i see in the implementation, but then, <code>wasm_runtime_instantiate</code> has a heap value that one could provide:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">wasm_runtime_instantiate</span><span class=\"p\">(</span><span class=\"n\">WASMModuleCommon</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">module</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                         </span><span class=\"n\">uint32</span><span class=\"w\"> </span><span class=\"n\">stack_size</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">uint32</span><span class=\"w\"> </span><span class=\"n\">heap_size</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                         </span><span class=\"kt\">char</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">error_buf</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">uint32</span><span class=\"w\"> </span><span class=\"n\">error_buf_size</span><span class=\"p\">)</span><span class=\"w\"></span>\n</code></pre></div>\n<p>So this made unclear to me what the correct way would be to use that parameter. It seems that this setup is correct:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">wasm_engine_new</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"n\">wasm_runtime_instantiate</span><span class=\"p\">(</span><span class=\"n\">module</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">SOME_STACK_SIZE</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"cm\">/*heap size*/</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">buff</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">buff_size</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n<p>I wonder how I could add <code>-Wl,--export=malloc -Wl,--export=free</code> for a rust program. It should probably be somewhere in linker args.</p>",
+        "id": 242057503,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1623242108
+    },
+    {
+        "content": "<p>Actually now that I wrote that I think i can just export it manually and forward the call to some memory allocator in the rust side  of the wasm code)</p>",
+        "id": 242059198,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1623242992
+    },
+    {
+        "content": "<p>There are two types of data: (1) the runtime internal data, e.g. wasm module, wasm module instance, wasm function instance, (2) the wasm app internal data. So there there are two memory allocator(or two heaps): one is for runtime internal data, we usually call it global heap or global memory allocator, the other is for wasm app internal data, we usually call it app private heap or app private memory allocator.</p>\n<p>For the global memory allocator, runtime provides three modes to initialize it: (1) allocate memory from a global buffer provided by runtime embedder, (2) allocate from the system allocator, or os_malloc function implemented in core/shared/platform layer, (3) allocate from the memory allocate function provided by runtime embedder.  Ref to wasm_runtime_full_init and RuntimeInitArgs in core/iwasm/include/wasm_export.h for more details. And the runtime embedder can call wasm_runtime_malloc to allocate memory from the global memory allocator.<br>\nSo the wasm_engine_new here initializes the global memory allocator, the mode is system allocator, meaning to use os_malloc to allocate the memory.</p>\n<p>For the app private memory allocator, as explained upper, there might be two memory allocators also, (1) one is initialized by runtime with wasm_runtime_instantiate(..heap_size..), we usually call it app heap, which is ungrowable, (2) the other is initialized by wasm app itself, e.g. libc's malloc func, typescript's __new func, we usually call it libc heap, which is usually growable.  And if malloc/free or __new/__release functions are exported, runtime won't create app heap, the wasm_runtime_module_malloc func allocates memory from the export malloc or __new func. If not exported, runtime inserts and initializes app heap according to __heap_base or the linear memory page count, the wasm_runtime_module_malloc allocates memory from the app heap inserted.</p>\n<p>For the rust program, no malloc related function is exported, but __heap_base global is exported, wasm runtime inserts and initializes the app heap successfully, and wasm_runtime_module_malloc works. From our testing, the rust application works well. Do you have any issues in running rust program?</p>",
+        "id": 242290206,
+        "sender_full_name": "Wenyong Huang",
+        "timestamp": 1623373664
+    },
+    {
+        "content": "<p>No, now it works just fine, I was just trying to understand more about how memory works. This is really useful.</p>",
+        "id": 242318892,
+        "sender_full_name": "Alexandru Ene",
+        "timestamp": 1623402617
+    }
+]

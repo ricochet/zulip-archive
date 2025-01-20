@@ -1,0 +1,202 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / PR #4501 Add initial support for fused adapter... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html">wasmtime / PR #4501 Add initial support for fused adapter...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="290423650"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290423650" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290423650">(Jul 21 2022 at 19:35)</a>:</h4>
+<p>alexcrichton opened <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a> from <code>trampoline-compiler</code> to <code>main</code>:</p>
+<blockquote>
+<p>This commit lands a significant new piece of functionality to Wasmtime's<br>
+implementation of the component model in the form of the implementation<br>
+of fused adapter trampolines. Internally within a component core wasm<br>
+modules can communicate with each other by having their exports<br>
+<code>canon lift</code>'d to get <code>canon lower</code>'d into a different component. This<br>
+signifies that two components are communicating through a statically<br>
+known interface via the canonical ABI at this time. Previously Wasmtime<br>
+was able to identify that this communication was happening but it simply<br>
+panicked with <code>unimplemented!</code> upon seeing it. This commit is the<br>
+beginning of filling out this panic location with an actual<br>
+implementation.</p>
+<p>The implementation route chosen here for fused adapters is to use a<br>
+WebAssembly module itself for the implementation. This means that, at<br>
+compile time of a component, Wasmtime is generating core WebAssembly<br>
+modules which then get recursively compiled within Wasmtime as well. The<br>
+choice to use WebAssembly itself as the implementation of fused adapters<br>
+stems from a few motivations:</p>
+<ul>
+<li>
+<p>This does not represent a significant increase in the "trusted<br>
+  compiler base" of Wasmtime. Getting the Wasm -&gt; CLIF translation<br>
+  correct once is hard enough much less for an entirely different IR to<br>
+  CLIF. By generating WebAssembly no new interactions with Cranelift are<br>
+  added which drastically reduces the possibilities for mistakes.</p>
+</li>
+<li>
+<p>Using WebAssembly means that component adapters are insulated from<br>
+  miscompilations and mistakes. If something goes wrong it's defined<br>
+  well within the WebAssembly specification how it goes wrong and what<br>
+  happens as a result. This means that the "blast zone" for a wrong<br>
+  adapter is the component instance but not the entire host itself.<br>
+  Accesses to linear memory are guaranteed to be in-bounds and otherwise<br>
+  handled via well-defined traps.</p>
+</li>
+<li>
+<p>A fully-finished fused adapter compiler is expected to be a<br>
+  significant and quite complex component of Wasmtime. Functionality<br>
+  along these lines is expected to be needed for Web-based polyfills of<br>
+  the component model and by using core WebAssembly it provides the<br>
+  opportunity to share code between Wasmtime and these polyfills for the<br>
+  component model.</p>
+</li>
+<li>
+<p>Finally the runtime implementation of managing WebAssembly modules is<br>
+  already implemented and quite easy to integrate with, so representing<br>
+  fused adapters with WebAssembly results in very little extra support<br>
+  necessary for the runtime implementation of instantiating and managing<br>
+  a component.</p>
+</li>
+</ul>
+<p>The compiler added in this commit is dubbed Wasmtime's Fused Adapter<br>
+Compiler of Trampolines (FACT) because who doesn't like deriving a name<br>
+from an acronym. Currently the trampoline compiler is limited in its<br>
+support for interface types and only supports a few primitives. I plan<br>
+on filing future PRs to flesh out the support here for all the variants<br>
+of <code>InterfaceType</code>. For now this PR is primarily focused on all of the<br>
+other infrastructure for the addition of a trampoline compiler.</p>
+<p>With the choice to use core WebAssembly to implement fused adapters it<br>
+means that adapters need to be inserted into a module. Unfortunately<br>
+adapters cannot all go into a single WebAssembly module because adapters<br>
+themselves have dependencies which may be provided transitively through<br>
+instances that were instantiated with other adapters. This means that a<br>
+significant chunk of this PR (<code>adapt.rs</code>) is dedicated to determining<br>
+precisely which adapters go into precisely which adapter modules. This<br>
+partitioning process attempts to make large modules wherever it can to<br>
+cut down on core wasm instantiations but is likely not optimal as<br>
+it's just a simple heuristic today.</p>
+<p>With all of this added together it's now possible to start writing<br>
+<code>*.wast</code> tests that internally have adapted modules communicating with<br>
+one another. A <code>fused.wast</code> test suite was added as part of this PR<br>
+which is the beginning of tests for the support of the fused adapter<br>
+compiler added in this PR. Currently this is primarily testing some<br>
+various topologies of adapters along with direct/indirect modes. This<br>
+will grow many more tests over time as more types are supported.</p>
+<p>Overall I'm not 100% satisfied with the testing story of this PR. When a<br>
+test fails it's very difficult to debug since everything is written in<br>
+the text format of WebAssembly meaning there's no "conveniences" to<br>
+print out the state of the world when things go wrong and easily debug.<br>
+I think this will become even more apparent as more tests are written<br>
+for more types in subsequent PRs. At this time though I know of no<br>
+better alternative other than leaning pretty heavily on fuzz-testing to<br>
+ensure this is all exercised.</p>
+<p>&lt;!--</p>
+<p>Please ensure that the following steps are all taken care of before submitting<br>
+the PR.</p>
+<ul>
+<li>
+<p>[ ] This has been discussed in issue #..., or if not, please tell us why<br>
+  here.</p>
+</li>
+<li>
+<p>[ ] A short description of what this does, why it is needed; if the<br>
+  description becomes long, the matter should probably be discussed in an issue<br>
+  first.</p>
+</li>
+<li>
+<p>[ ] This PR contains test cases, if meaningful.</p>
+</li>
+<li>[ ] A reviewer from the core maintainer team has been assigned for this PR.<br>
+  If you don't know who could review this, please indicate so. The list of<br>
+  suggested reviewers on the right can help you.</li>
+</ul>
+<p>Please ensure all communication adheres to the <a href="https://github.com/bytecodealliance/wasmtime/blob/master/CODE_OF_CONDUCT.md">code of
+conduct</a>.<br>
+--&gt;<br>
+</p>
+</blockquote>
+
+
+
+<a name="290423651"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290423651" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290423651">(Jul 21 2022 at 19:35)</a>:</h4>
+<p><strong>alexcrichton</strong> requested <a href="https://github.com/fitzgen">fitzgen</a> for a review on <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a>.</p>
+
+
+
+<a name="290424689"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290424689" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290424689">(Jul 21 2022 at 19:44)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a> from <code>trampoline-compiler</code> to <code>main</code>.</p>
+
+
+
+<a name="290426800"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290426800" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290426800">(Jul 21 2022 at 20:03)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a> from <code>trampoline-compiler</code> to <code>main</code>.</p>
+
+
+
+<a name="290539444"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290539444" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290539444">(Jul 22 2022 at 17:06)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a> from <code>trampoline-compiler</code> to <code>main</code>.</p>
+
+
+
+<a name="290800739"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290800739" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290800739">(Jul 25 2022 at 18:37)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a> from <code>trampoline-compiler</code> to <code>main</code>.</p>
+
+
+
+<a name="290811217"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290811217" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290811217">(Jul 25 2022 at 20:04)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4501#pullrequestreview-1049986750">PR review</a>.</p>
+
+
+
+<a name="290811218"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290811218" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290811218">(Jul 25 2022 at 20:04)</a>:</h4>
+<p>fitzgen submitted <a href="https://github.com/bytecodealliance/wasmtime/pull/4501#pullrequestreview-1049986750">PR review</a>.</p>
+
+
+
+<a name="290811219"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290811219" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290811219">(Jul 25 2022 at 20:04)</a>:</h4>
+<p>fitzgen created <a href="https://github.com/bytecodealliance/wasmtime/pull/4501#discussion_r929246227">PR review comment</a>:</p>
+<blockquote>
+<p>*imports</p>
+</blockquote>
+
+
+
+<a name="290822660"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290822660" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290822660">(Jul 25 2022 at 21:44)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a> from <code>trampoline-compiler</code> to <code>main</code>.</p>
+
+
+
+<a name="290823060"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290823060" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290823060">(Jul 25 2022 at 21:48)</a>:</h4>
+<p>alexcrichton updated <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a> from <code>trampoline-compiler</code> to <code>main</code>.</p>
+
+
+
+<a name="290823067"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290823067" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290823067">(Jul 25 2022 at 21:48)</a>:</h4>
+<p>alexcrichton has enabled auto merge for <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a>.</p>
+
+
+
+<a name="290831040"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20PR%20%234501%20Add%20initial%20support%20for%20fused%20adapter.../near/290831040" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20PR.20.234501.20Add.20initial.20support.20for.20fused.20adapter.2E.2E.2E.html#290831040">(Jul 25 2022 at 23:13)</a>:</h4>
+<p>alexcrichton merged <a href="https://github.com/bytecodealliance/wasmtime/pull/4501">PR #4501</a>.</p>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

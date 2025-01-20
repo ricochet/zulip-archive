@@ -1,0 +1,398 @@
+[
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/dicej\">dicej</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428014409,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710968256
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/alexcrichton\">alexcrichton</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428014410,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710968256
+    },
+    {
+        "content": "<p>fitzgen opened <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a> from <code>fitzgen:i31ref</code> to <code>bytecodealliance:main</code>:</p>\n<blockquote>\n<p>This is still a WIP. I think architecture and everything is there, although there are certain things to improve upon still, like the pooling allocator integration and the question of who allocates the memory used in a GC heap, but I think that can happen in follow up PRs. The big thing is that there are still some tests failing, a bunch new tests that need to be written, and at least one blocker (<a href=\"https://github.com/bytecodealliance/wasmtime/issues/8180\">https://github.com/bytecodealliance/wasmtime/issues/8180</a>) to be fixed. Also I need to rebase, which will be fun given all the churn related to tables recently. However, this is big enough that I think those things can happen in parallel with review on the main bits and the architecture and all that.</p>\n<hr>\n<h3>The <code>GcRuntime</code> and <code>GcCompiler</code> Traits</h3>\n<p>This commit factors out the details of the garbage collector away from the rest of the runtime and the compiler. It does this by introducing two new traits, very similar to a subset of [those proposed in the Wasm GC RFC], although not all equivalent functionality has been added yet because Wasmtime doesn't support, for example, GC structs yet:</p>\n<p>[those proposed in the Wasm GC RFC]: <a href=\"https://github.com/bytecodealliance/rfcs/blob/main/accepted/wasm-gc.md#defining-the-pluggable-gc-interface\">https://github.com/bytecodealliance/rfcs/blob/main/accepted/wasm-gc.md#defining-the-pluggable-gc-interface</a></p>\n<ol>\n<li>\n<p>The <code>GcRuntime</code> trait: This trait defines how to create new GC heaps, run collections within them, and execute the various GC barriers the collector requires.</p>\n<p>Rather than monomorphize all of Wasmtime on this trait, we use it as a dynamic trait object. This does imply some virtual call overhead and missing some inlining (and resulting post-inlining) optimization opportunities. However, it is <em>much</em> less disruptive to the existing embedder API, results in a cleaner embedder API anyways, and we don't believe that VM runtime/embedder code is on the hot path for working with the GC at this time anyways (that would be the actual Wasm code, which has inlined GC barriers and direct calls and all of that). In the future, once we have optimized enough of the GC that such code is ever hot, we have options we can investigate at that time to avoid these dynamic virtual calls, like only enabling one single collector at build time and then creating a static type alias like <code>type TheOneGcImpl = ...;</code> based on the compile time configuration, and using this type alias in the runtime rather than a dynamic trait object.</p>\n<p>The <code>GcRuntime</code> trait additionally defines a method to reset a GC heap, for use by the pooling allocator. This allows reuse of GC heaps across different stores. This integration is very rudimentary at the moment, and is missing all kinds of configuration knobs that we should have before deploying Wasm GC in production. This commit is large enough as it is already! Ideally, in the future, I'd like to make it so that GC heaps receive their memory region, rather than allocate/reserve it themselves, and let each slot in the pooling allocator's memory pool be <em>either</em> a linear memory or a GC heap. This would unask various capacity planning questions such as \"what percent of memory capacity should we dedicate to linear memories vs GC heaps?\". It also seems like basically all the same configuration knobs we have for linear memories apply equally to GC heaps (see also the \"Indexed Heaps\" section below).</p>\n</li>\n<li>\n<p>The <code>GcCompiler</code> trait: This trait defines how to emit CLIF that implements GC barriers for various operations on GC-managed references. The Rust code calls into this trait dynamically via a trait object, but since it is customizing the CLIF that is generated for Wasm code, the Wasm code itself is not making dynamic, indirect calls for GC barriers. The <code>GcCompiler</code> implementation can inline the parts of GC barrier that it believes should be inline, and leave out-of-line calls to rare slow paths.</p>\n</li>\n</ol>\n<p>All that said, there is still only a single implementation of each of these traits: the existing deferred reference-counting (DRC) collector. So there is a bunch of code motion in this commit as the DRC collector was further isolated from the rest of the runtime and moved to its own submodule. That said, this was not <em>purely</em> code motion (see \"Indexed Heaps\" below) so it is worth not simply skipping over the DRC collector's code in review.</p>\n<h3>Indexed Heaps</h3>\n<p>This commit does bake in a couple assumptions that must be shared across all collector implementations, such as a shared <code>VMGcHeader</code> that all objects allocated within a GC heap must begin with, but the most notable and far-reaching of these assumptions is that all collectors will use \"indexed heaps\".</p>\n<p>What we are calling indexed heaps are basically the three following invariants:</p>\n<ol>\n<li>\n<p>All GC heaps will be a single contiguous region of memory, and all GC objects will be allocated within this region of memory. The collector may ask the system allocator for additional memory, e.g. to maintain its free lists, but GC objects themselves will never be allocated via <code>malloc</code>.</p>\n</li>\n<li>\n<p>A pointer to a GC-managed object (i.e. a <code>VMGcRef</code>) is a 32-bit offset into the GC heap's contiguous region of memory. We never hold raw pointers to GC objects (although, of course, we have to compute them and use them temporarily when actually accessing objects). This means that deref'ing GC pointers is equivalent to deref'ing linear memory pointers: we need to add a base and we also check that the GC pointer/index is within the bounds of the GC heap. Furthermore, compressing 64-bit pointers into 32 bits is a fairly common technique among high-performance GC implementations[^compressed-oops][^v8-ptr-compression] so we are in good company.</p>\n</li>\n<li>\n<p>Anything stored inside the GC heap is untrusted. Even each GC reference that is an element of an <code>(array (ref any))</code> is untrusted, and bounds checked on access. This means that, for example, we do not store the raw pointer to an <code>externref</code>'s host object inside the GC heap. Instead an <code>externref</code> now stores an ID that can be used to index into a side table in the store that holds the actual <code>Box&lt;dyn Any&gt;</code> host object, and accessing that side table is always checked.</p>\n</li>\n</ol>\n<p>[^compressed-oops]: See <a href=\"https://wiki.openjdk.org/display/HotSpot/CompressedOops\">\"Compressed OOPs\" in\n    OpenJDK.</a></p>\n<p>[^v8-ptr-compression]: See <a href=\"https://v8.dev/blog/pointer-compression\">V8's pointer\n    compression</a>.</p>\n<p>The good news with regards to all the bounds checking that this scheme implies is that we can use all the same virtual memory tricks that linear memories use to omit explicit bounds checks. Additionally, (2) means that the sizes of GC objects is that much smaller (and therefore that much more cache friendly) because they are only holding onto 32-bit, rather than 64-bit, references to other GC objects. (We can, in the future, support GC heaps up to 16GiB in size without losing 32-bit GC pointers by taking advantage of <code>VMGcHeader</code> alignment and storing aligned indices rather than byte indices, while still leaving the bottom bit available for tagging as an <code>i31ref</code> discriminant. Should we ever need to support even larger GC heap capacities, we could go to full 64-bit references, but we would need explicit bounds checks.)</p>\n<p>The biggest benefit of indexed heaps is that, because we are (explicitly or implicitly) bounds checking GC heap accesses, and because we are not otherwise trusting any data from inside the GC heap, we greatly reduce how badly things can go wrong in the face of collector bugs and GC heap corruption. We are essentially sandboxing the GC heap region, the same way that linear memory is a sandbox. GC bugs could lead to the guest program accessing the wrong GC object, or getting garbage data from within the GC heap. But only garbage data from within the GC heap, never outside it. The worse that could happen would be if we decided not to zero out GC heaps between reuse across stores (which is a valid trade off to make, since zeroing a GC heap is a defense-in-depth technique similar to zeroing a Wasm stack and not semantically visible in the absence of GC bugs) and then a GC bug would allow the current Wasm guest to read old GC data from the old Wasm guest that previously used this GC heap. But again, it could never access host data.</p>\n<p>Taken altogether, this allows for collector implementations that are nearly free from <code>unsafe</code> code, and unsafety can otherwise be targeted and limited in scope, such as interactions with JIT code. Most importantly, we do not have to maintain critical invariants across the whole system -- invariants which can't be nicely encapsulated or abstracted -- to preserve memory safety. Such holistic invariants that refuse encapsulation are otherwise generally a huge safety problem with GC implementations.</p>\n<h3><code>VMGcRef</code> is <em>NOT</em> <code>Clone</code> or <code>Copy</code> Anymore</h3>\n<p><code>VMGcRef</code> used to be <code>Clone</code> and <code>Copy</code>. It is not anymore. The motivation here was to be sure that I was actually calling GC barriers at all the correct places. I couldn't be sure before. Now, you can still explicitly copy a raw GC reference without running GC barriers if you need to and understand why that's okay (aka you are implementing the collector), but that is something you have to opt into explicitly by calling <code>unchecked_copy</code>. The default now is that you can't just copy the reference, and instead call an explicit <code>clone</code> method (not <em>the</em> <code>Clone</code> trait, because we need to pass in the GC heap context to run the GC barriers) and it is hard to forget to do that accidentally. This resulted in a pretty big amount of churn, but I am wayyyyyy more confident that the correct GC barriers are called at the correct times now than I was before.</p>\n<h3><code>i31ref</code></h3>\n<p>I started this commit by trying to add <code>i31ref</code> support. And it grew into the whole traits interface because I found that I needed to abstract GC barriers into helpers anyways to avoid running them <br>\n[message truncated]</p>\n</blockquote>",
+        "id": 428014413,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710968257
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/cfallin\">cfallin</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428014414,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710968257
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-compiler-reviewers\">wasmtime-compiler-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428014415,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710968257
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-core-reviewers\">wasmtime-core-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428014416,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710968257
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-default-reviewers\">wasmtime-default-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428014417,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710968257
+    },
+    {
+        "content": "<p>github-actions[bot] <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#issuecomment-2010693809\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>:</p>\n<blockquote>\n<h4>Subscribe to Label Action</h4>\n<p>cc @fitzgen</p>\n<p>&lt;details&gt;<br>\nThis issue or pull request has been labeled: \"cranelift\", \"cranelift:wasm\", \"fuzzing\"</p>\n<p>Thus the following users have been cc'd because of the following labels:</p>\n<ul>\n<li>fitzgen: fuzzing</li>\n</ul>\n<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>\n<p><a href=\"https://github.com/bytecodealliance/subscribe-to-label-action\">Learn more.</a><br>\n&lt;/details&gt;</p>\n</blockquote>",
+        "id": 428020541,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1710971065
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428336162,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711116120
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1955314504\">PR review</a>.</p>",
+        "id": 428373475,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711126667
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1535900999\">PR review comment</a>:</p>\n<blockquote>\n<p>This I think is accidentally doubling the size of the table</p>\n</blockquote>",
+        "id": 428373477,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711126667
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428397740,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711136060
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428414994,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711144562
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 428415237,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711144690
+    },
+    {
+        "content": "<p>dicej submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1953103452\">PR review</a>:</p>\n<blockquote>\n<p>Looks great!  I'm excited to see this move forward.</p>\n<p>Please see a few inline comments and suggestions.  The only one that might be a blocker is the cast from a pointer to a 64-bit value to a pointer to a 32-bit value due to endianness concerns.  Based on our earlier conversation, sounds like you're planning to get rid of that anyway.</p>\n</blockquote>",
+        "id": 429445994,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>dicej submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1953103452\">PR review</a>:</p>\n<blockquote>\n<p>Looks great!  I'm excited to see this move forward.</p>\n<p>Please see a few inline comments and suggestions.  The only one that might be a blocker is the cast from a pointer to a 64-bit value to a pointer to a 32-bit value due to endianness concerns.  Based on our earlier conversation, sounds like you're planning to get rid of that anyway.</p>\n</blockquote>",
+        "id": 429445995,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>dicej created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1535896563\">PR review comment</a>:</p>\n<blockquote>\n<p>See above regarding wording.</p>\n</blockquote>",
+        "id": 429445997,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>dicej created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1535895357\">PR review comment</a>:</p>\n<blockquote>\n<p>Can we clarify the wording here given the r64/NonZeroU32 duality?</p>\n</blockquote>",
+        "id": 429445998,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>dicej created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537652097\">PR review comment</a>:</p>\n<blockquote>\n<p>The phrasing in this comment is slightly confusing (\"will no longer be true\", yet the value currently returned is <code>false</code>).  Perhaps something like \"Once we support concrete struct and array types, we'll need to look at the payload to determine whether the type is GC-managed.\"</p>\n</blockquote>",
+        "id": 429445999,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>dicej created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537680476\">PR review comment</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\" data-code-language=\"suggestion\"><pre><span></span><code>    /// will lead to general incorrectness such as panics or wrong results.\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 429446000,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>dicej created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1534449521\">PR review comment</a>:</p>\n<blockquote>\n<p>Should there be pseudo-code here to update the bump region <code>next</code> position? </p>\n</blockquote>",
+        "id": 429446001,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>dicej created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1535877227\">PR review comment</a>:</p>\n<blockquote>\n<p>Replace this cast (from ptr to 64-bit value to ptr to 32-bit value) with something safer/portable.</p>\n</blockquote>",
+        "id": 429446002,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>dicej created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537720708\">PR review comment</a>:</p>\n<blockquote>\n<p>See my review comment for crates/types/src/lib.rs above.</p>\n</blockquote>",
+        "id": 429446005,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711381783
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958286823\">PR review</a>.</p>",
+        "id": 429469816,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711386895
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958286823\">PR review</a>.</p>",
+        "id": 429469817,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711386895
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537929554\">PR review comment</a>:</p>\n<blockquote>\n<p>Yeah I think we want to keep <code>Store</code> allocation infallible if we can, so I think it'd be best to defer fallible work to when it's required rather than needing the unwrap here.</p>\n</blockquote>",
+        "id": 429469818,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711386896
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537927018\">PR review comment</a>:</p>\n<blockquote>\n<p>If this <code>catch_unwind</code> is only here to restore <code>instances</code>, can this be done with a <code>Drop</code> rather than catching unwind?</p>\n</blockquote>",
+        "id": 429469821,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711386896
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537921675\">PR review comment</a>:</p>\n<blockquote>\n<p>Isn't the <code>TODO</code> here still applicable? Shouldn't funcrefs do the contra/covariance thing?</p>\n</blockquote>",
+        "id": 429469823,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711386896
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1537934748\">PR review comment</a>:</p>\n<blockquote>\n<p>To avoid new/new_async, could the auto-gc here be pushed up to the caller, e.g. communicated through the <code>Result</code>?</p>\n</blockquote>",
+        "id": 429469824,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711386896
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958733360\">PR review</a>.</p>",
+        "id": 429505911,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711399092
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1538206725\">PR review comment</a>:</p>\n<blockquote>\n<p>To clarify, you mean define a new error type like <code>GcHeapOutOfMemory</code> and return that, allowing callers to decide whether they want to do a GC and try again, rather than automatically doing a GC on their behalf?</p>\n</blockquote>",
+        "id": 429505912,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711399092
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958758927\">PR review</a>.</p>",
+        "id": 429507872,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711399937
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1538223763\">PR review comment</a>:</p>\n<blockquote>\n<p>I guess the original TODO, in the context of the typed function references proposal which did not introduce function type subtyping, is resolved since we have canonicalized types at this point now. But we have a new TODO for Wasm GC, which introduces function type subtyping, to do subtyping checks. I can add this second TODO.</p>\n</blockquote>",
+        "id": 429507874,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711399938
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1958805687\">PR review</a>.</p>",
+        "id": 429513211,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711401627
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1538253947\">PR review comment</a>:</p>\n<blockquote>\n<p>Indeed!</p>\n</blockquote>",
+        "id": 429513212,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711401627
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 429517671,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711403670
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 429685005,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711467888
+    },
+    {
+        "content": "<p>fitzgen submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1960879556\">PR review</a>.</p>",
+        "id": 429686218,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711468207
+    },
+    {
+        "content": "<p>fitzgen created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1539537241\">PR review comment</a>:</p>\n<blockquote>\n<p>Hm actually I'm not sure how this would work, because if the <code>externref</code> allocation fails, we need to give the host value back to the caller. We could stuff it back into the <code>GcHeapOutOfMemory</code> error, but then we would need a type parameter on the error type, and things start to get pretty funky. Not completely unworkable, but pretty funky. And then we need a different error type for non-<code>externref</code> errors that don't have a host value to return to the caller on OOM.</p>\n<p>Do you still think it is worth pursuing this?</p>\n</blockquote>",
+        "id": 429686219,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711468207
+    },
+    {
+        "content": "<p>alexcrichton submitted <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#pullrequestreview-1961512294\">PR review</a>.</p>",
+        "id": 429724354,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711481094
+    },
+    {
+        "content": "<p>alexcrichton created <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#discussion_r1539972756\">PR review comment</a>:</p>\n<blockquote>\n<p>Personally if you're ok with it I'd prefer to stick to the route of a custom error, basicaly <code>pub GcHeapOutOfMemory&lt;T&gt;(pub T)</code>. Otherwise I'd fear that there's little chance of embedders remembering to use <code>new_async</code> vs <code>new</code></p>\n</blockquote>",
+        "id": 429724355,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711481094
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 429960781,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711579125
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430015655,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711613767
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430016824,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711614291
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430020877,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711615850
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430031023,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1711619576
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430663468,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712005472
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430684092,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712016593
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430793176,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712065325
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430855376,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712084687
+    },
+    {
+        "content": "<p>fitzgen has enabled auto merge for <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430855486,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712084739
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430867354,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712089481
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430868822,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712090102
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430870322,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712090734
+    },
+    {
+        "content": "<p><strong>fitzgen</strong> requested <a href=\"https://github.com/orgs/bytecodealliance/teams/wasmtime-fuzz-reviewers\">wasmtime-fuzz-reviewers</a> for a review on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430874986,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712092503
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430874988,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712092503
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430878993,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712094111
+    },
+    {
+        "content": "<p>fitzgen has enabled auto merge for <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 430879007,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712094117
+    },
+    {
+        "content": "<p>github-actions[bot] <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196#issuecomment-2033150934\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>:</p>\n<blockquote>\n<h4>Subscribe to Label Action</h4>\n<p>cc @peterhuene</p>\n<p>&lt;details&gt;<br>\nThis issue or pull request has been labeled: \"wasmtime:c-api\"</p>\n<p>Thus the following users have been cc'd because of the following labels:</p>\n<ul>\n<li>peterhuene: wasmtime:c-api</li>\n</ul>\n<p>To subscribe or unsubscribe from this label, edit the &lt;code&gt;.github/subscribe-to-label.json&lt;/code&gt; configuration file.</p>\n<p><a href=\"https://github.com/bytecodealliance/subscribe-to-label-action\">Learn more.</a><br>\n&lt;/details&gt;</p>\n</blockquote>",
+        "id": 430879454,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712094275
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 431146239,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712166792
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 431155444,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712170571
+    },
+    {
+        "content": "<p>fitzgen has enabled auto merge for <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 431155466,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712170580
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 431188473,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712183490
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 431192495,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712185490
+    },
+    {
+        "content": "<p>fitzgen updated <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 431197539,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712188710
+    },
+    {
+        "content": "<p>fitzgen merged <a href=\"https://github.com/bytecodealliance/wasmtime/pull/8196\">PR #8196</a>.</p>",
+        "id": 431203231,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1712192581
+    }
+]

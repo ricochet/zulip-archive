@@ -1,0 +1,381 @@
+<html>
+<head><meta charset="utf-8"><title>wasmtime / Issue #1911 C API: retrieve host context value... · git-wasmtime · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/index.html">git-wasmtime</a></h2>
+<h3>Topic: <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html">wasmtime / Issue #1911 C API: retrieve host context value...</a></h3>
+
+<hr>
+
+<base href="https://bytecodealliance.zulipchat.com">
+
+<head><link href="https://bytecodealliance.github.io/zulip-archive/style.css" rel="stylesheet"></head>
+
+<a name="201690249"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201690249" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201690249">(Jun 23 2020 at 06:00)</a>:</h4>
+<p>thibaultcha opened <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>Hello!</p>
+<p>Lately, I have been pondering about something stumbling me in the C API. From my understanding of it, I seem to either be facing some limitation in the C API or to be having some misconceptions about what the most efficient way of using it would be. I am also not sure if this discussion belongs here or ultimately to the <a href="https://github.com/WebAssembly/wasm-c-api">https://github.com/WebAssembly/wasm-c-api</a> repository, but I thought that here would be a better starting point.</p>
+<p>The use-case at hand is: in my host functions callbacks (<code>wasmtime_func_callback_with_env_t</code>), I'd like to retrieve some context values from my (event-driven) host application.</p>
+<h2>Example</h2>
+<p>Below are some extracts from my embedding, which is using the Linker:</p>
+<ol>
+<li>With said Linker, we can define host functions for future imports:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">func</span> <span class="o">=</span> <span class="n">wasmtime_func_new_with_env</span><span class="p">(</span><span class="n">store</span><span class="p">,</span> <span class="n">functype</span><span class="p">,</span> <span class="n">my_host_func</span><span class="p">,</span> <span class="n">ptr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+<span class="n">wasmtime_linker_define</span><span class="p">(</span><span class="n">linker</span><span class="p">,</span> <span class="n">module_name</span><span class="p">,</span> <span class="n">func_name</span><span class="p">,</span> <span class="n">wasm_func_as_extern</span><span class="p">(</span><span class="n">func</span><span class="p">));</span>
+</code></pre></div>
+
+
+<ol start="2">
+<li>Later on, let's create an instance of this module that will be bound to a given event source:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">wasmtime_linker_instantiate</span><span class="p">(</span><span class="n">linker</span><span class="p">,</span> <span class="n">module</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">instance</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">trap</span><span class="p">);</span>
+</code></pre></div>
+
+
+<ol start="3">
+<li>Assuming our instance eventually gets invoked and the executed wasm code calls our above import, we end up in our host callback:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">wasm_trap_t</span> <span class="o">*</span><span class="nf">my_host_func</span><span class="p">(</span><span class="k">const</span> <span class="n">wasmtime_caller_t</span> <span class="o">*</span><span class="n">caller</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">env</span><span class="p">,</span> <span class="k">const</span> <span class="n">wasm_val_t</span> <span class="n">args</span><span class="p">[],</span> <span class="n">wasm_val_t</span> <span class="n">results</span><span class="p">[])</span> <span class="p">{</span>
+  <span class="c1">// Here, we can retrieve the instance and the `ptr` pointer</span>
+  <span class="c1">// previously given to `wasmtime_func_new_with_env`.</span>
+
+  <span class="c1">// But how can we retrieve more host context values that</span>
+  <span class="c1">// were created *after* `wasmtime_func_new_with_env`?</span>
+<span class="p">}</span>
+</code></pre></div>
+
+
+<p>The lack of ability to assign some context data to an Instance seems to make it tricky to efficiently embed inside of an event-driven application.</p>
+<h2>Thoughts</h2>
+<p>There were two solutions that I could think of:</p>
+<ol>
+<li>Stop using the Linker, create the instance via <code>wasmtime_instance_new()</code> and bind imports with <code>wasmtime_func_new_with_env()</code> right after. This allows for some host context pointers to be given to the callback <code>void *env</code> argument, which solves our above issue, but raises questions as to what the performance trade-offs of it could be. _Am I mistaken in thinking that using this approach could be more expansive than using the above one with the Linker?_</li>
+<li>If so, then sticking to the Linker sorts of makes <code>wasmtime_func_new_with_env</code> less useful (since it can pass references to data created at that time only). Yet, we could maybe store some data alongside an Instance for this purpose via some getter/setter API, something like: <code>wasmtime_instance_env_set(wasm_instance_t *instance, void *env)</code>. This pointer would then be given to host function callbacks, in one of their arguments.</li>
+</ol>
+<p>What I wonder is: am I onto an actual need for the C API, onto something that's already solved, or am I misunderstanding something bigger? Either way, I'd very much appreciate hearing some thoughts on it!</p>
+<p>Thanks in advance!</p>
+</blockquote>
+
+
+
+<a name="201690272"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201690272" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201690272">(Jun 23 2020 at 06:01)</a>:</h4>
+<p>thibaultcha edited <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>Hello!</p>
+<p>Lately, I have been pondering about something stumbling me in the C API. From my understanding of it, I seem to either be facing some limitation in the C API or to be having some misconceptions about what the most efficient way of using it would be. I am also not sure if this discussion belongs here or ultimately to the <a href="https://github.com/WebAssembly/wasm-c-api">https://github.com/WebAssembly/wasm-c-api</a> repository, but I thought that here would be a better starting point.</p>
+<p>The use-case at hand is: in my host functions callbacks (<code>wasmtime_func_callback_with_env_t</code>), I'd like to retrieve some context values from my (event-driven) host application.</p>
+<h2>Example</h2>
+<p>Below are some extracts from my embedding, which is using the Linker:</p>
+<ol>
+<li>With said Linker, we can define host functions for future imports:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">func</span> <span class="o">=</span> <span class="n">wasmtime_func_new_with_env</span><span class="p">(</span><span class="n">store</span><span class="p">,</span> <span class="n">functype</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">my_host_func</span><span class="p">,</span> <span class="n">ptr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+<span class="n">wasmtime_linker_define</span><span class="p">(</span><span class="n">linker</span><span class="p">,</span> <span class="n">module_name</span><span class="p">,</span> <span class="n">func_name</span><span class="p">,</span> <span class="n">wasm_func_as_extern</span><span class="p">(</span><span class="n">func</span><span class="p">));</span>
+</code></pre></div>
+
+
+<ol start="2">
+<li>Later on, let's create an instance of this module that will be bound to a given event source:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">wasmtime_linker_instantiate</span><span class="p">(</span><span class="n">linker</span><span class="p">,</span> <span class="n">module</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">instance</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">trap</span><span class="p">);</span>
+</code></pre></div>
+
+
+<ol start="3">
+<li>Assuming our instance eventually gets invoked and the executed wasm code calls our above import, we end up in our host callback:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">wasm_trap_t</span> <span class="o">*</span><span class="nf">my_host_func</span><span class="p">(</span><span class="k">const</span> <span class="n">wasmtime_caller_t</span> <span class="o">*</span><span class="n">caller</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">env</span><span class="p">,</span> <span class="k">const</span> <span class="n">wasm_val_t</span> <span class="n">args</span><span class="p">[],</span> <span class="n">wasm_val_t</span> <span class="n">results</span><span class="p">[])</span> <span class="p">{</span>
+  <span class="c1">// Here, we can retrieve the instance and the `ptr` pointer</span>
+  <span class="c1">// previously given to `wasmtime_func_new_with_env`.</span>
+
+  <span class="c1">// But how can we retrieve more host context values that</span>
+  <span class="c1">// were created *after* `wasmtime_func_new_with_env`?</span>
+<span class="p">}</span>
+</code></pre></div>
+
+
+<p>The lack of ability to assign some context data to an Instance seems to make it tricky to efficiently embed inside of an event-driven application.</p>
+<h2>Thoughts</h2>
+<p>There were two solutions that I could think of:</p>
+<ol>
+<li>Stop using the Linker, create the instance via <code>wasmtime_instance_new()</code> and bind imports with <code>wasmtime_func_new_with_env()</code> right after. This allows for some host context pointers to be given to the callback <code>void *env</code> argument, which solves our above issue, but raises questions as to what the performance trade-offs of it could be. _Am I mistaken in thinking that using this approach could be more expansive than using the above one with the Linker?_</li>
+<li>If so, then sticking to the Linker sorts of makes <code>wasmtime_func_new_with_env</code> less useful (since it can pass references to data created at that time only). Yet, we could maybe store some data alongside an Instance for this purpose via some getter/setter API, something like: <code>wasmtime_instance_env_set(wasm_instance_t *instance, void *env)</code>. This pointer would then be given to host function callbacks, in one of their arguments.</li>
+</ol>
+<p>What I wonder is: am I onto an actual need for the C API, onto something that's already solved, or am I misunderstanding something bigger? Either way, I'd very much appreciate hearing some thoughts on it!</p>
+<p>Thanks in advance!</p>
+</blockquote>
+
+
+
+<a name="201727113"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201727113" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201727113">(Jun 23 2020 at 13:44)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648157925">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>For the first solution you have, I'm not sure if that will be possible since the instance's imports must exist before the instance is created, so you can't bind imports after instantiation. Also FWIW using <code>Linker</code> vs raw instances shouldn't have an impact on performance.</p>
+<p>In general though it sounds like this is where the <code>env</code> argument would be used? You could, for example, allocate some space which is filled in after instantiation, and pass that as the <code>env</code>. That way when the function is called it has access to the data stuffed into <code>env</code> after initialization. You'd just need to be careful that if the function is called during initialization is reports an error of some form. (this is a fundamental wasm limitation, and is why the <code>start</code> function isn't the most useful)</p>
+</blockquote>
+
+
+
+<a name="201748058"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201748058" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201748058">(Jun 23 2020 at 16:19)</a>:</h4>
+<p>thibaultcha <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648269127">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>@alexcrichton Hi there,</p>
+<blockquote>
+<p>For the first solution you have, I'm not sure if that will be possible since the instance's imports must exist before the instance is created, so you can't bind imports after instantiation.</p>
+</blockquote>
+<p>Yes, in this case, the Instance is created within the host context, and I can pass the necessary pointers to <code>wasmtime_func_new_with_env()</code>. </p>
+<blockquote>
+<p>Also FWIW using Linker vs raw instances shouldn't have an impact on performance.</p>
+</blockquote>
+<p>Even assuming that for each new Instance, we loop over its imports and call <code>wasmtime_func_new_with_env()</code> for each one of them?</p>
+<blockquote>
+<p>You could, for example, allocate some space which is filled in after instantiation, and pass that as the env. That way when the function is called it has access to the data stuffed into env after initialization.</p>
+</blockquote>
+<p>I did not include this solution in my above reasoning because it significantly complicates an embedding's design. Doing so would mean that <code>env</code> needs to be a global R/B Tree which is maintained by the host application in which it has to stuff context values for each created Instance. Besides the extra cost associated with that, the host application now has to deal with maintaining global states for each Instance, adding associated state when the Instance is created, and removing it when it is deleted. This seems like a breaking of encapsulation to me and a rather poor design for an embedding. Instead of having to do all of this extra work, a host application could simply associate some arbitrary data with a given Instance right after having created it. This is _significantly_ simpler and leaner (a single line of code for associating data vs. having to maintain associated global structures on the side).  </p>
+</blockquote>
+
+
+
+<a name="201761304"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201761304" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201761304">(Jun 23 2020 at 18:09)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648329129">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>FWIW there is a <code>wasm_instance_set_host_info</code> API to set arbitrary data on the <code>wasm_instance_t</code>, but you don't have access to this as part of <code>wasm_func_call</code>. Additionally I'm not sure what you mean about looping over imports and calling <code>wasmtime_func_new_with_env</code> for them? It seems like you do the same for raw instantiation vs linker-based instantiation?</p>
+</blockquote>
+
+
+
+<a name="201770349"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201770349" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201770349">(Jun 23 2020 at 19:20)</a>:</h4>
+<p>thibaultcha <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648367747">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>Thank you for continuing this discussion!</p>
+<p>With Linker-based instantiation, I call <code>wasmtime_func_new_with_env()</code> _once_ for each host function during the initialization of my host program. Then, during runtime, I call <code>wasmtime_linker_instantiate()</code> once for each execution context in which I will need an Instance.</p>
+<p>With raw instantiation, it seems like I would have to call <code>wasmtime_func_new_with_env()</code> for each host function <strong>for each Instance</strong> that I create.</p>
+<p>This is the source of my confusion as to whether Linker-based instantiation may be cheaper than raw instantiation. If the cost is similar, I can rely on the <code>env</code> argument of <code>wasmtime_func_new_with_env()</code> to keep track of host context values. If raw instantiation is significantly more expensive (computation and memory wise), then I would need another way to bound host context values to a given Instance.</p>
+</blockquote>
+
+
+
+<a name="201772458"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201772458" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201772458">(Jun 23 2020 at 19:40)</a>:</h4>
+<p>thibaultcha <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648377664">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>Digging into the Linker's code, I seem to notice that the associated cost would be somewhat identical. The difference seems to be whether the imports are resolved in the Linker's Rust code or in the host application's C code.</p>
+<p>Because using the Linker could greatly reduce efforts from embedder, do you think that there is a need for host context values to be given to <code>wasmtime_linker_instantiate()</code>? Such given values could then be passed to the functions created by the Linker, and retrievable in the <code>wasmtime_func_callback_with_env_t</code> callbacks in their <code>void *env</code> argument maybe?</p>
+</blockquote>
+
+
+
+<a name="201779166"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201779166" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201779166">(Jun 23 2020 at 20:35)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648403511">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>Er sorry I'm still not really sure what this issue is about. It's not clear to me what contextual information you're attaching where, and why the <code>env</code> pointer and/or the <code>set_host_info</code> business aren't the right solution. I'm a bit confused by the discussion of performance, too, so perhaps that could be set aside for a bit to figure out the env business?</p>
+</blockquote>
+
+
+
+<a name="201784881"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201784881" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201784881">(Jun 23 2020 at 21:19)</a>:</h4>
+<p>thibaultcha <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648434076">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>I sure can elaborate and be more specific!</p>
+<p>I am embedding wasmtime inside of the Nginx web server. Upon processing of an HTTP request, Nginx creates a <code>ngx_http_request_t</code> structure. What I want to do is to create a new instance for each such <code>ngx_http_request_t</code> structure. The instance will then be called at various points during the processing of this HTTP request, until it is freed (at which point the instance will be freed as well).</p>
+<p>Now, when the instance associated to a request invokes an imported host function, I need to retrieve this <code>ngx_http_request_t</code> structure to know on which request the callback's logic should apply. Therefore, I need a way to bound an instance to a specific request context data in order to do this:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">wasm_trap_t</span><span class="o">*</span>
+<span class="nf">my_host_func</span><span class="p">(</span><span class="k">const</span> <span class="n">wasmtime_caller_t</span> <span class="o">*</span><span class="n">caller</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">env</span><span class="p">,</span> <span class="k">const</span> <span class="n">wasm_val_t</span> <span class="n">args</span><span class="p">[],</span> <span class="n">wasm_val_t</span> <span class="n">results</span><span class="p">[])</span> <span class="p">{</span>
+    <span class="n">ngx_http_request_t</span> <span class="o">*</span><span class="n">r</span> <span class="o">=</span> <span class="p">(</span><span class="n">ngx_http_request_t</span> <span class="o">*</span><span class="p">)</span> <span class="n">env</span><span class="p">;</span>
+
+    <span class="cm">/* ... */</span>
+<span class="p">}</span>
+</code></pre></div>
+
+
+<p>Now, because I am using the Linker in order to not have to implement my own imports resolver (which I previously did but would like to avoid if possible), I cannot associate this <code>ngx_http_request_t</code> pointer to a given instance created via <code>wasmtime_linker_instantiate()</code> (unless I am missing something else).</p>
+<p>This issue is trying to solve this problem: how to retrieve host context values from a callback when instances are created via the Linker.</p>
+</blockquote>
+
+
+
+<a name="201785185"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201785185" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201785185">(Jun 23 2020 at 21:22)</a>:</h4>
+<p>thibaultcha edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648434076">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>I sure can elaborate and be more specific!</p>
+<p>I am embedding wasmtime inside of the Nginx web server. Upon processing of an HTTP request, Nginx creates a <code>ngx_http_request_t</code> structure. What I want to do is to create a new instance for each such <code>ngx_http_request_t</code> structure. The instance will then be called at various points during the processing of this HTTP request, until it is freed (at which point the instance will be freed as well).</p>
+<p>Now, when the instance associated to a request invokes an imported host function, I need to retrieve this <code>ngx_http_request_t</code> structure to know on which request the callback's logic should apply. Therefore, I need a way to bound an instance to a specific request context data in order to do this:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">wasm_trap_t</span><span class="o">*</span>
+<span class="nf">my_host_func</span><span class="p">(</span><span class="k">const</span> <span class="n">wasmtime_caller_t</span> <span class="o">*</span><span class="n">caller</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">env</span><span class="p">,</span> <span class="k">const</span> <span class="n">wasm_val_t</span> <span class="n">args</span><span class="p">[],</span> <span class="n">wasm_val_t</span> <span class="n">results</span><span class="p">[])</span>
+<span class="p">{</span>
+    <span class="n">ngx_http_request_t</span> <span class="o">*</span><span class="n">r</span> <span class="o">=</span> <span class="p">(</span><span class="n">ngx_http_request_t</span> <span class="o">*</span><span class="p">)</span> <span class="n">env</span><span class="p">;</span>
+
+    <span class="cm">/* ... */</span>
+<span class="p">}</span>
+</code></pre></div>
+
+
+<p>Now, because I am using the Linker in order to not have to implement my own imports resolver (which I previously did but would like to avoid if possible), I cannot associate this <code>ngx_http_request_t</code> pointer to a given instance created via <code>wasmtime_linker_instantiate()</code> (unless I am missing something else).</p>
+<p>This issue is trying to solve this problem: how to retrieve host context values from a callback when instances are created via the Linker.</p>
+</blockquote>
+
+
+
+<a name="201785823"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201785823" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201785823">(Jun 23 2020 at 21:28)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648437703">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>What you'll likely want to do in that case is:</p>
+<ul>
+<li>Have a global <code>wasm_engine_t</code> used by all requests</li>
+<li>Cache a global <code>wasm_module_t</code> with the engine (using a temporary store to satisfy API requirements)</li>
+<li>Create a <code>wasm_store_t</code> per-request using the global engine</li>
+<li>Instantiate the global module within this store</li>
+</ul>
+<p>The last step means you'll have to recreate functions for every request anyway, so you'll be able to pair the <code>env</code> parameter at that time.</p>
+<p>Does that make sense? It sounds like you're caching the <code>wasm_linker_t</code> globally which may be causing my confusion. </p>
+</blockquote>
+
+
+
+<a name="201788162"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201788162" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201788162">(Jun 23 2020 at 21:48)</a>:</h4>
+<p>thibaultcha <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648446053">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<blockquote>
+<p>It sounds like you're caching the <code>wasm_linker_t</code> globally which may be causing my confusion.</p>
+</blockquote>
+<p>Hmm right, that's what I was doing since I was hoping that all instance could be backed by the same <code>wasm_store_t</code> (maybe misunderstanding the underlying performance implications, or memory sharing between different requests, e.g. eventually allowing for sharing globals between them, etc...).</p>
+<p>So, what I seem to be understanding is that with your proposed implementation, instantiating the module within the request's store can be performed via raw instantiation (and binding the imports myself), or via instantiating a new Linker, itself tied to the request's store, and eventually creating the instance for me. Either way allows for pairing the <code>env</code> argument when creating the functions.</p>
+</blockquote>
+
+
+
+<a name="201788392"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201788392" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201788392">(Jun 23 2020 at 21:50)</a>:</h4>
+<p>thibaultcha edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648446053">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<blockquote>
+<p>It sounds like you're caching the <code>wasm_linker_t</code> globally which may be causing my confusion.</p>
+</blockquote>
+<p>Hmm right, that's what I was doing since I was hoping that all instance could be backed by the same <code>wasm_store_t</code> (maybe misunderstanding the underlying performance implications, or memory sharing between different requests, e.g. eventually allowing for sharing globals between them, etc...).</p>
+<p>So, what I seem to be understanding is that with your proposed implementation, instantiating the module within the request's store can be performed via raw instantiation (and binding the imports myself), or via instantiating a new Linker (itself tied to the request's store) and eventually creating the instance for me. Either way allows for pairing the <code>env</code> argument when creating the functions at that time.</p>
+</blockquote>
+
+
+
+<a name="201788413"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201788413" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201788413">(Jun 23 2020 at 21:51)</a>:</h4>
+<p>thibaultcha edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648446053">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<blockquote>
+<p>It sounds like you're caching the <code>wasm_linker_t</code> globally which may be causing my confusion.</p>
+</blockquote>
+<p>Hmm right, that's what I was doing since I was hoping that all instance could be backed by the same <code>wasm_store_t</code> (maybe misunderstanding the underlying performance implications, or memory sharing between different requests, e.g. eventually allowing for sharing globals between them, etc...).</p>
+<p>So, what I seem to be understanding is that with your proposed implementation, instantiating the module within the request's store can be performed via raw instantiation (and binding the imports myself), or via instantiating a new Linker (itself tied to the request's store) which would eventually create the instance for me. Either way allows for pairing the <code>env</code> argument when creating the functions at that time.</p>
+</blockquote>
+
+
+
+<a name="201789044"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201789044" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201789044">(Jun 23 2020 at 21:57)</a>:</h4>
+<p>thibaultcha edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648446053">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<blockquote>
+<p>It sounds like you're caching the <code>wasm_linker_t</code> globally which may be causing my confusion.</p>
+</blockquote>
+<p>Hmm right, that's what I was doing since I was hoping that all instance could be backed by the same <code>wasm_store_t</code> (maybe misunderstanding the underlying performance implications? I was hoping to save the extra allocation costs).</p>
+<p>So, what I seem to be understanding is that with your proposed implementation, instantiating the module within the request's store can be performed via raw instantiation (and binding the imports myself), or via instantiating a new Linker (itself tied to the request's store) which would eventually create the instance for me. Either way allows for pairing the <code>env</code> argument when creating the functions at that time.</p>
+</blockquote>
+
+
+
+<a name="201789268"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201789268" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201789268">(Jun 23 2020 at 21:59)</a>:</h4>
+<p>thibaultcha edited a <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648446053">comment</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<blockquote>
+<p>It sounds like you're caching the <code>wasm_linker_t</code> globally which may be causing my confusion.</p>
+</blockquote>
+<p>Hmm right, that's what I was doing since I was hoping that all instances could be backed by the same <code>wasm_store_t</code> (maybe misunderstanding the underlying performance implications? I was hoping to save the extra allocation costs).</p>
+<p>So, what I seem to be understanding is that with your proposed implementation, instantiating the module within the request's store can be performed via raw instantiation (and binding the imports myself), or via instantiating a new Linker (itself tied to the request's store) which would eventually create the instance for me. Either way allows for pairing the <code>env</code> argument when creating the functions at that time.</p>
+</blockquote>
+
+
+
+<a name="201857483"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201857483" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201857483">(Jun 24 2020 at 14:51)</a>:</h4>
+<p>alexcrichton <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-648869422">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>Yeah that's what I'm thinking, where if you instantiate per-request then you can create imports paired with <code>env</code> arguments.</p>
+<p>For <code>wasm_store_t</code> the issue isn't so much about reusing allocations but rather ever freeing them. No <code>wasm_instance_t</code> is fully deallocated until the entirety of its store and all other references to the store have gone away. This is done because we don't have a full GC. If you're a long-runner server (e.g. nginx) you probably want to keep memory usage under control, so you'll likely want to have a store-per-request so when the request is finished you'll be able to free all memory associated with the request.</p>
+</blockquote>
+
+
+
+<a name="201937985"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201937985" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201937985">(Jun 25 2020 at 07:07)</a>:</h4>
+<p>thibaultcha <a href="https://github.com/bytecodealliance/wasmtime/issues/1911#issuecomment-649287860">commented</a> on <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>Thank you for the <code>wasm_store_t</code> clarifications! Alright then, this discussion answers the questions that I had on retrieving host context values and a clarifies a few more points; I'll go ahead and close this issue now.</p>
+<p>Thank you for your time @alexcrichton, much appreciated.</p>
+</blockquote>
+
+
+
+<a name="201937986"></a>
+<h4><a href="https://bytecodealliance.zulipchat.com#narrow/stream/225357-git-wasmtime/topic/wasmtime%20/%20Issue%20%231911%20C%20API%3A%20retrieve%20host%20context%20value.../near/201937986" class="zl"><img src="https://bytecodealliance.github.io/zulip-archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wasmtime GitHub notifications bot <a href="https://bytecodealliance.github.io/zulip-archive/stream/225357-git-wasmtime/topic/wasmtime.20.2F.20Issue.20.231911.20C.20API.3A.20retrieve.20host.20context.20value.2E.2E.2E.html#201937986">(Jun 25 2020 at 07:07)</a>:</h4>
+<p>thibaultcha closed <a href="https://github.com/bytecodealliance/wasmtime/issues/1911">Issue #1911</a>:</p>
+<blockquote>
+<p>Hello!</p>
+<p>Lately, I have been pondering about something stumbling me in the C API. From my understanding of it, I seem to either be facing some limitation in the C API or to be having some misconceptions about what the most efficient way of using it would be. I am also not sure if this discussion belongs here or ultimately to the <a href="https://github.com/WebAssembly/wasm-c-api">https://github.com/WebAssembly/wasm-c-api</a> repository, but I thought that here would be a better starting point.</p>
+<p>The use-case at hand is: in my host functions callbacks (<code>wasmtime_func_callback_with_env_t</code>), I'd like to retrieve some context values from my (event-driven) host application.</p>
+<h2>Example</h2>
+<p>Below are some extracts from my embedding, which is using the Linker:</p>
+<ol>
+<li>With said Linker, we can define host functions for future imports:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">func</span> <span class="o">=</span> <span class="n">wasmtime_func_new_with_env</span><span class="p">(</span><span class="n">store</span><span class="p">,</span> <span class="n">functype</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">my_host_func</span><span class="p">,</span> <span class="n">ptr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+<span class="n">wasmtime_linker_define</span><span class="p">(</span><span class="n">linker</span><span class="p">,</span> <span class="n">module_name</span><span class="p">,</span> <span class="n">func_name</span><span class="p">,</span> <span class="n">wasm_func_as_extern</span><span class="p">(</span><span class="n">func</span><span class="p">));</span>
+</code></pre></div>
+
+
+<ol start="2">
+<li>Later on, let's create an instance of this module that will be bound to a given event source:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">wasmtime_linker_instantiate</span><span class="p">(</span><span class="n">linker</span><span class="p">,</span> <span class="n">module</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">instance</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">trap</span><span class="p">);</span>
+</code></pre></div>
+
+
+<ol start="3">
+<li>Assuming our instance eventually gets invoked and the executed wasm code calls our above import, we end up in our host callback:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code><span class="n">wasm_trap_t</span> <span class="o">*</span><span class="nf">my_host_func</span><span class="p">(</span><span class="k">const</span> <span class="n">wasmtime_caller_t</span> <span class="o">*</span><span class="n">caller</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">env</span><span class="p">,</span> <span class="k">const</span> <span class="n">wasm_val_t</span> <span class="n">args</span><span class="p">[],</span> <span class="n">wasm_val_t</span> <span class="n">results</span><span class="p">[])</span> <span class="p">{</span>
+  <span class="c1">// Here, we can retrieve the instance and the `ptr` pointer</span>
+  <span class="c1">// previously given to `wasmtime_func_new_with_env`.</span>
+
+  <span class="c1">// But how can we retrieve more host context values that</span>
+  <span class="c1">// were created *after* `wasmtime_func_new_with_env`?</span>
+<span class="p">}</span>
+</code></pre></div>
+
+
+<p>The lack of ability to assign some context data to an Instance seems to make it tricky to efficiently embed inside of an event-driven application.</p>
+<h2>Thoughts</h2>
+<p>There were two solutions that I could think of:</p>
+<ol>
+<li>Stop using the Linker, create the instance via <code>wasmtime_instance_new()</code> and bind imports with <code>wasmtime_func_new_with_env()</code> right after. This allows for some host context pointers to be given to the callback <code>void *env</code> argument, which solves our above issue, but raises questions as to what the performance trade-offs of it could be. _Am I mistaken in thinking that using this approach could be more expansive than using the above one with the Linker?_</li>
+<li>If so, then sticking to the Linker sorts of makes <code>wasmtime_func_new_with_env</code> less useful (since it can pass references to data created at that time only). Yet, we could maybe store some data alongside an Instance for this purpose via some getter/setter API, something like: <code>wasmtime_instance_env_set(wasm_instance_t *instance, void *env)</code>. This pointer would then be given to host function callbacks, in one of their arguments.</li>
+</ol>
+<p>What I wonder is: am I onto an actual need for the C API, onto something that's already solved, or am I misunderstanding something bigger? Either way, I'd very much appreciate hearing some thoughts on it!</p>
+<p>Thanks in advance!</p>
+</blockquote>
+
+
+
+<hr><p>Last updated: Jan 20 2025 at 06:04 UTC</p>
+</html>

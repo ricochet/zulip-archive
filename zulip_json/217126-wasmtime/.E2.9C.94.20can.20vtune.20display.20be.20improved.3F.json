@@ -1,0 +1,104 @@
+[
+    {
+        "content": "<p>Hi! Using the vtune integration in our embedding, it works great! I can now see rust functions compiled to wasm and marked as <code>[Dynamic code\n</code>\\o/</p>\n<p>I had one question about the way vtune displays the information: it seems that Vtune manages to parse the fully qualified Rust function name, and extracts the last bit of this path as the short function name. This last part appears to me as pretty random (it's a hex string), and it's used as the main display everywhere (leftmost column in Bottom up tab, everywhere in flame graph, etc.). See for instance:</p>\n<p><a href=\"/user_uploads/15107/0RydECCiO1CafI8IjLVG8Jfe/Screenshot-from-2022-01-12-18-46-00.png\">Screenshot-from-2022-01-12-18-46-00.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/0RydECCiO1CafI8IjLVG8Jfe/Screenshot-from-2022-01-12-18-46-00.png\" title=\"Screenshot-from-2022-01-12-18-46-00.png\"><img src=\"/user_uploads/15107/0RydECCiO1CafI8IjLVG8Jfe/Screenshot-from-2022-01-12-18-46-00.png\"></a></div><p>Any idea what goes wrong here? Could it be that the name demangler doesn't properly support Rust names?</p>\n<p>ping <span class=\"user-mention\" data-user-id=\"253994\">@Alex Crichton</span> who would know about Rust compiler internals and this sort of things probably, and <span class=\"user-mention\" data-user-id=\"254110\">@Andrew Brown</span> <span class=\"user-mention\" data-user-id=\"257554\">@Johnnie Birch</span> from Intel as I might just be misusing Vtune. Thanks <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 267760721,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1642009809
+    },
+    {
+        "content": "<p>what's probably going on there is that wasmtime is forwarding the mangled name to vtune raw (from the wasm file itself) and then vtune applies C++ demangling which helps a bit but isn't rust demangling</p>",
+        "id": 267760927,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1642009917
+    },
+    {
+        "content": "<p>we could update wasmtime to probably forward the unmangled name to vtune instead</p>",
+        "id": 267761023,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1642009943
+    },
+    {
+        "content": "<p>basically applying <code>cpp_demangle</code> and <code>rust_demangle</code> here -- <a href=\"https://github.com/bytecodealliance/wasmtime/blob/7454f1f3af05ff27bbe3c1392a0957ac1d4e0fab/crates/jit/src/profiling.rs#L64-L71\">https://github.com/bytecodealliance/wasmtime/blob/7454f1f3af05ff27bbe3c1392a0957ac1d4e0fab/crates/jit/src/profiling.rs#L64-L71</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/bytecodealliance/wasmtime/blob/7454f1f3af05ff27bbe3c1392a0957ac1d4e0fab/crates/jit/src/profiling.rs#L64-L71\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/64e10646415d1ffb1533299c372fbf786df92fcc\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f623936353366613465616433363165323932316236303530636639383162396638636131313736663339646330326535626563643963653430383438353034642f62797465636f6465616c6c69616e63652f7761736d74696d65)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/bytecodealliance/wasmtime/blob/7454f1f3af05ff27bbe3c1392a0957ac1d4e0fab/crates/jit/src/profiling.rs#L64-L71\" title=\"wasmtime/profiling.rs at 7454f1f3af05ff27bbe3c1392a0957ac1d4e0fab · bytecodealliance/wasmtime\">wasmtime/profiling.rs at 7454f1f3af05ff27bbe3c1392a0957ac1d4e0fab · bytecodealliance/wasmtime</a></div><div class=\"message_embed_description\">Standalone JIT-style runtime for WebAssembly, using Cranelift - wasmtime/profiling.rs at 7454f1f3af05ff27bbe3c1392a0957ac1d4e0fab · bytecodealliance/wasmtime</div></div></div>",
+        "id": 267761140,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1642010001
+    },
+    {
+        "content": "<p>cool idea.  Is a C++ demangler a no-op on an already demangled name, or would it just display Bad Stuff?</p>",
+        "id": 267761191,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1642010024
+    },
+    {
+        "content": "<p>are you saying we should call them <em>both</em>, since we can't know what's the origin language?</p>",
+        "id": 267761312,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1642010069
+    },
+    {
+        "content": "<p>We would want to do something like <code>demangle(&amp;name).unwrap_or(&amp;name)</code></p>",
+        "id": 267761317,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1642010072
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254393\">Benjamin Bouvier</span> <a href=\"#narrow/stream/217126-wasmtime/topic/can.20vtune.20display.20be.20improved.3F/near/267761312\">said</a>:</p>\n<blockquote>\n<p>are you saying we should call them <em>both</em>, since we can't know what's the origin language?</p>\n</blockquote>\n<p>Yes, I think we would want to. They should bail out pretty quickly when given symbols from other languages, so it shouldn't be too much wasted work. worst case scenario, we can implement a checker that returns a language hint, if we really need to</p>",
+        "id": 267761466,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1642010144
+    },
+    {
+        "content": "<p>Cool, let me try that!</p>",
+        "id": 267761581,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1642010181
+    },
+    {
+        "content": "<p>(I just pinged <span class=\"user-mention\" data-user-id=\"257554\">@Johnnie Birch</span> internally to see what he thinks)</p>",
+        "id": 267761663,
+        "sender_full_name": "Andrew Brown",
+        "timestamp": 1642010221
+    },
+    {
+        "content": "<p>Doing that, I get the fully qualified name as the function name displayed in Vtune, which is very workable! So calling it great enough :-) <a href=\"/user_uploads/15107/Qs7mlgbywldDWLWzGYehgXDF/Screenshot-from-2022-01-12-19-15-53.png\">Screenshot-from-2022-01-12-19-15-53.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/15107/Qs7mlgbywldDWLWzGYehgXDF/Screenshot-from-2022-01-12-19-15-53.png\" title=\"Screenshot-from-2022-01-12-19-15-53.png\"><img src=\"/user_uploads/15107/Qs7mlgbywldDWLWzGYehgXDF/Screenshot-from-2022-01-12-19-15-53.png\"></a></div>",
+        "id": 267764585,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1642011411
+    },
+    {
+        "content": "<p>will make a PR</p>",
+        "id": 267764629,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1642011427
+    },
+    {
+        "content": "<p>(deleted)</p>",
+        "id": 267765017,
+        "sender_full_name": "Johnnie Birch",
+        "timestamp": 1642011600
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"257554\">@Johnnie Birch</span> I was using the Bottom/up view, or the flamegraph view. Weirdly, it seemed that in your picture, the main display name (leftmost column) wasn't the last part of the fully qualified name, but just the whole name. Could be platform differences? I'm on Linux, using the latest version of intel-basekit as downloaded from Intel's website.</p>",
+        "id": 267765250,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1642011709
+    },
+    {
+        "content": "<p>also I think the hex strings at the end appear because those are generic functions, but not sure</p>",
+        "id": 267765712,
+        "sender_full_name": "Benjamin Bouvier",
+        "timestamp": 1642011926
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"254393\">@Benjamin Bouvier</span> Well I deleted because I realized my comment was already obsolete after posting but I think what I saw was consistent with what you were showing in the leftmost column? I did also see the mangled name issue that you've confirmed has a solution now.</p>",
+        "id": 267768352,
+        "sender_full_name": "Johnnie Birch",
+        "timestamp": 1642013144
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254393\">Benjamin Bouvier</span> has marked this topic as resolved.</p>",
+        "id": 267892375,
+        "sender_full_name": "Notification Bot",
+        "timestamp": 1642091017
+    }
+]

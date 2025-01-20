@@ -1,0 +1,68 @@
+[
+    {
+        "content": "<p>elliottt <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1806236938\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<blockquote>\n<p>Instead of checking the immutability flag in the callee, can we factor it into a <code>get_fields</code> that returns a <code>&amp;FieldMap</code> and use that in all the cases that don't require mutability, and then turn <code>get_fields_mut</code> which returns <code>Result&lt;&amp;mut FieldMap, HeaderError&gt;</code> that will only be used for set/append/delete and itself return <code>Err(HeaderError::Immutable)</code>?</p>\n</blockquote>\n<p>Great call! I've reworked this to have two accessors now, and I like it much more.</p>\n</blockquote>",
+        "id": 401423145,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699641444
+    },
+    {
+        "content": "<p>tschneidereit <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1806833837\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>@elliottt I didn't catch this earlier, but I think it's somewhat unfortunate to take such drastic measures here. Specifically, I would predict that fields entries sometimes being mutable, sometimes not, while in many languages it's not really possible to express that in the type system—and it's not expressed in whether we have a borrowed or mutable handle—will lead to lots of confusion.</p>\n<p>What if instead we made it so that headers are passed in as an owned handle when sending a request/response, ensuring that they can't be mutated at all anymore afterwards? For those use cases where the values still need to be accessible, the handle can be cloned. (I'd imagine that we could make that pretty cheap on the host side, by having <code>clone</code> return a <code>Cow</code>, such that if the clone is only ever read from, we don't incur overhead.</p>\n</blockquote>",
+        "id": 401516158,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699713628
+    },
+    {
+        "content": "<p>elliottt <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1806879412\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>I think your suggestion is what's implemented here: the <code>outgoing-request</code> and <code>outgoing-response</code> constructors both take ownership of the <code>fields</code> they're given, and it's only the <code>fields</code> resources returned by their <code>headers</code> methods that become immutable. The <code>fields.clone</code> method can be used on those handles for the case where it's necessary to mutate a new copy of those <code>fields</code>, but once a <code>fields</code> is associated with a request or response (incoming or outgoing) it becomes immutable.</p>\n</blockquote>",
+        "id": 401532740,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699725726
+    },
+    {
+        "content": "<p>elliottt <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1806880753\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>More concretely: this doesn't treat individual headers in a special way, it makes it so that the <code>fields</code> resource returned by the <code>headers</code> method on request and response resources immutable as a whole. So if you tried to use <code>fields.set</code>, <code>fields.delete</code>, or <code>fields.append</code> on the <code>fields</code> resource returned by <code>outgoing-response.headers</code>, you would uniformly see the <code>header-error.immutable</code> error returned.</p>\n</blockquote>",
+        "id": 401533233,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699726104
+    },
+    {
+        "content": "<p>tschneidereit <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1806927169\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>I think ensuring that headers values can't be changed after they become relevant for error handling makes a lot of sense. What I had in mind was to move that point further back, to the moment where the request/response is actually sent. What I mean is not having headers be associated with requests/responses at all until the latter are sent.</p>\n<p>Concretely, that would entail four changes:</p>\n<ol>\n<li>In the <code>outgoing-handler</code> interface, changing the signature of the <a href=\"https://github.com/WebAssembly/wasi-http/blob/main/wit/handler.wit#L39-L42\">handle</a> function to</li>\n</ol>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>  handle: func(\n    request: outgoing-request,\n    headers: headers,\n    options: option&lt;request-options&gt;\n  ) -&gt; result&lt;future-incoming-response, error-code&gt;;\n</code></pre></div>\n<ol start=\"2\">\n<li>In the <code>response-outparam</code> resource type, changing the signature of the <a href=\"https://github.com/WebAssembly/wasi-http/blob/main/wit/types.wit#L359-L362\">set</a> method to</li>\n</ol>\n<div class=\"codehilite\" data-code-language=\"wit\"><pre><span></span><code>  set: static func(\n    param: response-outparam,\n    response: result&lt;outgoing-response, headers, error-code&gt;,\n  );\n</code></pre></div>\n<ol start=\"3\">\n<li>\n<p>In the <code>outgoing-request</code> resource type, removing the <code>headers</code> parameter from the constructor and removing the <code>headers</code> method</p>\n</li>\n<li>\n<p>In the <code>outgoing-response</code> resource type, removing the <code>headers</code> parameter from the constructor and removing the <code>headers</code> method</p>\n</li>\n</ol>\n<p>That should make it so that whenever one can get a handle to a <code>headers</code> object, it's certain to be mutable, so that it's not required to carefully keep track of how that handle was acquired.</p>\n<p>All this said, I'm not 100% sure myself that this is the better approach, but it does seem to make things more self-explanatory at least.</p>\n</blockquote>",
+        "id": 401545013,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699739852
+    },
+    {
+        "content": "<p>elliottt <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1806945713\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>That makes sense to me, thank you for the detailed explanation! I'm open to making this change, would it make sense to also make the incoming handler take a <code>fields</code> argument to keep symmetry between the two?</p>\n</blockquote>",
+        "id": 401550385,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699746308
+    },
+    {
+        "content": "<p>tschneidereit <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1807082451\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>ah, good point yeah: I think that symmetry would make a lot of sense</p>\n</blockquote>",
+        "id": 401600948,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699784431
+    },
+    {
+        "content": "<p>pchickey <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1808574555\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>Can't you achieve these with library code that just maintains the <code>headers</code> as an owned resource and just creates the <code>outgoing-request</code> at the point of calling <code>outgoing-handler.handle</code>?</p>\n</blockquote>",
+        "id": 401808551,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699894463
+    },
+    {
+        "content": "<p>tschneidereit <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1808618431\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>Yes, that's possible, but I think there are a couple of downsides.</p>\n<p>One is more of a conceptual one: <code>headers</code> as an owned resource has to completely different behaviors depending on whether it's retrieved from a parent resource or created standalone. I think it'd be nicer to have uniform behavior, but that's not <em>that</em> important.</p>\n<p>The other is that that means not being able to use the stream at all until after creating the final <code>outgoing-request</code> and sending it off.</p>\n<p>Given that the key property we want to get at is to ensure that the headers don't change between setting them and sending off the parent resource, it seems to make sense to me to create that association just in time, by passing them in when sending.</p>\n</blockquote>",
+        "id": 401812038,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699895676
+    },
+    {
+        "content": "<p>elliottt <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1808719137\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>Thinking about this over the weekend, I think there's a problem with passing the headers to the handler: that means that the value of the <code>Content-Length</code> header could change after the <code>outgoing-body</code> is created, which would allow for the following situation that the current PR prohibits:</p>\n<ol>\n<li>Create an outgoing request</li>\n<li>Create a fields with a <code>Content-Length</code> of 20</li>\n<li>Create an outgoing-body (this is where we would need to know the value of <code>Content-Length</code>, if it's present)</li>\n<li>Update the <code>Content-Length</code> header to be 10</li>\n<li>Send the request with those headers</li>\n<li>Write 20 bytes to the output stream associated with the outgoing-body</li>\n</ol>\n<p>We should be able to report an error in step 6 for writing too much, but as the <code>outgoing-body</code> is derived from the <code>outgoing-request</code>, and the headers are no longer associated directly with the request, we miss the opportunity to fetch the most current value of <code>Content-Length</code>. Associating the headers with the request when it's constructed and considering the headers immutable at that point means that we can trust that the <code>outgoing-body</code> produced by the <code>outgoing-request.body</code> method sees the final value for <code>Content-Length</code> when it's created.</p>\n</blockquote>",
+        "id": 401819083,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699898465
+    },
+    {
+        "content": "<p>tschneidereit <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524#issuecomment-1808734575\">commented</a> on <a href=\"https://github.com/bytecodealliance/wasmtime/pull/7524\">issue #7524</a>:</p>\n<blockquote>\n<p>What I was envisioning was a modified sequence along these lines:</p>\n<ol>\n<li>Create an outgoing request</li>\n<li>Create a fields with a <code>Content-Length</code> of 20</li>\n<li>Create an <code>outgoing-body</code> (we don't yet need to know anything about <code>Content-Length</code> here)</li>\n<li>Update the <code>Content-Length</code> header to be 10</li>\n<li>Send the request with those headers, and set the current value of <code>Content-Length</code> on the <code>outgoing-body</code> </li>\n<li>Write 20 bytes to the output stream associated with the outgoing-body</li>\n<li>get an error</li>\n</ol>\n<p>Now what I don't at all know is how hard it'd be to move setting the expected body length from step 3 into step 5. Certainly the request has a reference to it still, so ideally it shouldn't be too hard?<br>\n</p>\n</blockquote>",
+        "id": 401820775,
+        "sender_full_name": "Wasmtime GitHub notifications bot",
+        "timestamp": 1699899118
+    }
+]

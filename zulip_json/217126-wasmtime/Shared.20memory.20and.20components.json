@@ -1,0 +1,230 @@
+[
+    {
+        "content": "<p>Do I understand correctly that the Component Model essentially takes different Wasm programs and statically links them into a single module?<br>\nAnd that this single module is run as a single module instance (single isolate), which is why it is possible to pass references between components?</p>\n<p>And that it will not be possible for different module instances to share memory, by passing references in Wasm as in the Component Model, in Wasmtime?</p>",
+        "id": 423650070,
+        "sender_full_name": "Erik S.",
+        "timestamp": 1709051568
+    },
+    {
+        "content": "<p>wasm modules are the unit of code defined in the \"core\" wasm spec - a component can contain 0 or more modules, but typically one.</p>",
+        "id": 423650837,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709051809
+    },
+    {
+        "content": "<p>In the component model, a component may contain multiple modules inside of it that share a linear memory (and a shared \"libc-like\" implementation to manage that memory across the different modules); however, there is no \"static\" linking in the sense that the modules are linked together into a single module (technically nothing is stopping a sophisticated tool from rewriting the modules into a single module, though); they remain separate modules that link together via imports and exports</p>",
+        "id": 423650946,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1709051842
+    },
+    {
+        "content": "<p>many of the supported languages currently produce components that have a single linear memory and a single implementation module in the component; but some (notably python) use multiple modules; the isolation boundary in the component model is the <em>component</em> as there is no way for a component to share a linear memory with another component</p>",
+        "id": 423651353,
+        "sender_full_name": "Peter Huene",
+        "timestamp": 1709051991
+    },
+    {
+        "content": "<p>wasm modules are just a unit of code - their imports and exports can expose any part of their internals (functions, globals, or memory) to other modules. components can instantiate a module or set of modules by wiring up those core imports and exports to each other. but when components are composed with other components, it uses a distinct type system from the core wasm functons, globals, and memory - instead that type system deals with records, enums, lists, strings, resources (a foreign reference type) and other high-level types. those component level types are converted to and from (we use the words lifting and lowering) the module's way of representing values in its linear memory through what we call the canonical abi</p>",
+        "id": 423651525,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709052035
+    },
+    {
+        "content": "<p>so when you pass a string from a module inside one component to a module inside another component, there are instructions in the first component describing how to lift the string out of the first linear memory, and then instructions in the second component describing how to lower the string into the second linear memory. (for a string these instructions - called canon opts - say what the string encoding is, and which args are the pointer and length to the string being lifted, and how to call an allocator to write the string being lowered). a component runtime can look at the pair of lifting and lowering of a binding and come up with the most efficient way to implement it - if the string is encoded the same on both ends, its a memcpy, otherwise its a transcode between utf8 and utf16 for example</p>",
+        "id": 423652025,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709052180
+    },
+    {
+        "content": "<p>and finally for references theres a similar process for lifting and lowering across components. local to a module, a reference is just an i32 index. the canonical abi has a way for a module to pass that to another component, where it gets stuck into a component-level table that is opaque to the module during the lift, and then translated (lowered) to a i32 that is unique in the callee's module in the callee component</p>",
+        "id": 423652316,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709052269
+    },
+    {
+        "content": "<p>thats almost certainly more detail than you required, though.</p>",
+        "id": 423652405,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709052302
+    },
+    {
+        "content": "<p>Thanks, I appreciate the detail, and it helps to correct my misconceptions.</p>\n<p>I thought that the reference would allow the other module to read from the first module's memory, but I understand now that it's just essentially a plain old number for internal bookkeeping, e.g.:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">B</span><span class=\"w\"> </span><span class=\"n\">would</span><span class=\"w\"> </span><span class=\"k\">use</span><span class=\"w\"> </span><span class=\"n\">module</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"w\"> </span><span class=\"n\">by</span>:\n<span class=\"nc\">A</span><span class=\"p\">.</span><span class=\"n\">get_items</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"n\">list</span><span class=\"w\"> </span><span class=\"n\">of</span><span class=\"w\"> </span><span class=\"n\">references</span>\n<span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">each</span><span class=\"w\"> </span><span class=\"n\">reference</span>: <span class=\"nc\">A</span><span class=\"p\">.</span><span class=\"n\">get_item</span><span class=\"p\">(</span><span class=\"n\">reference</span><span class=\"p\">)</span>\n</code></pre></div>\n<p>I thought it would be more similar to passing a slice, and that the native compiler would allow cross-module memory access by capability principle of possessing the slice.<br>\nAnd that the main benefit of the component model would be to combine modules, to achieve zero cost isolation, inside a shared isolate to allow shared memory, while still having isolation guarantees by bytecode correctness.</p>\n<p>Since I am incorrect, do I understand correctly that the Component Model is not zero-cost, that there will be a lot of copying, either when passing values, or when first passing references, and then using those references to retrieve values (that are then copied)?<br>\nI suppose there's some cost efficiency when passing through multiple modules A-&gt;B-&gt;C, but only if C can retrieve the value directly from A? (which would require that B could bind both A and C together, in it, which I assume is not possible, that there are only imports/exports and no \"passthrough\" bindings?).</p>\n<p>I hope I'm making sense, maybe I have to think about it some more :)</p>",
+        "id": 423670010,
+        "sender_full_name": "Erik S.",
+        "timestamp": 1709057981
+    },
+    {
+        "content": "<p>yes, thats correct - communication between components is for the \"shared nothing\" case of mutually distrusting components, and it is not zero cost. resources (references) are pretty cheap to share between components but values such as a list of bytes will incur a copy. (one day, when the component model integrates with a matured wasm-gc, we may be able to have gc languages share immutable references to a list of bytes across component boundaries, but thats very much hypothetical right now and may take years to deliver, and it would only work if both sides are wasm-gc representations, there would need to be a copy if either/both are linear memory representations)</p>",
+        "id": 423670767,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709058234
+    },
+    {
+        "content": "<p>with regards to A importing B, and B importing C, then afaik there is no way to express a resource that implemented in C that is used directly by A - B would have to implement some sort of proxy on that resource, which if some method call on that resource was returning lists of bytes, would incur additional copies.</p>",
+        "id": 423671026,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709058325
+    },
+    {
+        "content": "<p>but i'm not as 100% confident on that as i am about the rest of my thoughts here, maybe <span class=\"user-mention\" data-user-id=\"253998\">@Luke Wagner</span> can check my math</p>",
+        "id": 423671104,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709058363
+    },
+    {
+        "content": "<p>also worth noting that the CM as it exists today is basically an MVP - if we end up learning about concrete cases where we need to express passthrough like you are thinking, thats something we can look into adding so that CM implementations can optimize out the intermediate copies. there are a lot of areas for possible optimization we havent explored yet because we are just trying to start using it and see what we learn</p>",
+        "id": 423671503,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709058499
+    },
+    {
+        "content": "<p>if you are looking for some way to share references between modules that do trust each other, thats something where you might be able to use the CM to express how those modules compose/instantiate together inside a single component, which wont have the same restrictions</p>",
+        "id": 423671623,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709058558
+    },
+    {
+        "content": "<p>It's also worth thinking about the bigger picture; if you have a large quantity of data that's going A-&gt;B-&gt;C: if B is doing non-trivial work on that data, it'll often be the case that copying the data isn't a major bottleneck compared to the actual work that B is doing. And on the other hand, if B is just forwarding data along, then we have a variety of ways to avoid copying the data into and out of B such as <a href=\"https://github.com/WebAssembly/wasi-io/blob/main/wit/streams.wit#L243\">splice</a> or using handles.</p>",
+        "id": 423671638,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1709058564
+    },
+    {
+        "content": "<p>ah yeah if you were to use wasi streams to express moving data between then then you can think of the wasi stream resources as present in some outer component (the host, or maybe implemented virtually by something else) and all of A, B, and C import from it</p>",
+        "id": 423671801,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709058620
+    },
+    {
+        "content": "<p>we believe wasi streams are a stepping stone towards eventually having streams be native to the CM itself so that A, B, C dont have to have the common outer import</p>",
+        "id": 423671972,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709058713
+    },
+    {
+        "content": "<p>There's also been serious discussion of adding a copy-on-write mmap from a resource into a linear memory.</p>",
+        "id": 423672287,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1709058848
+    },
+    {
+        "content": "<p>In the example above, if <code>A.get_items()</code> would return a long list or the items have a lot of data, the best approach might be to not return a <code>list</code>. Instead, perhaps return a handle to a resource that iterates through the items. For example, wasi-filesystem does this with <a href=\"https://github.com/WebAssembly/wasi-filesystem/blob/main/wit/types.wit#L418\"><code>read-dir</code></a>; it returns a <a href=\"https://github.com/WebAssembly/wasi-filesystem/blob/main/wit/types.wit#L618\"><code>directory-entry-stream</code></a> where you call <code>read-directory-entry</code> repeatedely to get the items.</p>",
+        "id": 423674474,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1709059712
+    },
+    {
+        "content": "<p>That way, the handle to the <code>directory-entry-stream</code> can be passed around as much as you want, with no copies.</p>",
+        "id": 423674574,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1709059754
+    },
+    {
+        "content": "<p>Thanks, that's very interesting. I've been thinking about this problem a lot. I was worried about doing redundant work, or going in an incompatible direction (both, with regards to the CM). Thanks for clarifying.</p>\n<p>WASI streams sound like the right solution, and surprisingly identical to the design I arrived at. When will they be usable with Wasmtime?</p>\n<p>My major worry is with memory copying. <br>\nI think memory copying speed these days is negligible?<br>\nBut it could be a problem with size, if everything has to exist twice (in the extreme).<br>\nAnd I'm wondering if serialization time cost would be significant, from a fragmented memory to a serialized/linear/compacted message.<br>\nIs that a correct concern?</p>\n<p>IIRC, module instances also cannot shrink memory, so a single occurrence of large data could cause the memory to grow permanently.<br>\nIf A is a file reader, it would only grow to the size of the buffer, when streaming.<br>\nB would not read the stream.<br>\nC would read the stream into memory, then deallocate, but the memory would never shrink.</p>",
+        "id": 423679355,
+        "sender_full_name": "Erik S.",
+        "timestamp": 1709061509
+    },
+    {
+        "content": "<p>wasi streams are available today, theyre part of wasi 0.2. <a href=\"https://github.com/WebAssembly/WASI/blob/main/preview2/io/streams.wit\">https://github.com/WebAssembly/WASI/blob/main/preview2/io/streams.wit</a><br>\neverything in wasi 0.2 is implemented in both wasmtime, and in the jco project for node.js</p>",
+        "id": 423686968,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709064337
+    },
+    {
+        "content": "<p>maybe one way to think of components is not as slow function calls between parts of your program, but as much more efficient than microservices. its a pretty imperfect metaphor, but you can think of crossing component boundaries as a similar level of isolation to talking to a program you dont trust, but instead of sending your function parameters across the network to a application running in a distinct hypervisor or hardware or whatever, its all in the same component model implementation, n the same process on the same host machine</p>",
+        "id": 423687379,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709064501
+    },
+    {
+        "content": "<p>so, the costs to get the same sort of isolation benefits (plus not cracking open the distributed systems can of worms) are much lower than existing isolation techniques. it is more costly than just calling into library code in your own application, but youd have to trust that library code, and it has to be written in the same language as your application, and so on</p>",
+        "id": 423687526,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709064576
+    },
+    {
+        "content": "<p>as far as shrinking linear memory - there is a proposal for core wasm that will allow more granular control over linear memory, including shrinking. it hasnt been active lately, and may take a few years to arrive. since thats about how the core wasm vm works, it has a much larger set of stakeholders than the component model currently does. <a href=\"https://github.com/WebAssembly/memory-control\">https://github.com/WebAssembly/memory-control</a></p>\n<div class=\"message_embed\"><a class=\"message_embed_image\" href=\"https://github.com/WebAssembly/memory-control\" style=\"background-image: url(https\\:\\/\\/uploads\\.zulipusercontent\\.net\\/dc2da22c868a6032d5bba91fa5cd1742367dab44\\/68747470733a2f2f6f70656e67726170682e6769746875626173736574732e636f6d2f313632383030633039373264353033613834396435326363366335613739646538643235633635373230363762343030306261386230303237633162653036662f576562417373656d626c792f6d656d6f72792d636f6e74726f6c)\"></a><div class=\"data-container\"><div class=\"message_embed_title\"><a href=\"https://github.com/WebAssembly/memory-control\" title=\"GitHub - WebAssembly/memory-control: A proposal to introduce finer grained control of WebAssembly memory.\">GitHub - WebAssembly/memory-control: A proposal to introduce finer grained control of WebAssembly memory.</a></div><div class=\"message_embed_description\">A proposal to introduce finer grained control of WebAssembly memory. - WebAssembly/memory-control</div></div></div>",
+        "id": 423688099,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709064809
+    },
+    {
+        "content": "<p>wasi streams are designed to allow the implementation to exert backpressure, to control how much memory is allocated in the callee by the caller passing a large list&lt;u8&gt; to it.</p>",
+        "id": 423688261,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709064862
+    },
+    {
+        "content": "<p>And besides shrinking, most source languages use <code>malloc</code> or other memory allocators which can reuse memory. So when they deallocate, the memory becomes available for subsequent allocations.</p>",
+        "id": 423688318,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1709064886
+    },
+    {
+        "content": "<p>so, if the data is really streaming (doesnt need to all be present at one time to enable some transformation) an implementation has a lot of flexibility to control its footprint</p>",
+        "id": 423688320,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709064887
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253992\">Pat Hickey</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Shared.20memory.20and.20components/near/423687526\">said</a>:</p>\n<blockquote>\n<p>so, the costs to get the same sort of isolation benefits (plus not cracking open the distributed systems can of worms) are much lower than existing isolation techniques. it is more costly than just calling into library code in your own application, but youd have to trust that library code, and it has to be written in the same language as your application, and so on</p>\n</blockquote>\n<p>The module isolation that I'm looking for is unfortunately much smaller, i.e. isolating the 1k dependencies in a Nodejs project (or a Rust project for that matter). Or the light-weight processes in an Erlang system. Nanoprocesses.</p>\n<p>Which <em>is</em> possible without shared memory, but leads to memory redundancy, serialization cost, and runtime duplication. Which <em>is</em> acceptable, but it does look bad in benchmarks, which hurts adoption. That said, computational power and memory size is increasing rapidly (except for cloud users stuck on overpriced and antiquated hardware), and new users may be transitioning from slower languages like Python, and memory-heavy platforms like JVM. So the cost may even out with the gains.</p>\n<p>I'm not sure that the microservices metaphor works, or is a useful use case: a microservice is deployed independently, scales independently, horizontal scaling gives high availability, and credentials are configured independently.</p>",
+        "id": 423794835,
+        "sender_full_name": "Erik S.",
+        "timestamp": 1709118233
+    },
+    {
+        "content": "<p>agreed its a pretty imperfect metaphor. components may not be ideal for extremely fine-grained erlang-like units of isolation at this time. maybe with wasm-gc the cost model would change enough to make it viable, but at this MVP stage you're right that theres perhaps more copying than other designs would permit.</p>",
+        "id": 423865693,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709140598
+    },
+    {
+        "content": "<p>i guess the point of my metaphor is that the \"mutually distrusting\" aspect of component composition is pretty load-bearing. we think that aspect of components is pretty important and valuable, but understand that it may not be in every domain. in erlang, thats not part of the design consideration at all, so they could make some pretty different design choices than components did.</p>",
+        "id": 423866059,
+        "sender_full_name": "Pat Hickey",
+        "timestamp": 1709140731
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"254083\">Dan Gohman</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Shared.20memory.20and.20components/near/423674574\">said</a>:</p>\n<blockquote>\n<p>That way, the handle to the <code>directory-entry-stream</code> can be passed around as much as you want, with no copies.</p>\n</blockquote>\n<p>I think the drawbacks of using <code>resource</code> are: 1). Have to code many getters and setters method for a resource handle. 2). The cost of calling getters may equivalent to copies. When a data is copied to return area (stack), the data is usually hot in CPU cache, as it is on the stack, it takes serveral cycles,  but the cost is unclear when calling getters, as is need the assist from runtime. </p>\n<p>The uncertain thing is that how many times can happen of calling getters via a resource, if the times is low, and the data size a resource occupied is big,    possibly using <code>resource</code> has performance benefit.</p>",
+        "id": 423941090,
+        "sender_full_name": "Bryton",
+        "timestamp": 1709175024
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253992\">Pat Hickey</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Shared.20memory.20and.20components/near/423671801\">said</a>:</p>\n<blockquote>\n<p>ah yeah if you were to use wasi streams to express moving data between then then you can think of the wasi stream resources as present in some outer component (the host, or maybe implemented virtually by something else) and all of A, B, and C import from it</p>\n</blockquote>\n<p>Could you talk more about wasi streams?  I am sorry to say that I don't understand why wasi streams help to performance,  according to the wit definition <a href=\"https://github.com/WebAssembly/WASI/blob/main/preview2/io/streams.wit\">https://github.com/WebAssembly/WASI/blob/main/preview2/io/streams.wit</a>,  take an example of the definition of <code>read</code> in input-stream, </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">      </span><span class=\"n\">read</span>: <span class=\"nc\">func</span><span class=\"p\">(</span>\n<span class=\"w\">            </span><span class=\"sd\">/// The maximum number of bytes to read</span>\n<span class=\"w\">            </span><span class=\"n\">len</span>: <span class=\"kt\">u64</span>\n        <span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">result</span><span class=\"o\">&lt;</span><span class=\"n\">list</span><span class=\"o\">&lt;</span><span class=\"kt\">u8</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">stream</span><span class=\"o\">-</span><span class=\"n\">error</span><span class=\"o\">&gt;</span><span class=\"p\">;</span>\n</code></pre></div>\n<p>the return result contains a list&lt;u8&gt;,  which I believe it still incur copies from another component or host to current component. </p>\n<p>Please let me know if my understanding is incorrect, thank you very much.</p>",
+        "id": 423941512,
+        "sender_full_name": "Bryton",
+        "timestamp": 1709175414
+    },
+    {
+        "content": "<p>Also, would it be possible to add wasm module original writing language information inside a module file?  If so, the copy times between modules, component to/from component and component/module to/from runtime may be reduced. Let take an example of wasmtime::component::bindgen, it produces repr(c) data struct according to wit defintions (for example <code>record</code>),  I believe that current implementation has at least three times copies: 1). Host side data type(repr(Rust)) to wit type repr(c),  2). wit type repr(c) to linear memory (return area), 3). linear memory  to local variable (stack). </p>\n<p>But if at the component instantiating, wasmtime can get guest implementation lauguage information, if it is possible to avoid the memory copies incurred by types conversion?</p>",
+        "id": 423943616,
+        "sender_full_name": "Bryton",
+        "timestamp": 1709176976
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"253992\">Pat Hickey</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Shared.20memory.20and.20components/near/423688099\">said</a>:</p>\n<blockquote>\n<p>as far as shrinking linear memory - there is a proposal for core wasm that will allow more granular control over linear memory, including shrinking. it hasnt been active lately, and may take a few years to arrive. since thats about how the core wasm vm works, it has a much larger set of stakeholders than the component model currently does. <a href=\"https://github.com/WebAssembly/memory-control\">https://github.com/WebAssembly/memory-control</a></p>\n</blockquote>\n<p>FWIW, this proposal is somewhat stalled at the moment because there is no portable way to implement this proposal's semantics (or any proposed new semantics) such that it is actually faster than <code>memzero</code> on all platforms</p>",
+        "id": 424012988,
+        "sender_full_name": "fitzgen (he/him)",
+        "timestamp": 1709211356
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"253992\">@Pat Hickey</span>  Thanks for the clarification :)</p>",
+        "id": 424050704,
+        "sender_full_name": "Erik S.",
+        "timestamp": 1709222101
+    },
+    {
+        "content": "<p>It doesn't have to be faster on all platforms, just at least as fast as the alternative, right? And for reducing memory usage there is currently no alternative, not even a slow one.</p>",
+        "id": 424291572,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1709313135
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"264278\">bjorn3</span> <a href=\"#narrow/stream/217126-wasmtime/topic/Shared.20memory.20and.20components/near/424291572\">said</a>:</p>\n<blockquote>\n<p>It doesn't have to be faster on all platforms, just at least as fast as the alternative, right? And for reducing memory usage there is currently no alternative, not even a slow one.</p>\n</blockquote>\n<p>May I ask what's your mean of all platforms?  Is there any data for reference?  Appreciate it.</p>",
+        "id": 424351251,
+        "sender_full_name": "Bryton",
+        "timestamp": 1709342529
+    }
+]
